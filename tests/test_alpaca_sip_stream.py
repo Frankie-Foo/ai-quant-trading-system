@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 
 import httpx
@@ -11,10 +12,12 @@ from pydantic import SecretStr
 from execution.alpaca_sip_stream import (
     PlatformSipStream,
     SipBar,
+    SipEvent,
     SipProtocolError,
     SipQuote,
     parse_market_data_frame,
 )
+from scripts.run_paper_session import _poll_next_event
 
 
 def test_parse_sip_quote_and_bar_with_utc_provenance() -> None:
@@ -97,6 +100,73 @@ def test_platform_stream_uses_scoped_token_and_yields_validated_events() -> None
     assert asyncio.run(run()).symbol == "AAPL"
 
 
+def test_platform_stream_leases_symbols_before_consuming_from_returned_cursor() -> None:
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        assert request.headers["Authorization"] == "Bearer market-token"
+        if request.method == "POST":
+            payload = json.loads(request.content)
+            assert payload["symbols"] == ["MSFT", "AAPL"]
+            return httpx.Response(
+                200,
+                json={
+                    "api_version": "v1",
+                    "symbols": ["AAPL", "MSFT"],
+                    "expires_at_utc": "2026-07-21T20:05:00Z",
+                    "start_after_sequence": 41,
+                },
+            )
+        assert request.url.params["after"] == "41"
+        event = {
+            "event_type": "bar",
+            "symbol": "AAPL",
+            "ts_utc": "2026-07-21T14:36:00Z",
+            "open": 224.0,
+            "high": 225.1,
+            "low": 223.9,
+            "close": 225.0,
+            "volume": 1000,
+            "trade_count": 50,
+            "vwap": 224.7,
+            "feed": "sip",
+            "provenance": "cloud.alpaca.sip@test",
+        }
+        return httpx.Response(
+            200,
+            json={
+                "api_version": "v1",
+                "events": [{"sequence": 42, "event": event}],
+                "next_sequence": 42,
+            },
+        )
+
+    async def run() -> SipBar:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            stream = PlatformSipStream(
+                base_url="http://localhost:8765",
+                token=SecretStr("market-token"),
+                symbols=("MSFT", "aapl"),
+                client=client,
+            )
+            await stream.ensure_subscription(
+                replay_from_utc=datetime(2026, 7, 21, 13, 30, tzinfo=UTC),
+                expires_at_utc=datetime(2026, 7, 21, 20, 5, tzinfo=UTC),
+            )
+            events = stream.events()
+            event = await anext(events)
+            await events.aclose()
+            assert isinstance(event, SipBar)
+            return event
+
+    assert asyncio.run(run()).symbol == "AAPL"
+    assert calls == [
+        ("POST", "/v1/market-data/subscriptions"),
+        ("GET", "/v1/market-data/events"),
+    ]
+
+
 def test_platform_authentication_error_fails_closed() -> None:
     async def run() -> None:
         transport = httpx.MockTransport(lambda request: httpx.Response(401))
@@ -111,3 +181,35 @@ def test_platform_authentication_error_fails_closed() -> None:
                 await stream.probe()
 
     asyncio.run(run())
+
+
+def test_paper_poll_timeout_does_not_cancel_the_pending_market_event() -> None:
+    event = SipBar(
+        symbol="AAPL",
+        ts_utc=datetime(2026, 7, 21, 14, 36, tzinfo=UTC),
+        open=224.0,
+        high=225.1,
+        low=223.9,
+        close=225.0,
+        volume=1000,
+        trade_count=50,
+        vwap=224.7,
+        provenance="cloud.alpaca.sip@test",
+    )
+
+    async def run() -> SipBar:
+        async def delayed_events() -> AsyncGenerator[SipEvent, None]:
+            await asyncio.sleep(0.03)
+            yield event
+
+        events = delayed_events()
+        pending, first = await _poll_next_event(events, pending=None, timeout=0.005)
+        assert first is None
+        assert pending is not None
+        pending, second = await _poll_next_event(events, pending=pending, timeout=0.1)
+        assert pending is None
+        assert second is event
+        await events.aclose()
+        return second
+
+    assert asyncio.run(run()) is event

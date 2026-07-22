@@ -178,6 +178,7 @@ class PlatformSipStream:
         self.poll_seconds = poll_seconds
         self._client = client or httpx.AsyncClient(timeout=10)
         self._owns_client = client is None
+        self._after_sequence = 0
 
     async def _fetch(self, after: int, *, limit: int = 1000) -> tuple[int, tuple[SipEvent, ...]]:
         try:
@@ -222,8 +223,51 @@ class PlatformSipStream:
             quotes=self.symbols,
         )
 
+    async def ensure_subscription(
+        self,
+        *,
+        replay_from_utc: datetime,
+        expires_at_utc: datetime,
+    ) -> None:
+        if (
+            replay_from_utc.tzinfo is None
+            or replay_from_utc.utcoffset() != timedelta(0)
+            or expires_at_utc.tzinfo is None
+            or expires_at_utc.utcoffset() != timedelta(0)
+            or expires_at_utc <= replay_from_utc
+        ):
+            raise ValueError("subscription timestamps must define a valid UTC window")
+        try:
+            response = await self._client.post(
+                f"{self.base_url}/{PLATFORM_API_VERSION}/market-data/subscriptions",
+                json={
+                    "symbols": list(self.symbols),
+                    "replay_from_utc": replay_from_utc.isoformat(),
+                    "expires_at_utc": expires_at_utc.isoformat(),
+                },
+                headers=self._headers,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise SipProtocolError("cloud market-data subscription failed") from exc
+        if not isinstance(payload, dict) or payload.get("api_version") != PLATFORM_API_VERSION:
+            raise SipProtocolError("cloud market-data subscription contract is invalid")
+        symbols = payload.get("symbols")
+        start_after = payload.get("start_after_sequence")
+        if (
+            not isinstance(symbols, list)
+            or any(not isinstance(symbol, str) for symbol in symbols)
+            or set(symbols) != set(self.symbols)
+            or len(symbols) != len(self.symbols)
+            or not isinstance(start_after, int)
+            or start_after < 0
+        ):
+            raise SipProtocolError("cloud market-data subscription response is invalid")
+        self._after_sequence = start_after
+
     async def events(self) -> AsyncGenerator[SipEvent, None]:
-        after = 0
+        after = self._after_sequence
         try:
             while True:
                 after, events = await self._fetch(after)

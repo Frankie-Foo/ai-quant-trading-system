@@ -12,6 +12,11 @@ This repository may call these versioned endpoints with separate service tokens:
 GET /v1/features/{symbol}?asof=<UTC RFC3339>
 Authorization: Bearer <CLOUD_FEATURE_API_TOKEN>
 
+POST /v1/market-data/subscriptions
+Authorization: Bearer <CLOUD_MARKET_DATA_API_TOKEN>
+Content-Type: application/json
+{"symbols":["AAPL","MSFT"],"replay_from_utc":"<UTC>","expires_at_utc":"<UTC>"}
+
 GET /v1/market-data/events?after=<sequence>&symbols=AAPL,MSFT
 Authorization: Bearer <CLOUD_MARKET_DATA_API_TOKEN>
 
@@ -26,10 +31,17 @@ The response is a versioned point-in-time feature vector containing a definition
 version and provenance for every value. Unsupported versions, invalid timestamps,
 authorization failures, network failures, and schema drift all fail closed.
 
+Before realtime polling, the client creates a bounded symbol lease. The cloud service
+returns the event cursor immediately before the requested replay point, then its single
+SIP owner dynamically maintains the union of active leases. The dedicated token has
+`market-data:write`, which also grants normalized market-data reads; a read-only token
+cannot change subscriptions.
+
 The market API returns bounded normalized events and historical rows, not Alpaca
-credentials or a generic upstream proxy. The Paper API is restricted to Paper accounts
-and long-only contracts. Collaborator signal tokens cannot call any AI endpoint. Market,
-feature, Paper, and signal scopes cannot be exchanged.
+credentials or a generic upstream proxy. Every minute bar is retained; quote events are
+sampled to at most one per symbol per UTC second. The Paper API is restricted to Paper
+accounts and long-only contracts. Collaborator signal tokens cannot call any AI endpoint.
+Market, feature, Paper, and signal scopes cannot be exchanged.
 
 ## Fast-loop safety
 

@@ -118,3 +118,18 @@ def test_windows_observation_tasks_cover_all_daily_phases_without_order_flags() 
     assert "schedule.postmarket" in postmarket
     assert "BROKER_WRITE_ENABLED" not in installer + premarket + paper + postmarket
     assert "TRADING_KILL_SWITCH" not in installer + premarket + paper + postmarket
+
+
+def test_windows_supervisor_is_a_current_user_startup_fallback() -> None:
+    installer = (ROOT / "scripts/install_local_observation_supervisor.ps1").read_text(
+        encoding="utf-8"
+    )
+    runner = (ROOT / "scripts/run_local_observation_supervisor.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Local Observation Supervisor.lnk" in installer
+    assert "Disable-ScheduledTask" in installer
+    assert "schedule.supervisor" in runner
+    assert "BROKER_WRITE_ENABLED" not in installer + runner
+    assert "TRADING_KILL_SWITCH" not in installer + runner

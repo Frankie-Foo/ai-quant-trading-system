@@ -52,6 +52,7 @@ class MarketDataConfig(FrozenModel):
     max_quote_age_seconds: float = Field(gt=0, le=120)
     paper_start_lead_minutes: int = Field(ge=0, le=60)
     postmarket_data_grace_minutes: int = Field(ge=0, le=60)
+    sip_event_stale_seconds: float = Field(gt=0, le=300)
 
 
 class GuardrailConfig(FrozenModel):

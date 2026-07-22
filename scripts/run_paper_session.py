@@ -5,15 +5,16 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from contextlib import aclosing
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from data_plane.calendar import build_xnys_schedule
 from execution.alpaca_paper import CloudPaperBroker
-from execution.alpaca_sip_stream import PlatformSipStream
+from execution.alpaca_sip_stream import PlatformSipStream, SipEvent
 from execution.engine import PaperExecutionEngine
 from execution.ledger import OrderLedger
 from execution.live_session import LiveSessionProcessor
@@ -31,6 +32,36 @@ from schedule.runtime import JsonEventLogger, ProcessLock
 ROOT = Path(__file__).resolve().parents[1]
 NEW_YORK = ZoneInfo("America/New_York")
 TIME_EXIT_POLL_SECONDS = 5.0
+
+
+async def _read_next_event(events: AsyncIterator[SipEvent]) -> SipEvent:
+    return await events.__anext__()
+
+
+async def _poll_next_event(
+    events: AsyncIterator[SipEvent],
+    *,
+    pending: asyncio.Task[SipEvent] | None,
+    timeout: float,
+) -> tuple[asyncio.Task[SipEvent] | None, SipEvent | None]:
+    """Poll without cancelling an in-flight async-generator read on timeout."""
+    if timeout <= 0:
+        raise ValueError("event poll timeout must be positive")
+    task = pending or asyncio.create_task(_read_next_event(events))
+    done, _ = await asyncio.wait({task}, timeout=timeout)
+    if not done:
+        return task, None
+    return None, task.result()
+
+
+async def _cancel_pending_event(task: asyncio.Task[SipEvent] | None) -> None:
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, StopAsyncIteration):
+        pass
 
 
 def _parse_date(value: str) -> date:
@@ -187,6 +218,10 @@ async def _run(args: argparse.Namespace, logger: JsonEventLogger) -> None:
         token=settings.cloud_market_data_api_token,
         symbols=selection.symbols,
     )
+    await stream.ensure_subscription(
+        replay_from_utc=market_open,
+        expires_at_utc=market_close + timedelta(minutes=5),
+    )
     started = asyncio.get_running_loop().time()
     session_remaining = max(0.0, (market_close - datetime.now(UTC)).total_seconds())
     runtime_limit = (
@@ -196,6 +231,7 @@ async def _run(args: argparse.Namespace, logger: JsonEventLogger) -> None:
     )
     event_count = 0
     order_count = 0
+    last_event_monotonic: float | None = None
     logger.emit(
         "paper_session_starting",
         trade_date=trade_date.isoformat(),
@@ -209,56 +245,79 @@ async def _run(args: argparse.Namespace, logger: JsonEventLogger) -> None:
         async with aclosing(stream.events()) as events:
             loop = asyncio.get_running_loop()
             next_exit_poll = loop.time()
-            while True:
-                now_monotonic = loop.time()
-                if now_monotonic >= next_exit_poll:
-                    _emit_time_exit_results(
-                        time_exits,
-                        logger,
-                        now_utc=datetime.now(UTC),
+            pending_event: asyncio.Task[SipEvent] | None = None
+            try:
+                while True:
+                    now_monotonic = loop.time()
+                    if now_monotonic >= next_exit_poll:
+                        _emit_time_exit_results(
+                            time_exits,
+                            logger,
+                            now_utc=datetime.now(UTC),
+                        )
+                        next_exit_poll = now_monotonic + TIME_EXIT_POLL_SECONDS
+                    remaining = runtime_limit - (loop.time() - started)
+                    if remaining <= 0:
+                        break
+                    until_exit_poll = max(0.05, next_exit_poll - loop.time())
+                    try:
+                        pending_event, event = await _poll_next_event(
+                            events,
+                            pending=pending_event,
+                            timeout=min(until_exit_poll, remaining),
+                        )
+                    except StopAsyncIteration:
+                        if args.max_seconds <= 0:
+                            raise RuntimeError(
+                                "SIP stream ended before the market close"
+                            ) from None
+                        break
+                    if event is None:
+                        if datetime.now(UTC) >= market_open:
+                            last_seen = last_event_monotonic or started
+                            if (
+                                loop.time() - last_seen
+                                > cfg.market_data.sip_event_stale_seconds
+                            ):
+                                raise RuntimeError(
+                                    "cloud SIP collector produced no fresh market event"
+                                ) from None
+                        continue
+                    event_count += 1
+                    last_event_monotonic = loop.time()
+                    result = processor.process(event, received_at_utc=datetime.now(UTC))
+                    if result is None:
+                        continue
+                    submitted = result.lifecycle.state in {
+                        OrderState.SUBMITTED,
+                        OrderState.PARTIALLY_FILLED,
+                        OrderState.FILLED,
+                    }
+                    order_count += int(submitted)
+                    logger.emit(
+                        "trade_plan_decided",
+                        plan_id=result.lifecycle.plan_id,
+                        symbol=result.lifecycle.symbol,
+                        state=result.lifecycle.state.value,
+                        approved=result.verdict.approved,
+                        failure_code=(
+                            None
+                            if result.verdict.failure_code is None
+                            else result.verdict.failure_code.value
+                        ),
+                        dry_run=result.dry_run,
+                        replayed=result.replayed,
                     )
-                    next_exit_poll = now_monotonic + TIME_EXIT_POLL_SECONDS
-                remaining = runtime_limit - (loop.time() - started)
-                if remaining <= 0:
-                    break
-                until_exit_poll = max(0.05, next_exit_poll - loop.time())
-                try:
-                    event = await asyncio.wait_for(
-                        anext(events), timeout=min(until_exit_poll, remaining)
-                    )
-                except TimeoutError:
-                    continue
-                except StopAsyncIteration:
-                    if args.max_seconds <= 0:
-                        raise RuntimeError(
-                            "SIP stream ended before the market close"
-                        ) from None
-                    break
-                event_count += 1
-                result = processor.process(event, received_at_utc=datetime.now(UTC))
-                if result is None:
-                    continue
-                submitted = result.lifecycle.state in {
-                    OrderState.SUBMITTED,
-                    OrderState.PARTIALLY_FILLED,
-                    OrderState.FILLED,
-                }
-                order_count += int(submitted)
-                logger.emit(
-                    "trade_plan_decided",
-                    plan_id=result.lifecycle.plan_id,
-                    symbol=result.lifecycle.symbol,
-                    state=result.lifecycle.state.value,
-                    approved=result.verdict.approved,
-                    failure_code=(
-                        None
-                        if result.verdict.failure_code is None
-                        else result.verdict.failure_code.value
-                    ),
-                    dry_run=result.dry_run,
-                    replayed=result.replayed,
-                )
+            finally:
+                await _cancel_pending_event(pending_event)
     except BaseException as exc:
+        logger.emit(
+            "paper_session_failed",
+            level="error",
+            error_type=type(exc).__name__,
+            event_count=event_count,
+            orders_submitted=order_count,
+        )
         session_ledger.finish(
             trade_date=trade_date,
             ended_at_utc=datetime.now(UTC),

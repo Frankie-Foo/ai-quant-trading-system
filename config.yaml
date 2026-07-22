@@ -23,6 +23,7 @@ market_data:
   max_quote_age_seconds: 90
   paper_start_lead_minutes: 10
   postmarket_data_grace_minutes: 20
+  sip_event_stale_seconds: 45
 guardrails:
   daily_loss_limit: 0.015
   lock_time_beijing: "08:00"

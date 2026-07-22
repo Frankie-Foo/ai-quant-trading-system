@@ -440,3 +440,26 @@ Alpaca market/Paper endpoints; local observation remains write-disabled.
   and quotes received for AAPL, and zero orders submitted.
 - Repository acceptance: 194 tests passed, Ruff clean, and strict mypy success across
   168 source files.
+
+## M16 resilient lease-driven realtime observation - 2026-07-22
+
+Status: fixed and running locally; the continuous session is observation-only,
+`research_only`, write-disabled, and protected by the active kill switch.
+
+- Added the cloud symbol lease before event consumption and initialized the cursor from
+  the requested market-open replay point. Normalized symbol order no longer causes a
+  false contract failure.
+- Fixed the asynchronous polling defect that cancelled the pending event read every five
+  seconds. Time-exit polling and freshness checks now reuse one pending read, while a real
+  collector outage still fails closed after the configured stale threshold.
+- Added a current-user observation supervisor because this Windows host terminates all
+  three Task Scheduler actions with `0xC000013A` before their scripts execute. The
+  supervisor launches premarket, Paper, and postmarket lanes without overlap and is
+  installed in Startup; the broken legacy tasks are disabled.
+- Live acceptance consumed 1,067 events in a bounded run, then kept the continuous Paper
+  session alive across multiple polling intervals. Cloud and local stores both received
+  minute bars, local quote timestamps continued advancing, and zero orders were submitted.
+- A point-in-time SIP replay at 2026-07-22 10:12 ET recorded four research-only triggers:
+  JTAI, SMCI, XE, and OKLO. Missed historical entries were not chased or submitted.
+- Repository acceptance: 199 tests passed, Ruff clean, and strict mypy success across
+  122 source files.
