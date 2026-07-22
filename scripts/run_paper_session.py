@@ -12,8 +12,8 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from data_plane.calendar import build_xnys_schedule
-from execution.alpaca_paper import AlpacaPaperBroker
-from execution.alpaca_sip_stream import AlpacaSipStream
+from execution.alpaca_paper import CloudPaperBroker
+from execution.alpaca_sip_stream import PlatformSipStream
 from execution.engine import PaperExecutionEngine
 from execution.ledger import OrderLedger
 from execution.live_session import LiveSessionProcessor
@@ -132,10 +132,9 @@ async def _run(args: argparse.Namespace, logger: JsonEventLogger) -> None:
     settings = ExecutionSettings()  # type: ignore[call-arg]
     evidence = MaturityEvidence.model_validate(_read_json(args.readiness_evidence))
     readiness = assess_product_readiness(evidence)
-    broker = AlpacaPaperBroker(
-        api_key=settings.alpaca_api_key_id.get_secret_value(),
-        api_secret=settings.alpaca_api_secret_key.get_secret_value(),
-        base_url=settings.alpaca_trading_base_url,
+    broker = CloudPaperBroker(
+        base_url=settings.cloud_platform_base_url,
+        token=settings.cloud_paper_api_token,
         writes_enabled=settings.broker_write_enabled,
     )
     order_ledger = OrderLedger(args.order_db)
@@ -183,9 +182,9 @@ async def _run(args: argparse.Namespace, logger: JsonEventLogger) -> None:
         config=cfg,
         kill_switch_active=settings.trading_kill_switch,
     )
-    stream = AlpacaSipStream(
-        api_key=settings.alpaca_api_key_id.get_secret_value(),
-        api_secret=settings.alpaca_api_secret_key.get_secret_value(),
+    stream = PlatformSipStream(
+        base_url=settings.cloud_platform_base_url,
+        token=settings.cloud_market_data_api_token,
         symbols=selection.symbols,
     )
     started = asyncio.get_running_loop().time()

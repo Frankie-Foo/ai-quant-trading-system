@@ -1,4 +1,4 @@
-"""Centralized Alpaca SIP WebSocket protocol and event contracts."""
+"""Keyless realtime event client for the isolated cloud platform API."""
 
 from __future__ import annotations
 
@@ -7,11 +7,12 @@ import json
 import re
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta
-from typing import Protocol, cast
+from typing import Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+import httpx
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-SIP_STREAM_URL = "wss://stream.data.alpaca.markets/v2/sip"
+PLATFORM_API_VERSION = "v1"
 SYMBOL_PATTERN = re.compile(r"^[A-Z][A-Z0-9.-]*$")
 
 
@@ -151,100 +152,86 @@ def parse_market_data_frame(frame: str | bytes) -> tuple[SipEvent, ...]:
     return tuple(events)
 
 
-def _contains(messages: list[object], *, event_type: str, message: str | None = None) -> bool:
-    return any(
-        isinstance(item, dict)
-        and item.get("T") == event_type
-        and (message is None or item.get("msg") == message)
-        for item in messages
-    )
-
-
-class AlpacaSipStream:
-    def __init__(self, *, api_key: str, api_secret: str, symbols: tuple[str, ...]):
-        if not api_key.strip() or not api_secret.strip():
-            raise ValueError("Alpaca credentials are required")
+class PlatformSipStream:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        token: SecretStr,
+        symbols: tuple[str, ...],
+        poll_seconds: float = 0.25,
+        client: httpx.AsyncClient | None = None,
+    ):
+        normalized_url = base_url.rstrip("/")
+        if not normalized_url.startswith(
+            ("https://", "http://127.0.0.1", "http://localhost")
+        ):
+            raise ValueError("cloud platform API must use HTTPS outside localhost")
+        if not token.get_secret_value().strip() or poll_seconds <= 0:
+            raise ValueError("market-data API token and positive poll interval are required")
         normalized = tuple(dict.fromkeys(symbol.strip().upper() for symbol in symbols))
         if not normalized or any(not SYMBOL_PATTERN.fullmatch(symbol) for symbol in normalized):
             raise ValueError("at least one valid stock symbol is required")
-        self.api_key = api_key.strip()
-        self.api_secret = api_secret.strip()
+        self.base_url = normalized_url
+        self._headers = {"Authorization": f"Bearer {token.get_secret_value()}"}
         self.symbols = normalized
-        self.url = SIP_STREAM_URL
+        self.poll_seconds = poll_seconds
+        self._client = client or httpx.AsyncClient(timeout=10)
+        self._owns_client = client is None
 
-    async def authenticate_and_subscribe(self, socket: WebSocketLike) -> SipSubscription:
-        welcome = _decode_frame(await socket.recv())
-        if not _contains(welcome, event_type="success", message="connected"):
-            raise SipProtocolError("SIP stream did not acknowledge connection")
-        await socket.send(
-            json.dumps(
-                {"action": "auth", "key": self.api_key, "secret": self.api_secret},
-                separators=(",", ":"),
+    async def _fetch(self, after: int, *, limit: int = 1000) -> tuple[int, tuple[SipEvent, ...]]:
+        try:
+            response = await self._client.get(
+                f"{self.base_url}/{PLATFORM_API_VERSION}/market-data/events",
+                params={
+                    "after": after,
+                    "symbols": ",".join(self.symbols),
+                    "limit": limit,
+                },
+                headers=self._headers,
             )
-        )
-        authentication = _decode_frame(await socket.recv())
-        if not _contains(authentication, event_type="success", message="authenticated"):
-            raise SipProtocolError("SIP authentication or entitlement failed")
-        await socket.send(
-            json.dumps(
-                {"action": "subscribe", "bars": list(self.symbols), "quotes": list(self.symbols)},
-                separators=(",", ":"),
-            )
-        )
-        acknowledgement = _decode_frame(await socket.recv())
-        subscription = next(
-            (
-                item
-                for item in acknowledgement
-                if isinstance(item, dict) and item.get("T") == "subscription"
-            ),
-            None,
-        )
-        if not isinstance(subscription, dict):
-            raise SipProtocolError("SIP stream did not acknowledge subscription")
-        bars = tuple(str(item) for item in subscription.get("bars", []))
-        quotes = tuple(str(item) for item in subscription.get("quotes", []))
-        if not set(self.symbols).issubset(bars) or not set(self.symbols).issubset(quotes):
-            raise SipProtocolError("SIP stream returned an incomplete subscription")
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise SipProtocolError("cloud market-data API request failed") from exc
+        if not isinstance(payload, dict) or payload.get("api_version") != PLATFORM_API_VERSION:
+            raise SipProtocolError("cloud market-data API contract is invalid")
+        raw_events = payload.get("events")
+        next_sequence = payload.get("next_sequence")
+        if not isinstance(raw_events, list) or not isinstance(next_sequence, int):
+            raise SipProtocolError("cloud market-data API event page is invalid")
+        events: list[SipEvent] = []
+        for envelope in raw_events:
+            if not isinstance(envelope, dict) or not isinstance(envelope.get("event"), dict):
+                raise SipProtocolError("cloud market-data event is invalid")
+            raw_event = envelope["event"]
+            model = SipBar if raw_event.get("event_type") == "bar" else SipQuote
+            try:
+                events.append(model.model_validate(raw_event))
+            except Exception as exc:
+                raise SipProtocolError("cloud market-data event failed validation") from exc
+        return next_sequence, tuple(events)
+
+    async def probe(self, *, timeout_seconds: float = 20.0) -> SipSubscription:
+        async with asyncio.timeout(timeout_seconds):
+            await self._fetch(0, limit=1)
         return SipSubscription(
             connected=True,
             authenticated=True,
-            bars=bars,
-            quotes=quotes,
+            bars=self.symbols,
+            quotes=self.symbols,
         )
 
-    async def probe(self, *, timeout_seconds: float = 20.0) -> SipSubscription:
-        from websockets.asyncio.client import connect
-
-        async with asyncio.timeout(timeout_seconds):
-            async with connect(
-                self.url,
-                open_timeout=min(timeout_seconds, 10.0),
-                ping_interval=20.0,
-                ping_timeout=20.0,
-                close_timeout=5.0,
-                max_size=1_048_576,
-                max_queue=16,
-            ) as socket:
-                return await self.authenticate_and_subscribe(cast(WebSocketLike, socket))
-
     async def events(self) -> AsyncGenerator[SipEvent, None]:
-        from websockets.asyncio.client import connect
-        from websockets.exceptions import ConnectionClosed
-
-        async for socket in connect(
-            self.url,
-            open_timeout=10.0,
-            ping_interval=20.0,
-            ping_timeout=20.0,
-            close_timeout=5.0,
-            max_size=1_048_576,
-            max_queue=16,
-        ):
-            await self.authenticate_and_subscribe(cast(WebSocketLike, socket))
-            try:
-                async for frame in socket:
-                    for event in parse_market_data_frame(frame):
-                        yield event
-            except ConnectionClosed:
-                continue
+        after = 0
+        try:
+            while True:
+                after, events = await self._fetch(after)
+                if not events:
+                    await asyncio.sleep(self.poll_seconds)
+                    continue
+                for event in events:
+                    yield event
+        finally:
+            if self._owns_client:
+                await self._client.aclose()

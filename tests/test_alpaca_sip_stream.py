@@ -4,27 +4,17 @@ import asyncio
 import json
 from datetime import UTC, datetime
 
+import httpx
 import pytest
+from pydantic import SecretStr
 
 from execution.alpaca_sip_stream import (
-    AlpacaSipStream,
+    PlatformSipStream,
     SipBar,
     SipProtocolError,
     SipQuote,
     parse_market_data_frame,
 )
-
-
-class FakeSocket:
-    def __init__(self, incoming: list[str]):
-        self.incoming = incoming
-        self.sent: list[dict[str, object]] = []
-
-    async def recv(self) -> str:
-        return self.incoming.pop(0)
-
-    async def send(self, message: str) -> None:
-        self.sent.append(json.loads(message))
 
 
 def test_parse_sip_quote_and_bar_with_utc_provenance() -> None:
@@ -55,42 +45,69 @@ def test_parse_sip_quote_and_bar_with_utc_provenance() -> None:
             ]
         )
     )
-
     assert isinstance(events[0], SipQuote)
     assert isinstance(events[1], SipBar)
     assert events[0].ts_utc == datetime(2026, 7, 21, 14, 37, 1, 123456, tzinfo=UTC)
-    assert events[1].provenance.startswith("alpaca.sip.websocket")
 
 
-def test_authenticate_and_subscribe_uses_sip_and_requested_symbols() -> None:
-    socket = FakeSocket(
-        [
-            '[{"T":"success","msg":"connected"}]',
-            '[{"T":"success","msg":"authenticated"}]',
-            '[{"T":"subscription","trades":[],"quotes":["AAPL"],"bars":["AAPL"]}]',
-        ]
-    )
-    stream = AlpacaSipStream(api_key="key", api_secret="secret", symbols=("aapl",))
+def test_platform_stream_uses_scoped_token_and_yields_validated_events() -> None:
+    calls = 0
 
-    result = asyncio.run(stream.authenticate_and_subscribe(socket))
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert request.headers["Authorization"] == "Bearer market-token"
+        event = {
+            "event_type": "bar",
+            "symbol": "AAPL",
+            "ts_utc": "2026-07-21T14:36:00Z",
+            "open": 224.0,
+            "high": 225.1,
+            "low": 223.9,
+            "close": 225.0,
+            "volume": 1000,
+            "trade_count": 50,
+            "vwap": 224.7,
+            "feed": "sip",
+            "provenance": "cloud.alpaca.sip@test",
+        }
+        return httpx.Response(
+            200,
+            json={
+                "api_version": "v1",
+                "events": [{"sequence": 1, "event": event}] if calls == 1 else [],
+                "next_sequence": 1,
+            },
+        )
 
-    assert stream.url == "wss://stream.data.alpaca.markets/v2/sip"
-    assert socket.sent[0] == {"action": "auth", "key": "key", "secret": "secret"}
-    assert socket.sent[1] == {"action": "subscribe", "bars": ["AAPL"], "quotes": ["AAPL"]}
-    assert result.authenticated is True
-    assert result.bars == ("AAPL",)
-    assert result.quotes == ("AAPL",)
+    async def run() -> SipBar:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            stream = PlatformSipStream(
+                base_url="http://localhost:8765",
+                token=SecretStr("market-token"),
+                symbols=("aapl",),
+                client=client,
+            )
+            events = stream.events()
+            event = await anext(events)
+            await events.aclose()
+            assert isinstance(event, SipBar)
+            return event
+
+    assert asyncio.run(run()).symbol == "AAPL"
 
 
-def test_authentication_error_fails_closed_without_subscribing() -> None:
-    socket = FakeSocket(
-        [
-            '[{"T":"success","msg":"connected"}]',
-            '[{"T":"error","code":402,"msg":"auth failed"}]',
-        ]
-    )
-    stream = AlpacaSipStream(api_key="key", api_secret="secret", symbols=("AAPL",))
+def test_platform_authentication_error_fails_closed() -> None:
+    async def run() -> None:
+        transport = httpx.MockTransport(lambda request: httpx.Response(401))
+        async with httpx.AsyncClient(transport=transport) as client:
+            stream = PlatformSipStream(
+                base_url="http://127.0.0.1:8765",
+                token=SecretStr("bad-token"),
+                symbols=("AAPL",),
+                client=client,
+            )
+            with pytest.raises(SipProtocolError):
+                await stream.probe()
 
-    with pytest.raises(SipProtocolError, match="authentication"):
-        asyncio.run(stream.authenticate_and_subscribe(socket))
-    assert len(socket.sent) == 1
+    asyncio.run(run())

@@ -41,8 +41,8 @@ def test_health_rejects_a_corrupt_existing_ledger(tmp_path: Path) -> None:
 def test_health_reports_missing_credential_names_without_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("ALPACA_API_KEY_ID", raising=False)
-    monkeypatch.delenv("ALPACA_API_SECRET_KEY", raising=False)
+    monkeypatch.delenv("CLOUD_PLATFORM_BASE_URL", raising=False)
+    monkeypatch.delenv("CLOUD_MARKET_DATA_API_TOKEN", raising=False)
 
     result = evaluate_health(
         data_root=tmp_path / "data",
@@ -53,8 +53,8 @@ def test_health_reports_missing_credential_names_without_values(
 
     assert result["status"] == "not_ready"
     rendered = str(result)
-    assert "ALPACA_API_KEY_ID" in rendered
-    assert "ALPACA_API_SECRET_KEY" in rendered
+    assert "CLOUD_PLATFORM_BASE_URL" in rendered
+    assert "CLOUD_MARKET_DATA_API_TOKEN" in rendered
 
 
 def test_health_rejects_an_exhausted_latest_job(tmp_path: Path) -> None:

@@ -1,14 +1,13 @@
-"""Minimal Alpaca adapter pinned permanently to the Paper Trading endpoint."""
+"""Keyless Paper Broker client for the isolated cloud platform API."""
 
 from __future__ import annotations
 
 from typing import Literal
-from urllib.parse import urlsplit
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-PAPER_BASE_URL = "https://paper-api.alpaca.markets"
+PLATFORM_API_VERSION = "v1"
 
 
 class BrokerError(RuntimeError):
@@ -119,32 +118,23 @@ class PaperCloseRequest(BaseModel):
         }
 
 
-class AlpacaPaperBroker:
+class CloudPaperBroker:
     def __init__(
         self,
         *,
-        api_key: str,
-        api_secret: str,
-        base_url: str = PAPER_BASE_URL,
+        base_url: str,
+        token: SecretStr,
         writes_enabled: bool = False,
         client: httpx.Client | None = None,
     ):
-        if not api_key.strip() or not api_secret.strip():
-            raise ValueError("Alpaca credentials are required")
         normalized = base_url.rstrip("/")
-        parts = urlsplit(normalized)
-        if (
-            parts.scheme != "https"
-            or parts.netloc != "paper-api.alpaca.markets"
-            or parts.path not in ("", "/")
-        ):
-            raise ValueError("broker adapter accepts only the Alpaca paper endpoint")
-        self.base_url = PAPER_BASE_URL
+        if not normalized.startswith(("https://", "http://127.0.0.1", "http://localhost")):
+            raise ValueError("cloud platform API must use HTTPS outside localhost")
+        if not token.get_secret_value().strip():
+            raise ValueError("cloud Paper API token is required")
+        self.base_url = normalized
         self.writes_enabled = writes_enabled
-        self._headers = {
-            "APCA-API-KEY-ID": api_key.strip(),
-            "APCA-API-SECRET-KEY": api_secret.strip(),
-        }
+        self._headers = {"Authorization": f"Bearer {token.get_secret_value()}"}
         self._client = client or httpx.Client(timeout=20.0)
         self._owns_client = client is None
 
@@ -153,102 +143,82 @@ class AlpacaPaperBroker:
             self._client.close()
 
     def get_account(self) -> PaperAccount:
-        response = self._request("GET", "/v2/account")
-        return PaperAccount.model_validate(response.json())
+        payload = self._request("GET", f"/{PLATFORM_API_VERSION}/paper/account")
+        return PaperAccount.model_validate(payload.get("account"))
 
     def get_order_by_client_id(self, client_order_id: str) -> BrokerOrder | None:
-        response = self._client.get(
-            f"{self.base_url}/v2/orders:by_client_order_id",
+        payload = self._request(
+            "GET",
+            f"/{PLATFORM_API_VERSION}/paper/orders/by-client-id",
             params={"client_order_id": client_order_id},
-            headers=self._headers,
         )
-        if response.status_code == 404:
-            return None
-        self._raise_for_status(response)
-        return BrokerOrder.model_validate(response.json())
+        order = payload.get("order")
+        return None if order is None else BrokerOrder.model_validate(order)
 
     def list_positions(self) -> tuple[PaperPosition, ...]:
-        response = self._request("GET", "/v2/positions")
-        payload = response.json()
-        if not isinstance(payload, list):
+        payload = self._request("GET", f"/{PLATFORM_API_VERSION}/paper/positions")
+        positions = payload.get("positions")
+        if not isinstance(positions, list):
             raise BrokerError("broker positions response was not a list")
-        return tuple(PaperPosition.model_validate(item) for item in payload)
+        return tuple(PaperPosition.model_validate(item) for item in positions)
 
     def list_open_orders(self) -> tuple[BrokerOrder, ...]:
-        response = self._client.get(
-            f"{self.base_url}/v2/orders",
-            params={"status": "open", "nested": "true", "limit": 500},
-            headers=self._headers,
-        )
-        self._raise_for_status(response)
-        payload = response.json()
-        if not isinstance(payload, list):
+        payload = self._request("GET", f"/{PLATFORM_API_VERSION}/paper/orders/open")
+        orders = payload.get("orders")
+        if not isinstance(orders, list):
             raise BrokerError("broker open-orders response was not a list")
-        return tuple(BrokerOrder.model_validate(item) for item in payload)
+        return tuple(BrokerOrder.model_validate(item) for item in orders)
 
     def cancel_order(self, order_id: str) -> bool:
         if not self.writes_enabled:
             raise BrokerWritesDisabledError("paper broker writes are disabled")
-        response = self._client.delete(
-            f"{self.base_url}/v2/orders/{order_id}",
-            headers=self._headers,
+        payload = self._request(
+            "DELETE", f"/{PLATFORM_API_VERSION}/paper/orders/cancel/{order_id}"
         )
-        if response.status_code == 404:
-            return False
-        self._raise_for_status(response)
-        return True
+        return payload.get("cancelled") is True
 
     def submit_order_idempotent(self, request: PaperOrderRequest) -> BrokerOrder:
         if not self.writes_enabled:
             raise BrokerWritesDisabledError("paper broker writes are disabled")
-        existing = self.get_order_by_client_id(request.client_order_id)
-        if existing is not None:
-            return existing
-        response = self._client.post(
-            f"{self.base_url}/v2/orders",
-            headers=self._headers,
-            json=request.broker_payload(),
+        payload = self._request(
+            "POST",
+            f"/{PLATFORM_API_VERSION}/paper/orders",
+            json_body={"kind": "entry", "request": request.model_dump(mode="json")},
         )
-        if response.status_code == 422:
-            existing = self.get_order_by_client_id(request.client_order_id)
-            if existing is not None:
-                return existing
-        self._raise_for_status(response)
-        return BrokerOrder.model_validate(response.json())
+        return BrokerOrder.model_validate(payload.get("order"))
 
     def submit_close_order_idempotent(
         self, request: PaperCloseRequest
     ) -> BrokerOrder:
         if not self.writes_enabled:
             raise BrokerWritesDisabledError("paper broker writes are disabled")
-        existing = self.get_order_by_client_id(request.client_order_id)
-        if existing is not None:
-            return existing
-        response = self._client.post(
-            f"{self.base_url}/v2/orders",
-            headers=self._headers,
-            json=request.broker_payload(),
+        payload = self._request(
+            "POST",
+            f"/{PLATFORM_API_VERSION}/paper/orders",
+            json_body={"kind": "close", "request": request.model_dump(mode="json")},
         )
-        if response.status_code == 422:
-            existing = self.get_order_by_client_id(request.client_order_id)
-            if existing is not None:
-                return existing
-        self._raise_for_status(response)
-        return BrokerOrder.model_validate(response.json())
+        return BrokerOrder.model_validate(payload.get("order"))
 
-    def _request(self, method: str, path: str) -> httpx.Response:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        json_body: dict[str, object] | None = None,
+    ) -> dict[str, object]:
         try:
             response = self._client.request(
                 method,
                 f"{self.base_url}{path}",
                 headers=self._headers,
+                params=params,
+                json=json_body,
             )
-        except (httpx.HTTPError, OSError) as exc:
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, OSError, ValueError) as exc:
             raise BrokerError(f"broker request failed: {type(exc).__name__}") from exc
-        self._raise_for_status(response)
-        return response
-
-    @staticmethod
-    def _raise_for_status(response: httpx.Response) -> None:
-        if response.is_error:
-            raise BrokerError(f"broker request failed: HTTP {response.status_code}")
+        if not isinstance(payload, dict) or payload.get("api_version") != PLATFORM_API_VERSION:
+            raise BrokerError("broker API response contract is invalid")
+        return payload

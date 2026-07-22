@@ -5,13 +5,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
+import httpx
 import polars as pl
 
-from data_plane.http import DownloadError, QueryValue, get_json
+from data_plane.http import DownloadError
 from data_plane.quality import canonicalize_bars, nullable_float
 
-BASE_URL = "https://data.alpaca.markets/v2/stocks/bars"
-QUOTES_URL = "https://data.alpaca.markets/v2/stocks/quotes"
+PLATFORM_API_VERSION = "v1"
 AlpacaStockFeed = Literal["sip", "delayed_sip"]
 
 
@@ -27,7 +27,7 @@ class AlpacaStockDataPolicy:
 def stock_data_policy_from_env() -> AlpacaStockDataPolicy:
     """Resolve Alpaca feed semantics without silently inventing a delay."""
 
-    raw = os.getenv("ALPACA_MARKET_DATA_FEED", "sip").strip().lower()
+    raw = os.getenv("CLOUD_MARKET_DATA_FEED", "sip").strip().lower()
     if raw == "sip":
         return AlpacaStockDataPolicy(feed="sip", delay_minutes=0, is_realtime=True)
     if raw == "delayed_sip":
@@ -37,20 +37,57 @@ def stock_data_policy_from_env() -> AlpacaStockDataPolicy:
             is_realtime=False,
         )
     raise RuntimeError(
-        "ALPACA_MARKET_DATA_FEED must be 'sip' or 'delayed_sip'; "
+        "CLOUD_MARKET_DATA_FEED must be 'sip' or 'delayed_sip'; "
         "IEX is not accepted for full-market decisions"
     )
 
 
-def credentials_from_env() -> tuple[str, str]:
-    key = os.getenv("ALPACA_API_KEY_ID", "").strip()
-    secret = os.getenv("ALPACA_API_SECRET_KEY", "").strip()
-    if not key or not secret:
+def platform_access_from_env() -> tuple[str, str]:
+    base_url = os.getenv("CLOUD_PLATFORM_BASE_URL", "").strip().rstrip("/")
+    token = os.getenv("CLOUD_MARKET_DATA_API_TOKEN", "").strip()
+    if not base_url or not token:
         raise RuntimeError(
-            "missing ALPACA_API_KEY_ID/ALPACA_API_SECRET_KEY; create a free Alpaca "
-            "account and put both values in the local .env file"
+            "missing CLOUD_PLATFORM_BASE_URL/CLOUD_MARKET_DATA_API_TOKEN"
         )
-    return key, secret
+    if not base_url.startswith(("https://", "http://127.0.0.1", "http://localhost")):
+        raise RuntimeError("cloud platform API must use HTTPS outside localhost")
+    return base_url, token
+
+
+def _remote_rows(
+    endpoint: str,
+    *,
+    symbols: tuple[str, ...],
+    start_utc: datetime,
+    end_utc: datetime,
+    client: httpx.Client | None,
+) -> list[dict[str, object]]:
+    base_url, token = platform_access_from_env()
+    owns_client = client is None
+    http_client = client or httpx.Client(timeout=60)
+    try:
+        response = http_client.get(
+            f"{base_url}/{PLATFORM_API_VERSION}/market-data/{endpoint}",
+            params={
+                "symbols": ",".join(symbols),
+                "start": start_utc.isoformat(),
+                "end": end_utc.isoformat(),
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise DownloadError("cloud market-data API request failed") from exc
+    finally:
+        if owns_client:
+            http_client.close()
+    if not isinstance(payload, dict) or payload.get("api_version") != PLATFORM_API_VERSION:
+        raise DownloadError("cloud market-data API contract is invalid")
+    rows = payload.get(endpoint)
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise DownloadError("cloud market-data API rows are invalid")
+    return rows
 
 
 def fetch_bars(
@@ -59,54 +96,23 @@ def fetch_bars(
     end_utc: datetime,
     *,
     feed: AlpacaStockFeed | None = None,
+    client: httpx.Client | None = None,
 ) -> pl.DataFrame:
-    key, secret = credentials_from_env()
     selected_feed = feed or stock_data_policy_from_env().feed
     if not symbols:
         raise ValueError("at least one symbol is required")
-    headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
-    params: dict[str, QueryValue] = {
-        "symbols": ",".join(symbols),
-        "timeframe": "1Min",
-        "start": start_utc.isoformat(),
-        "end": end_utc.isoformat(),
-        "feed": selected_feed,
-        "adjustment": "split",
-        "limit": 10_000,
-        "sort": "asc",
-    }
-    rows: list[dict[str, object]] = []
-    while True:
-        payload = get_json(BASE_URL, params=params, headers=headers)
-        bars = payload.get("bars", {})
-        if not isinstance(bars, dict):
-            raise DownloadError("Alpaca bars response did not contain a symbol map")
-        for symbol, symbol_bars in bars.items():
-            if not isinstance(symbol_bars, list):
-                continue
-            for bar in symbol_bars:
-                if not isinstance(bar, dict):
-                    continue
-                rows.append(
-                    {
-                        "symbol": symbol,
-                        "ts_utc": bar.get("t"),
-                        "open": bar.get("o"),
-                        "high": bar.get("h"),
-                        "low": bar.get("l"),
-                        "close": bar.get("c"),
-                        "volume": bar.get("v"),
-                        "trade_count": bar.get("n"),
-                        "vwap": nullable_float(bar.get("vw")),
-                        "source": "alpaca.market_data",
-                        "feed": selected_feed,
-                        "adjustment": "split_adjusted",
-                    }
-                )
-        token = payload.get("next_page_token")
-        if not token:
-            break
-        params["page_token"] = str(token)
+    rows = _remote_rows(
+        "bars",
+        symbols=symbols,
+        start_utc=start_utc,
+        end_utc=end_utc,
+        client=client,
+    )
+    for row in rows:
+        row["vwap"] = nullable_float(row.get("vwap"))
+        row["source"] = "cloud.alpaca.market_data"
+        row["feed"] = selected_feed
+        row["adjustment"] = "split_adjusted"
 
     frame = pl.DataFrame(rows) if rows else _empty_frame()
     return canonicalize_bars(frame).filter(
@@ -120,60 +126,26 @@ def fetch_quotes(
     end_utc: datetime,
     *,
     feed: AlpacaStockFeed | None = None,
+    client: httpx.Client | None = None,
 ) -> pl.DataFrame:
     """Fetch historical SIP NBBO quote updates without reducing timestamp precision."""
-    key, secret = credentials_from_env()
     selected_feed = feed or stock_data_policy_from_env().feed
     if not symbols:
         raise ValueError("at least one symbol is required")
     if start_utc.tzinfo is None or end_utc.tzinfo is None or end_utc <= start_utc:
         raise ValueError("a valid timezone-aware quote interval is required")
-    headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
-    params: dict[str, QueryValue] = {
-        "symbols": ",".join(symbols),
-        "start": start_utc.isoformat(),
-        "end": end_utc.isoformat(),
-        "feed": selected_feed,
-        "limit": 10_000,
-        "sort": "asc",
-    }
-    rows: list[dict[str, object]] = []
-    while True:
-        payload = get_json(QUOTES_URL, params=params, headers=headers)
-        quotes = payload.get("quotes", {})
-        if not isinstance(quotes, dict):
-            raise DownloadError("Alpaca quotes response did not contain a symbol map")
-        for symbol, symbol_quotes in quotes.items():
-            if not isinstance(symbol_quotes, list):
-                continue
-            for quote in symbol_quotes:
-                if not isinstance(quote, dict):
-                    continue
-                conditions = quote.get("c")
-                rows.append(
-                    {
-                        "symbol": symbol,
-                        "ts_utc": quote.get("t"),
-                        "bid_price": nullable_float(quote.get("bp")),
-                        "ask_price": nullable_float(quote.get("ap")),
-                        "bid_size": nullable_float(quote.get("bs")),
-                        "ask_size": nullable_float(quote.get("as")),
-                        "bid_exchange": quote.get("bx"),
-                        "ask_exchange": quote.get("ax"),
-                        "conditions": (
-                            [str(item) for item in conditions]
-                            if isinstance(conditions, list)
-                            else []
-                        ),
-                        "tape": quote.get("z"),
-                        "source": "alpaca.market_data",
-                        "feed": selected_feed,
-                    }
-                )
-        token = payload.get("next_page_token")
-        if not token:
-            break
-        params["page_token"] = str(token)
+    rows = _remote_rows(
+        "quotes",
+        symbols=symbols,
+        start_utc=start_utc,
+        end_utc=end_utc,
+        client=client,
+    )
+    for row in rows:
+        for name in ("bid_price", "ask_price", "bid_size", "ask_size"):
+            row[name] = nullable_float(row.get(name))
+        row["source"] = "cloud.alpaca.market_data"
+        row["feed"] = selected_feed
 
     frame = pl.DataFrame(rows) if rows else _empty_quotes()
     return _canonicalize_quotes(frame).filter(

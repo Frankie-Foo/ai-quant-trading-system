@@ -1,4 +1,4 @@
-"""Read-only verification of Alpaca Paper account and licensed SIP stream."""
+"""Read-only verification of the keyless cloud market/Paper platform API."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from execution.alpaca_paper import AlpacaPaperBroker
-from execution.alpaca_sip_stream import AlpacaSipStream
+from execution.alpaca_paper import CloudPaperBroker
+from execution.alpaca_sip_stream import PlatformSipStream
 from execution.settings import ExecutionSettings
 from operations.evidence import (
     load_existing_evidence,
@@ -42,20 +42,21 @@ def _parse_args() -> argparse.Namespace:
 
 async def _verify(args: argparse.Namespace) -> dict[str, object]:
     settings = ExecutionSettings()  # type: ignore[call-arg]
-    key = settings.alpaca_api_key_id.get_secret_value()
-    secret = settings.alpaca_api_secret_key.get_secret_value()
     symbols = tuple(item.strip().upper() for item in args.symbols.split(",") if item.strip())
-    broker = AlpacaPaperBroker(
-        api_key=key,
-        api_secret=secret,
-        base_url=settings.alpaca_trading_base_url,
+    broker = CloudPaperBroker(
+        base_url=settings.cloud_platform_base_url,
+        token=settings.cloud_paper_api_token,
         writes_enabled=False,
     )
     try:
         account = broker.get_account()
     finally:
         broker.close()
-    stream = AlpacaSipStream(api_key=key, api_secret=secret, symbols=symbols)
+    stream = PlatformSipStream(
+        base_url=settings.cloud_platform_base_url,
+        token=settings.cloud_market_data_api_token,
+        symbols=symbols,
+    )
     subscription = await stream.probe(timeout_seconds=args.timeout_seconds)
     return {
         "status": "ok",

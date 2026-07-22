@@ -13,7 +13,10 @@ from typing import Any
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
-REQUIRED_PROVIDER_ENV = ("ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY")
+REQUIRED_PROVIDER_ENV = (
+    "CLOUD_PLATFORM_BASE_URL",
+    "CLOUD_MARKET_DATA_API_TOKEN",
+)
 MAX_JOB_ATTEMPTS = 5
 STALE_JOB_AFTER = timedelta(hours=6)
 

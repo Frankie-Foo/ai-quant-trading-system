@@ -6,20 +6,30 @@ SQLite databases, runtime roots, or credentials.
 
 ## Allowed dependency direction
 
-This repository may call only:
+This repository may call these versioned endpoints with separate service tokens:
 
 ```text
 GET /v1/features/{symbol}?asof=<UTC RFC3339>
 Authorization: Bearer <CLOUD_FEATURE_API_TOKEN>
+
+GET /v1/market-data/events?after=<sequence>&symbols=AAPL,MSFT
+Authorization: Bearer <CLOUD_MARKET_DATA_API_TOKEN>
+
+GET /v1/market-data/bars|quotes|news
+Authorization: Bearer <CLOUD_MARKET_DATA_API_TOKEN>
+
+GET|POST|DELETE /v1/paper/...
+Authorization: Bearer <CLOUD_PAPER_API_TOKEN>
 ```
 
 The response is a versioned point-in-time feature vector containing a definition
 version and provenance for every value. Unsupported versions, invalid timestamps,
 authorization failures, network failures, and schema drift all fail closed.
 
-The cloud repository does not expose raw SIP, proxy, account, position, TradePlan,
-Broker, or order endpoints. Collaborator signal tokens use a different scope and cannot
-call the feature endpoint. The AI feature token cannot query collaborator-only signals.
+The market API returns bounded normalized events and historical rows, not Alpaca
+credentials or a generic upstream proxy. The Paper API is restricted to Paper accounts
+and long-only contracts. Collaborator signal tokens cannot call any AI endpoint. Market,
+feature, Paper, and signal scopes cannot be exchanged.
 
 ## Fast-loop safety
 
@@ -36,5 +46,6 @@ The command persists verified responses to `runs/cloud-feature-cache.sqlite3`.
 Decision-time code reads `CloudFeatureCache.latest(...)`; it must never instantiate or
 call `CloudFeatureClient`. If a synchronized vector is absent, the feature is `N/A`.
 
-The original single-strategy SIP and local observation paths remain independent and do
-not require the cloud service to be available.
+Realtime observation consumes cloud events into the existing local SIP store before
+running ORB logic. A cloud outage produces no event and no order; it never causes a
+fallback direct Alpaca connection.

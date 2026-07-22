@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import polars as pl
 import pytest
 
@@ -11,48 +12,44 @@ from kernel.quote_costs import latest_nbbo_spread, window_nbbo_spread
 NOW = datetime(2026, 7, 20, 13, 36, tzinfo=UTC)
 
 
-def test_alpaca_quotes_preserve_nanoseconds_and_paginate(
+def test_cloud_quotes_preserve_nanoseconds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("ALPACA_API_KEY_ID", "test-key")
-    monkeypatch.setenv("ALPACA_API_SECRET_KEY", "test-secret")
-    calls: list[dict[str, object]] = []
+    monkeypatch.setenv("CLOUD_PLATFORM_BASE_URL", "http://localhost:8765")
+    monkeypatch.setenv("CLOUD_MARKET_DATA_API_TOKEN", "market-token")
 
-    def fake_get_json(
-        url: str, *, params: dict[str, object], headers: dict[str, str]
-    ) -> dict[str, object]:
-        del url, headers
-        calls.append(dict(params))
-        suffix = "123456789Z" if len(calls) == 1 else "987654321Z"
-        payload: dict[str, object] = {
-            "quotes": {
-                "AAPL": [
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer market-token"
+        return httpx.Response(
+            200,
+            json={
+                "api_version": "v1",
+                "quotes": [
                     {
-                        "t": f"2026-07-20T13:35:59.{suffix}",
-                        "bp": 210.0,
-                        "ap": 210.02,
-                        "bs": 4,
-                        "as": 7,
-                        "bx": "V",
-                        "ax": "Q",
-                        "c": ["R"],
-                        "z": "C",
+                        "symbol": "AAPL",
+                        "ts_utc": "2026-07-20T13:35:59.123456789Z",
+                        "bid_price": 210.0,
+                        "ask_price": 210.02,
+                        "bid_size": 4,
+                        "ask_size": 7,
+                        "bid_exchange": "V",
+                        "ask_exchange": "Q",
+                        "conditions": ["R"],
+                        "tape": "C",
+                        "source": "cloud.alpaca.market_data",
+                        "feed": "sip",
                     }
-                ]
-            }
-        }
-        if len(calls) == 1:
-            payload["next_page_token"] = "opaque"
-        return payload
+                ],
+            },
+        )
 
-    monkeypatch.setattr(alpaca, "get_json", fake_get_json)
+    client = httpx.Client(transport=httpx.MockTransport(handler))
     result = alpaca.fetch_quotes(
-        ("AAPL",), NOW - timedelta(minutes=1), NOW + timedelta(seconds=1)
+        ("AAPL",), NOW - timedelta(minutes=1), NOW + timedelta(seconds=1), client=client
     )
 
-    assert result.height == 2
+    assert result.height == 1
     assert result.schema["ts_utc"] == pl.Datetime("ns", "UTC")
-    assert calls[1]["page_token"] == "opaque"
 
 
 def test_latest_nbbo_is_causal_and_fails_closed_when_stale() -> None:

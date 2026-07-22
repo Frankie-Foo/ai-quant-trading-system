@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-from execution.alpaca_paper import PAPER_BASE_URL
 
 
 class ExecutionSettings(BaseSettings):
@@ -19,15 +15,14 @@ class ExecutionSettings(BaseSettings):
         populate_by_name=True,
     )
 
-    alpaca_api_key_id: SecretStr = Field(validation_alias="ALPACA_API_KEY_ID")
-    alpaca_api_secret_key: SecretStr = Field(validation_alias="ALPACA_API_SECRET_KEY")
-    alpaca_trading_base_url: str = Field(
-        default=PAPER_BASE_URL,
-        validation_alias="ALPACA_TRADING_BASE_URL",
+    cloud_platform_base_url: str = Field(
+        validation_alias="CLOUD_PLATFORM_BASE_URL",
     )
-    alpaca_market_data_feed: Literal["sip"] = Field(
-        default="sip",
-        validation_alias="ALPACA_MARKET_DATA_FEED",
+    cloud_market_data_api_token: SecretStr = Field(
+        validation_alias="CLOUD_MARKET_DATA_API_TOKEN",
+    )
+    cloud_paper_api_token: SecretStr = Field(
+        validation_alias="CLOUD_PAPER_API_TOKEN",
     )
     broker_write_enabled: bool = Field(
         default=False,
@@ -38,9 +33,10 @@ class ExecutionSettings(BaseSettings):
         validation_alias="TRADING_KILL_SWITCH",
     )
 
-    @field_validator("alpaca_trading_base_url")
+    @field_validator("cloud_platform_base_url")
     @classmethod
-    def paper_only(cls, value: str) -> str:
-        if value.rstrip("/") != PAPER_BASE_URL:
-            raise ValueError("only the Alpaca Paper Trading endpoint is permitted")
-        return PAPER_BASE_URL
+    def secure_platform_url(cls, value: str) -> str:
+        normalized = value.rstrip("/")
+        if not normalized.startswith(("https://", "http://127.0.0.1", "http://localhost")):
+            raise ValueError("cloud platform API must use HTTPS outside localhost")
+        return normalized

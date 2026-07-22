@@ -445,8 +445,9 @@ def main(argv: list[str] | None = None) -> int:
         }
     elif args.command == "credentials":
         result = {
-            "alpaca": bool(
-                os.getenv("ALPACA_API_KEY_ID") and os.getenv("ALPACA_API_SECRET_KEY")
+            "cloud_market_data": bool(
+                os.getenv("CLOUD_PLATFORM_BASE_URL")
+                and os.getenv("CLOUD_MARKET_DATA_API_TOKEN")
             ),
             "massive": bool(os.getenv("MASSIVE_API_KEY")),
             "sec_user_agent": bool(os.getenv("SEC_USER_AGENT")),

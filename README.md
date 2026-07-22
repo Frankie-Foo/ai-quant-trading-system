@@ -164,19 +164,19 @@ The command exits nonzero until every objective metric and external attestation 
 present. Even `live_eligible` never arms the broker; live approval remains a separate
 owner action.
 
-## Alpaca Paper and realtime SIP execution foundation
+## Keyless cloud market data and Paper execution
 
-Algo Trader Plus SIP entitlement and Paper account access can be verified without
-calling any order endpoint:
+The AI investment process owns no Alpaca credential. It verifies scoped cloud market
+and Paper API access without calling any order endpoint:
 
 ```powershell
 .\.venv\Scripts\python -m scripts.verify_alpaca_access --symbols AAPL
 ```
 
-The safe output must report an active, unblocked Paper account, authenticated SIP bars
-and quotes, and `orders_submitted: 0`. The centralized collector is the only process
-that may own the account's SIP WebSocket connection (the subscription normally allows
-one connection per endpoint):
+The safe output must report an active, unblocked Paper account, authenticated cloud
+market events, and `orders_submitted: 0`. Alpaca WebSocket ownership lives only in the
+separate cloud-strategy-platform repository. This local collector consumes the scoped
+event API:
 
 ```powershell
 .\.venv\Scripts\python -m scripts.stream_alpaca_sip `
@@ -185,16 +185,16 @@ one connection per endpoint):
   --lock-file runs\alpaca-sip.lock
 ```
 
-It persists every minute bar and the latest NBBO quote for each symbol-second in a
-WAL/FULL SQLite ledger. It automatically reconnects and resubscribes after transient
-disconnects. The cross-process lock prevents a second local stream from consuming the
-single licensed connection.
+It persists every received minute bar and latest NBBO quote for each symbol-second in a
+WAL/FULL SQLite ledger. API failure yields no event and therefore no decision; missing
+market data is never filled.
 
 Broker writes remain fail-closed through three independent controls:
 
-1. the broker adapter accepts only `https://paper-api.alpaca.markets`;
-2. `.env` defaults to `BROKER_WRITE_ENABLED=false` and `TRADING_KILL_SWITCH=true`;
-3. the execution engine also requires coded Paper product readiness before it can call
+1. the AI process has only a scoped cloud Paper token, never an Alpaca Key;
+2. both cloud and AI environments default Broker writes to false;
+3. `.env` defaults to `BROKER_WRITE_ENABLED=false` and `TRADING_KILL_SWITCH=true`;
+4. the execution engine also requires coded Paper product readiness before it can call
    the order endpoint.
 
 `TradePlan` is permanently buy-only, references immutable selection and live event IDs,

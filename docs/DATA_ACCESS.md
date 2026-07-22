@@ -26,9 +26,9 @@ engineering path but are not admissible strategy-performance evidence.
 Copy `.env.example` to `.env` and populate values locally. Never send keys in chat or
 commit `.env`.
 
-- `ALPACA_API_KEY_ID` and `ALPACA_API_SECRET_KEY`: free Alpaca Market Data account.
-  The adapter explicitly requests `feed=sip` and split adjustment, matching Massive
-  and the frozen Polygon `adjusted=true` convention.
+- `CLOUD_PLATFORM_BASE_URL` and `CLOUD_MARKET_DATA_API_TOKEN`: scoped access to the
+  independent cloud service. Alpaca provider credentials exist only in that service.
+  The API returns SIP, split-adjusted rows with provenance.
 - `MASSIVE_API_KEY`: Massive Basic or a paid Stocks plan. The API adapter requests
   one-minute aggregates adjusted for splits, matching the frozen specification.
 - `SEC_USER_AGENT`: a descriptive SEC user agent containing a monitored email address,

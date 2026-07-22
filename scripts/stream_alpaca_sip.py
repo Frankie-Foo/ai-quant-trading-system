@@ -1,4 +1,4 @@
-"""Run the single centralized SIP stream and persist bars/NBBO samples."""
+"""Consume cloud market events and persist local bars/NBBO samples."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from contextlib import aclosing
 from datetime import UTC, datetime
 from pathlib import Path
 
-from execution.alpaca_sip_stream import AlpacaSipStream, SipBar
+from execution.alpaca_sip_stream import PlatformSipStream, SipBar
 from execution.settings import ExecutionSettings
 from execution.sip_store import SipEventStore
 from schedule.runtime import JsonEventLogger, ProcessLock
@@ -27,9 +27,9 @@ def _parse_args() -> argparse.Namespace:
 async def _run(args: argparse.Namespace, logger: JsonEventLogger) -> None:
     settings = ExecutionSettings()  # type: ignore[call-arg]
     symbols = tuple(item.strip().upper() for item in args.symbols.split(",") if item.strip())
-    stream = AlpacaSipStream(
-        api_key=settings.alpaca_api_key_id.get_secret_value(),
-        api_secret=settings.alpaca_api_secret_key.get_secret_value(),
+    stream = PlatformSipStream(
+        base_url=settings.cloud_platform_base_url,
+        token=settings.cloud_market_data_api_token,
         symbols=symbols,
     )
     store = SipEventStore(args.state_db)

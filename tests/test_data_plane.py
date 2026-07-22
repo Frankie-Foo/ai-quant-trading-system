@@ -9,7 +9,7 @@ import pytest
 from data_plane.calendar import build_xnys_schedule
 from data_plane.daily import DAILY_COLUMNS, audit_daily_bars, canonicalize_daily_bars
 from data_plane.http import _safe_url
-from data_plane.providers.alpaca import credentials_from_env, stock_data_policy_from_env
+from data_plane.providers.alpaca import platform_access_from_env, stock_data_policy_from_env
 from data_plane.providers.massive import (
     _set_query_value,
     api_key_from_env,
@@ -106,11 +106,11 @@ def test_duplicate_and_bad_ohlc_are_critical_failures() -> None:
 
 
 def test_provider_credentials_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("ALPACA_API_KEY_ID", raising=False)
-    monkeypatch.delenv("ALPACA_API_SECRET_KEY", raising=False)
+    monkeypatch.delenv("CLOUD_PLATFORM_BASE_URL", raising=False)
+    monkeypatch.delenv("CLOUD_MARKET_DATA_API_TOKEN", raising=False)
     monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="ALPACA_API_KEY_ID"):
-        credentials_from_env()
+    with pytest.raises(RuntimeError, match="CLOUD_PLATFORM_BASE_URL"):
+        platform_access_from_env()
     with pytest.raises(RuntimeError, match="MASSIVE_API_KEY"):
         api_key_from_env()
 
@@ -118,13 +118,13 @@ def test_provider_credentials_fail_closed(monkeypatch: pytest.MonkeyPatch) -> No
 def test_alpaca_stock_policy_uses_realtime_sip_without_a_synthetic_delay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("ALPACA_MARKET_DATA_FEED", raising=False)
+    monkeypatch.delenv("CLOUD_MARKET_DATA_FEED", raising=False)
     realtime = stock_data_policy_from_env()
     assert realtime.feed == "sip"
     assert realtime.delay_minutes == 0
     assert realtime.is_realtime is True
 
-    monkeypatch.setenv("ALPACA_MARKET_DATA_FEED", "delayed_sip")
+    monkeypatch.setenv("CLOUD_MARKET_DATA_FEED", "delayed_sip")
     delayed = stock_data_policy_from_env()
     assert delayed.feed == "delayed_sip"
     assert delayed.delay_minutes == 15
@@ -134,8 +134,8 @@ def test_alpaca_stock_policy_uses_realtime_sip_without_a_synthetic_delay(
 def test_alpaca_stock_policy_rejects_unknown_feed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("ALPACA_MARKET_DATA_FEED", "iex")
-    with pytest.raises(RuntimeError, match="ALPACA_MARKET_DATA_FEED"):
+    monkeypatch.setenv("CLOUD_MARKET_DATA_FEED", "iex")
+    with pytest.raises(RuntimeError, match="CLOUD_MARKET_DATA_FEED"):
         stock_data_policy_from_env()
 
 

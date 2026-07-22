@@ -420,3 +420,23 @@ the existing single-strategy and local observation runtime remain the default.
   arbitration, and local observation scheduler behavior remain unchanged.
 - Repository acceptance: 195 tests passed, Ruff clean, and strict mypy success across
   161 source files.
+
+## M15 keyless cloud market and Paper interface - 2026-07-22
+
+Status: the AI investment process no longer owns Alpaca credentials or connects to
+Alpaca market/Paper endpoints; local observation remains write-disabled.
+
+- Replaced direct historical bars, quotes, news, realtime SIP, account, position, and
+  Paper-order clients with narrowly scoped cloud-platform API clients.
+- Removed Alpaca Key/Secret, direct market-data domains, and direct Paper domains from
+  current AI runtime configuration, examples, health checks, and deployment guidance.
+- Migrated the local AI `.env` atomically to market-data, Paper, and feature API tokens;
+  provider credentials now exist only in the independent cloud platform's ignored
+  `.env` file and were never printed.
+- Preserved the existing single-strategy kernel, P0 -> P1 -> P2 arbitration, long-only
+  contracts, idempotent client order IDs, local scheduler, write-disabled default, and
+  active kill switch.
+- Verified the running loopback cloud API end to end: Paper account `ACTIVE`, SIP bars
+  and quotes received for AAPL, and zero orders submitted.
+- Repository acceptance: 194 tests passed, Ruff clean, and strict mypy success across
+  168 source files.

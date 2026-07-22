@@ -177,11 +177,11 @@ Before production deployment, rotate any credential that has ever been pasted in
 chat or terminal transcript. Delayed full-market data, censored minute paths, and
 missing quote-spread costs still prohibit live trading and performance claims.
 
-## Realtime SIP process
+## Keyless cloud market-data process
 
-The intraday market-data process is intentionally separate from the postmarket one-shot
-job. Exactly one process owns `wss://stream.data.alpaca.markets/v2/sip`; downstream
-consumers read its local SQLite state rather than opening additional WebSockets.
+The cloud-strategy-platform process owns the only Alpaca SIP WebSocket and all Alpaca
+credentials. This repository consumes its scoped HTTPS event API and stores a local
+SQLite view; it never opens an Alpaca connection.
 
 Verify entitlement first:
 
@@ -202,16 +202,18 @@ sudo -u trading /opt/trading-system/.venv/bin/python \
   --lock-file /run/trading-system/alpaca-sip.lock
 ```
 
-The service environment must retain these values until the coded Paper readiness report
-passes and the owner deliberately conducts the write/kill-switch drill:
+The AI service environment uses only scoped platform tokens:
 
 ```text
-ALPACA_TRADING_BASE_URL=https://paper-api.alpaca.markets
-ALPACA_MARKET_DATA_FEED=sip
+CLOUD_PLATFORM_BASE_URL=https://cloud-strategy-platform.example.internal
+CLOUD_MARKET_DATA_API_TOKEN=<secret-manager-reference>
+CLOUD_PAPER_API_TOKEN=<secret-manager-reference>
+CLOUD_FEATURE_API_TOKEN=<secret-manager-reference>
+CLOUD_MARKET_DATA_FEED=sip
 BROKER_WRITE_ENABLED=false
 TRADING_KILL_SWITCH=true
 ```
 
-Never run separate desktop and server collectors with the same Alpaca account. Route all
-consumers through the central collector because Algo Trader Plus commonly permits only
-one WebSocket connection to the SIP endpoint.
+The market token cannot read Paper state or place orders. The Paper token cannot access
+collaborator signals. Never copy the cloud service's Alpaca credentials into this
+repository or its runtime environment.

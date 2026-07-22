@@ -3,69 +3,77 @@ from __future__ import annotations
 import time
 from datetime import UTC, datetime
 
+import httpx
 import polars as pl
 
 from data_plane.catalysts import canonicalize_catalysts, empty_catalyst_frame
 from data_plane.http import DownloadError, QueryValue, get_json
-from data_plane.providers.alpaca import credentials_from_env
+from data_plane.providers.alpaca import PLATFORM_API_VERSION, platform_access_from_env
 from data_plane.providers.massive import _set_query_value, api_key_from_env
 
-ALPACA_NEWS_URL = "https://data.alpaca.markets/v1beta1/news"
 MASSIVE_NEWS_URL = "https://api.massive.com/v2/reference/news"
 
 
-def fetch_alpaca_news(start_utc: datetime, end_utc: datetime) -> pl.DataFrame:
+def fetch_alpaca_news(
+    start_utc: datetime,
+    end_utc: datetime,
+    *,
+    client: httpx.Client | None = None,
+) -> pl.DataFrame:
     _validate_window(start_utc, end_utc)
-    key, secret = credentials_from_env()
-    headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
-    params: dict[str, QueryValue] = {
-        "start": start_utc.isoformat(),
-        "end": end_utc.isoformat(),
-        "sort": "asc",
-        "limit": 50,
-        "include_content": "false",
-    }
+    base_url, token = platform_access_from_env()
+    owns_client = client is None
+    http_client = client or httpx.Client(timeout=30)
+    try:
+        response = http_client.get(
+            f"{base_url}/{PLATFORM_API_VERSION}/market-data/news",
+            params={"start": start_utc.isoformat(), "end": end_utc.isoformat()},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise DownloadError("cloud news API request failed") from exc
+    finally:
+        if owns_client:
+            http_client.close()
+    if not isinstance(payload, dict) or payload.get("api_version") != PLATFORM_API_VERSION:
+        raise DownloadError("cloud news API contract is invalid")
+    articles = payload.get("news", [])
+    if not isinstance(articles, list):
+        raise DownloadError("cloud news response did not contain a news list")
     retrieved = datetime.now(UTC)
     rows: list[dict[str, object]] = []
-    while True:
-        payload = get_json(ALPACA_NEWS_URL, params=params, headers=headers)
-        articles = payload.get("news", [])
-        if not isinstance(articles, list):
-            raise DownloadError("Alpaca news response did not contain a news list")
-        for article in articles:
-            if not isinstance(article, dict):
-                continue
-            symbols = article.get("symbols", [])
-            if not isinstance(symbols, list) or not symbols:
-                continue
-            event_id = str(article.get("id", "")).strip()
-            if not event_id:
-                continue
-            rows.append(
-                {
-                    "source": "alpaca.news.benzinga",
-                    "source_event_id": event_id,
-                    "event_type": "news",
-                    "event_subtype": None,
-                    "published_utc": article.get("created_at"),
-                    "updated_utc": article.get("updated_at"),
-                    "retrieved_utc": retrieved,
-                    "symbols": symbols,
-                    "headline": article.get("headline"),
-                    "summary": article.get("summary"),
-                    "publisher": article.get("source") or "Benzinga",
-                    "url": article.get("url"),
-                    "cik": None,
-                    "accession_number": None,
-                    "form_items": [],
-                    "tags": [],
-                    "provenance": f"alpaca.news:{event_id}",
-                }
-            )
-        token = payload.get("next_page_token")
-        if not token:
-            break
-        params["page_token"] = str(token)
+    for article in articles:
+        if not isinstance(article, dict):
+            continue
+        symbols = article.get("symbols", [])
+        if not isinstance(symbols, list) or not symbols:
+            continue
+        event_id = str(article.get("id", "")).strip()
+        if not event_id:
+            continue
+        rows.append(
+            {
+                "source": "alpaca.news.benzinga",
+                "source_event_id": event_id,
+                "event_type": "news",
+                "event_subtype": None,
+                "published_utc": article.get("created_at"),
+                "updated_utc": article.get("updated_at"),
+                "retrieved_utc": retrieved,
+                "symbols": symbols,
+                "headline": article.get("headline"),
+                "summary": article.get("summary"),
+                "publisher": article.get("source") or "Benzinga",
+                "url": article.get("url"),
+                "cik": None,
+                "accession_number": None,
+                "form_items": [],
+                "tags": [],
+                "provenance": f"cloud.alpaca.news:{event_id}",
+            }
+        )
 
     frame = canonicalize_catalysts(pl.DataFrame(rows) if rows else empty_catalyst_frame())
     return frame.filter(
