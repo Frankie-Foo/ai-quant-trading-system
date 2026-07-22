@@ -1,0 +1,12 @@
+[Unit]
+Description=Check for the first XNYS session monthly evolution cycle
+
+[Timer]
+OnCalendar=*-*-01..08 10:00:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=120
+AccuracySec=1min
+Unit=trading-monthly-evolution.service
+
+[Install]
+WantedBy=timers.target

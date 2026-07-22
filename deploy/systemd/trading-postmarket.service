@@ -1,0 +1,31 @@
+[Unit]
+Description=Trading System v2 postmarket review
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/opt/trading-system/.venv/bin/python
+OnFailure=trading-alert@postmarket.service
+
+[Service]
+Type=oneshot
+User=trading
+Group=trading
+WorkingDirectory=/opt/trading-system
+EnvironmentFile=/etc/trading-system/trading-system.env
+Environment=PYTHONUNBUFFERED=1
+StateDirectory=trading-system
+RuntimeDirectory=trading-system
+UMask=0077
+ExecStartPre=/opt/trading-system/.venv/bin/python -m schedule.health --data-root /var/lib/trading-system/data --state-db /var/lib/trading-system/state/jobs.sqlite3 --check-credentials
+ExecStart=/opt/trading-system/.venv/bin/python -m schedule.postmarket --data-root /var/lib/trading-system/data --state-db /var/lib/trading-system/state/jobs.sqlite3 --lock-file /run/trading-system/postmarket.lock --llm-mode optional
+TimeoutStartSec=20min
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/trading-system /run/trading-system

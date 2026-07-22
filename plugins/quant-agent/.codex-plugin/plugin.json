@@ -1,0 +1,22 @@
+{
+  "name": "quant-agent",
+  "version": "0.2.0",
+  "description": "Audited slow-loop research agents for the deterministic trading kernel",
+  "author": {
+    "name": "Frank Quant Research"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Quant Agent",
+    "shortDescription": "Audited research, review, and draft-only evolution.",
+    "longDescription": "Adds least-privilege quant research tools and governed postmarket PDCA. Numeric facts require provenance, missing data remains N/A, and agent proposals never become executable orders.",
+    "developerName": "Frank Quant Research",
+    "category": "Data & Analytics",
+    "capabilities": ["Interactive", "Write"],
+    "defaultPrompt": [
+      "复盘最近交易日并生成匿名化结构化 lessons。",
+      "汇总月度 lessons，生成仅限草案的进化提案。"
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

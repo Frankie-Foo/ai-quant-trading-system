@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Trading System v2 governed research each weekend
+
+[Timer]
+OnCalendar=Sat *-*-* 06:00:00 America/New_York
+Persistent=true
+RandomizedDelaySec=15min
+Unit=trading-research.service
+
+[Install]
+WantedBy=timers.target

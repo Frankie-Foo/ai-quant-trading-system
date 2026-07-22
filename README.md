@@ -1,0 +1,270 @@
+# Intraday Trading System v2
+
+Deterministic, auditable, long-only U.S. equity intraday research and execution
+kernel. M0 is complete; no strategy performance claim is produced by this
+repository yet.
+
+## Local verification
+
+```powershell
+.\.venv\Scripts\python -m pytest -v
+.\.venv\Scripts\ruff check .
+.\.venv\Scripts\mypy data_plane kernel research execution schedule agent_gateway `
+  scripts tests
+```
+
+Secrets belong in `.env`, which is ignored. Never paste credentials into reports or
+commit them to the repository.
+
+The frozen specification is supplemented by [architecture decisions](docs/ARCHITECTURE.md),
+which map data, model, strategy, trading, and application layers onto this repository.
+
+The cloud multi-strategy service is a separate repository and deployment. This
+repository consumes its versioned feature API only through the slow-loop synchronization
+adapter documented in [cloud feature interface](docs/CLOUD_FEATURE_INTERFACE.md). The
+realtime kernel reads the local point-in-time cache and never waits on remote HTTP.
+
+Real-data bootstrap and local credential setup are documented in
+[data access](docs/DATA_ACCESS.md). Community and undocumented feeds are automatically
+quarantined and cannot be used as performance evidence.
+
+Observed download counts and quarantine reasons are recorded in the
+[data bootstrap report](docs/DATA_BOOTSTRAP_REPORT.md).
+
+Build and persist the fail-closed daily common-stock pre-universe with:
+
+```powershell
+.\.venv\Scripts\python -m scripts.build_daily_universe --trade-date 2026-07-17
+```
+
+The first real run and its remaining data gates are documented in the
+[daily universe audit](docs/UNIVERSE_AUDIT_2026-07-17.md).
+
+Build the Beijing 08:00 point-in-time overnight catalyst evidence snapshot with:
+
+```powershell
+.\.venv\Scripts\python -m scripts.build_catalyst_snapshot --trade-date 2026-07-20
+```
+
+Reapply deterministic cleaning rules to accepted raw provider snapshots without making
+network requests:
+
+```powershell
+.\.venv\Scripts\python -m scripts.build_catalyst_snapshot --trade-date 2026-07-20 `
+  --reuse-provider-snapshots
+```
+
+The first real evidence run is documented in the
+[catalyst audit](docs/CATALYST_AUDIT_2026-07-20.md).
+
+Prefetch the prior 20 same-time premarket windows and, once the Beijing 20:00
+decision time has arrived, build the locked-pool RVOL snapshot with:
+
+```powershell
+.\.venv\Scripts\python -m scripts.build_premarket_rvol --trade-date 2026-07-20
+```
+
+The command is restart-safe: accepted per-session raw snapshots are reused. Before
+the decision time it downloads history only and leaves the target feature unavailable;
+at or after the decision time it adds the target window allowed by the configured feed
+policy and persists the point-in-time result. Licensed `sip` uses a zero-minute delay;
+`delayed_sip` is an explicit 15-minute fallback. See the historical
+[premarket RVOL audit](docs/PREMARKET_RVOL_AUDIT_2026-07-20.md).
+
+Prefetch and apply the remaining L0 selection gates (point-in-time market cap,
+earnings day, current halt, and recent LULD/low-float risk) with:
+
+```powershell
+.\.venv\Scripts\python -m scripts.build_selection_gates --trade-date 2026-07-20
+```
+
+Build a point-in-time, explicitly non-actionable ORB-5 research snapshot with:
+
+```powershell
+.\.venv\Scripts\python -m scripts.build_orb5_signals --trade-date 2026-07-20
+```
+
+The snapshot uses the same explicit feed policy as RVOL, reports whether the session is
+still in progress, and never drives an order. Continuous live decisions use
+`scripts.run_paper_session` and the licensed SIP WebSocket. The July 20 audit predates
+the realtime subscription and remains historical evidence only; see the
+[selection accuracy audit](docs/SELECTION_ACCURACY_AUDIT_2026-07-20.md).
+
+Backfill restart-safe monthly Massive catalyst history for out-of-sample research with:
+
+```powershell
+.\.venv\Scripts\python -m scripts.backfill_massive_news `
+  --start 2024-07-17 --end 2026-07-18
+```
+
+The end date is exclusive. Historical news alone is not performance evidence; minute
+bars, point-in-time daily pools, labels, costs, and chronological purged validation must
+all be joined before any accuracy claim.
+
+Score the locked catalyst evidence with DeepSeek V4-Pro in shadow mode with:
+
+```powershell
+.\.venv\Scripts\python -m scripts.score_catalysts_deepseek `
+  --trade-date 2026-07-20 --limit 3
+```
+
+Set `DEEPSEEK_API_KEY` in `.env` first. Start with a small limit, inspect the accepted
+snapshot, then expand to the full locked pool. Every output remains
+`unapproved_shadow` and is barred from the deterministic kernel until chronological
+out-of-sample calibration approves it.
+
+## Automatic postmarket learning loop
+
+After a session is fully available, replay ORB-5, build a frozen Trading Episode, and
+run the read-only Research/Critic pair with:
+
+```powershell
+.\.venv\Scripts\python -m schedule.postmarket --trade-date 2026-07-20
+```
+
+The idempotent job ledger is stored in `runs/jobs.sqlite3`. A retry reuses accepted
+snapshots and a completed job cannot run twice. Missing minute bars are never filled;
+affected trade outcomes remain explicitly censored. Net returns remain unavailable
+until quote-spread data exists, so the review cannot mistake missing costs for zero.
+Program diagnostics are always available. Research and Critic agents run automatically
+only after deterministic evidence gates pass; their failure cannot bypass those gates.
+
+Install the complete local Windows observation loop with:
+
+```powershell
+.\scripts\install_local_observation_tasks.ps1
+```
+
+This registers three current-user tasks: a five-minute idempotent premarket tick, a
+five-minute DST-safe Paper-session launcher, and a 30-minute postmarket review tick.
+The Paper launcher verifies SIP and Paper access before opening the one licensed stream.
+It still cannot submit an order while `BROKER_WRITE_ENABLED=false` and
+`TRADING_KILL_SWITCH=true`. Runtime output is appended to
+`runs/premarket_scheduler.*.log`, `runs/paper_scheduler.*.log`, and
+`runs/postmarket_scheduler.*.log`.
+
+The runner itself checks the XNYS close plus the configurable postmarket data-grace
+window, so the Windows clock and daylight-saving changes do not define market time.
+Agents can only create research
+proposals. At least 20 distinct session Episodes and 20 uncensored trade labels are
+required before a proposal can enter deterministic sandbox evaluation; production
+approval is always false in the agent output. Linux systemd and container deployment
+are documented in [production deployment](docs/PRODUCTION_DEPLOYMENT.md).
+
+Product maturity is a coded gate rather than a label. Evaluate the current evidence
+for Paper eligibility with:
+
+```powershell
+.\.venv\Scripts\python -m scripts.refresh_maturity_evidence
+.\.venv\Scripts\python -m scripts.check_product_readiness `
+  --evidence runs\maturity-evidence.json --target paper
+```
+
+The command exits nonzero until every objective metric and external attestation is
+present. Even `live_eligible` never arms the broker; live approval remains a separate
+owner action.
+
+## Alpaca Paper and realtime SIP execution foundation
+
+Algo Trader Plus SIP entitlement and Paper account access can be verified without
+calling any order endpoint:
+
+```powershell
+.\.venv\Scripts\python -m scripts.verify_alpaca_access --symbols AAPL
+```
+
+The safe output must report an active, unblocked Paper account, authenticated SIP bars
+and quotes, and `orders_submitted: 0`. The centralized collector is the only process
+that may own the account's SIP WebSocket connection (the subscription normally allows
+one connection per endpoint):
+
+```powershell
+.\.venv\Scripts\python -m scripts.stream_alpaca_sip `
+  --symbols AAPL,MSFT `
+  --state-db runs\sip-stream.sqlite3 `
+  --lock-file runs\alpaca-sip.lock
+```
+
+It persists every minute bar and the latest NBBO quote for each symbol-second in a
+WAL/FULL SQLite ledger. It automatically reconnects and resubscribes after transient
+disconnects. The cross-process lock prevents a second local stream from consuming the
+single licensed connection.
+
+Broker writes remain fail-closed through three independent controls:
+
+1. the broker adapter accepts only `https://paper-api.alpaca.markets`;
+2. `.env` defaults to `BROKER_WRITE_ENABLED=false` and `TRADING_KILL_SWITCH=true`;
+3. the execution engine also requires coded Paper product readiness before it can call
+   the order endpoint.
+
+`TradePlan` is permanently buy-only, references immutable selection and live event IDs,
+and requires a stop, take-profit, and UTC time stop. Bracket orders use deterministic
+`client_order_id` values. The SQLite OMS records the complete plan, every state
+transition, and the Broker order ID. Recovery reconciles by client ID and cannot create
+a duplicate order.
+
+The live decision uses `kernel.signals.orb5_intent`, which acts at the boundary after a
+breakout bar completes and never consumes the future fill bar. Historical `orb5()`
+retains next-bar VWAP only as an explicit backtest fill proxy. Runtime sizing uses the
+smaller of configured capital and actual Broker equity, so the current $100k Paper
+account is never sized as the configured $200k account or the displayed $400k buying
+power.
+
+Do not change the two write-control variables yet. The realtime data and Paper plumbing
+are verified, but the coded maturity report remains `research_only` pending sufficient
+point-in-time history, net cost-complete labels, purged OOS folds, and operational drills.
+
+Once the current-date locked selection exists, the complete centralized shadow session
+can be started with:
+
+```powershell
+.\.venv\Scripts\python -m scripts.run_paper_session `
+  --trade-date 2026-07-21 `
+  --max-seconds 60
+```
+
+This is the actual SIP -> causal ORB intent -> NBBO -> account-aware sizing -> TradePlan
+-> P0/P1/P2 -> OMS path. Under the current evidence and default environment it records
+plans and decisions but cannot submit an order. A future Paper order requires the
+maturity report to reach `paper_eligible`, the broker write flag to be deliberately
+enabled, and the kill switch to be deliberately disarmed at the same time.
+
+## Production operations
+
+The production runtime includes idempotent Beijing-time premarket phases, a
+New-York-time Paper session, postmarket review, HTTPS failure alerts, weekly online
+SQLite/immutable-snapshot backups, and immediate restore verification. Run the local
+no-network-write safety drills with:
+
+```powershell
+.\.venv\Scripts\python -m scripts.run_local_safety_drills
+```
+
+The drill uses the real execution guardrail and backup implementations. It proves that
+an active kill switch makes zero Broker calls and that a representative accepted
+snapshot plus every current SQLite ledger can be restored and hash/integrity checked.
+The receipt is stored under `runs/drills`, and only verified fields are added to
+`runs/maturity-evidence.json`.
+
+Paper sessions are audited in the OMS database. Bounded smoke tests and failed sessions
+do not count toward the 60-session Live gate. Full sessions record the event count,
+submitted order count, and startup reconciliation rate. Time stops are polled every five
+seconds even during continuous SIP traffic; premature stream termination fails closed.
+
+The program never fabricates the remaining attestations. A real alert delivery receipt,
+historical-data usage confirmation, credential rotation, risk limits, compliance review,
+and Live Broker permission still require external evidence. Keep Broker writes disabled
+and the kill switch active until the Paper gate is complete.
+
+After a human-owned item is genuinely complete, record its durable reference (contract,
+receipt, or signed document identifier) with `scripts.record_attestation`; use `--revoke`
+if the evidence expires. The command cannot alter sample counts or approve Live trading.
+
+Automatic evolution is implemented as a governed research loop, not self-editing code.
+Every historical gate survivor is cost-labeled so allowlisted challengers are not biased
+by the baseline top-eight portfolio. The RVOL sandbox evaluates three frozen challengers
+across four purged discovery folds, requires minimum coverage/retention/material uplift,
+and confirms the winner once on an untouched fifth holdout. It automatically records a
+new research champion or retains the baseline. The decision always has
+`production_eligible=false`: agents can propose hypotheses, but neither an agent nor the
+sandbox can silently modify the execution kernel or authorize capital.

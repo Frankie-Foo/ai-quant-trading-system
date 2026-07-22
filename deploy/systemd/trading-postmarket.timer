@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Trading System v2 postmarket review every 30 minutes
+
+[Timer]
+OnCalendar=*:0/30
+Persistent=true
+RandomizedDelaySec=45
+AccuracySec=1min
+Unit=trading-postmarket.service
+
+[Install]
+WantedBy=timers.target
+
