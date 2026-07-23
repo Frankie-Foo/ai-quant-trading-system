@@ -463,3 +463,26 @@ Status: fixed and running locally; the continuous session is observation-only,
   JTAI, SMCI, XE, and OKLO. Missed historical entries were not chased or submitted.
 - Repository acceptance: 199 tests passed, Ruff clean, and strict mypy success across
   122 source files.
+
+## M17 observable cloud market-data consumer - 2026-07-23
+
+Status: implemented and verified; the AI repository remains fully separated from the
+cloud repository and still owns no Alpaca credential.
+
+- Replaced continuous REST event polling with resumable cloud SSE while retaining
+  cursor polling only for an explicitly old server that returns `404/405` for the stream.
+- Added strict health-contract parsing and a bounded startup wait. Delayed, stale,
+  unsubscribed, unavailable, malformed, or fallback-recommended symbols fail closed
+  before the Paper observation loop starts.
+- Required every historical bars/quotes response to carry per-symbol coverage. A cloud
+  gap/empty recommendation now raises a sanitized download failure instead of letting an
+  empty frame masquerade as usable input.
+- Added a bounded symbol lease to the standalone collector as well as the Paper session;
+  no AI process opens an Alpaca connection or receives an Alpaca Key.
+- Preserved the existing deterministic single-strategy kernel, local SIP store, Windows
+  observation tasks, write-disabled default, active kill switch, long-only contracts,
+  and Paper maturity gates.
+- No automatic Yahoo/community fallback was added: repository provenance policy requires
+  missing or degraded licensed data to remain explicit and quarantined.
+- Repository acceptance: 204 tests passed, Ruff clean, and strict mypy success across
+  171 source files.

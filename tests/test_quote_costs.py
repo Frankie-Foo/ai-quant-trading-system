@@ -40,6 +40,17 @@ def test_cloud_quotes_preserve_nanoseconds(
                         "feed": "sip",
                     }
                 ],
+                "coverage": {
+                    "status": "observed",
+                    "fallback_recommended": False,
+                    "symbols": [
+                        {
+                            "symbol": "AAPL",
+                            "status": "observed",
+                            "reason_codes": [],
+                        }
+                    ],
+                },
             },
         )
 

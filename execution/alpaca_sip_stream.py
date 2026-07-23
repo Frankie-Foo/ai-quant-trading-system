@@ -20,6 +20,10 @@ class SipProtocolError(RuntimeError):
     """A sanitized fail-closed protocol or entitlement error."""
 
 
+class _LegacyStreamUnsupported(Exception):
+    """The server predates the SSE endpoint and requires cursor polling."""
+
+
 class WebSocketLike(Protocol):
     async def recv(self) -> str | bytes: ...
 
@@ -79,6 +83,24 @@ class SipSubscription(FrozenModel):
     authenticated: bool
     bars: tuple[str, ...]
     quotes: tuple[str, ...]
+
+
+class MarketSymbolHealth(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    symbol: str
+    subscribed: bool
+    status: str
+    reason_codes: tuple[str, ...]
+
+
+class MarketDataHealth(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    api_version: str
+    status: str
+    fallback_recommended: bool
+    symbols: tuple[MarketSymbolHealth, ...]
 
 
 def _decode_frame(frame: str | bytes) -> list[object]:
@@ -152,6 +174,58 @@ def parse_market_data_frame(frame: str | bytes) -> tuple[SipEvent, ...]:
     return tuple(events)
 
 
+def _event_from_envelope(value: object) -> tuple[int, SipEvent]:
+    if not isinstance(value, dict):
+        raise SipProtocolError("cloud market-data event envelope is invalid")
+    sequence = value.get("sequence")
+    raw_event = value.get("event")
+    if (
+        not isinstance(sequence, int)
+        or isinstance(sequence, bool)
+        or sequence < 1
+        or not isinstance(raw_event, dict)
+    ):
+        raise SipProtocolError("cloud market-data event envelope is invalid")
+    event_type = raw_event.get("event_type")
+    model: type[SipBar] | type[SipQuote]
+    if event_type == "bar":
+        model = SipBar
+    elif event_type == "quote":
+        model = SipQuote
+    else:
+        raise SipProtocolError("cloud market-data event type is invalid")
+    try:
+        event = model.model_validate(raw_event)
+    except Exception as exc:
+        raise SipProtocolError("cloud market-data event failed validation") from exc
+    return sequence, event
+
+
+def _sse_envelope(
+    *,
+    event_name: str | None,
+    event_id: str | None,
+    data_lines: list[str],
+) -> tuple[int, SipEvent] | None:
+    if not data_lines:
+        return None
+    if event_name not in {None, "market-data"}:
+        return None
+    try:
+        payload = json.loads("\n".join(data_lines))
+    except json.JSONDecodeError as exc:
+        raise SipProtocolError("cloud market-data SSE payload is invalid") from exc
+    sequence, event = _event_from_envelope(payload)
+    if event_id is not None:
+        try:
+            parsed_id = int(event_id)
+        except ValueError as exc:
+            raise SipProtocolError("cloud market-data SSE id is invalid") from exc
+        if parsed_id != sequence:
+            raise SipProtocolError("cloud market-data SSE cursor does not match payload")
+    return sequence, event
+
+
 class PlatformSipStream:
     def __init__(
         self,
@@ -203,15 +277,136 @@ class PlatformSipStream:
             raise SipProtocolError("cloud market-data API event page is invalid")
         events: list[SipEvent] = []
         for envelope in raw_events:
-            if not isinstance(envelope, dict) or not isinstance(envelope.get("event"), dict):
-                raise SipProtocolError("cloud market-data event is invalid")
-            raw_event = envelope["event"]
-            model = SipBar if raw_event.get("event_type") == "bar" else SipQuote
-            try:
-                events.append(model.model_validate(raw_event))
-            except Exception as exc:
-                raise SipProtocolError("cloud market-data event failed validation") from exc
+            sequence, event = _event_from_envelope(envelope)
+            if sequence <= after or sequence > next_sequence:
+                raise SipProtocolError("cloud market-data event cursor is invalid")
+            events.append(event)
         return next_sequence, tuple(events)
+
+    async def _stream(
+        self, after: int
+    ) -> AsyncGenerator[tuple[int, SipEvent], None]:
+        try:
+            async with self._client.stream(
+                "GET",
+                f"{self.base_url}/{PLATFORM_API_VERSION}/market-data/stream",
+                params={
+                    "after": after,
+                    "symbols": ",".join(self.symbols),
+                    "heartbeat_seconds": 5,
+                },
+                headers={
+                    **self._headers,
+                    "Accept": "text/event-stream",
+                    "Last-Event-ID": str(after),
+                },
+                timeout=httpx.Timeout(15.0, connect=10.0),
+            ) as response:
+                if response.status_code in {404, 405}:
+                    raise _LegacyStreamUnsupported
+                response.raise_for_status()
+                content_type = response.headers.get("Content-Type", "").lower()
+                if not content_type.startswith("text/event-stream"):
+                    raise SipProtocolError(
+                        "cloud market-data SSE content type is invalid"
+                    )
+                event_name: str | None = None
+                event_id: str | None = None
+                data_lines: list[str] = []
+                async for line in response.aiter_lines():
+                    if line == "":
+                        envelope = _sse_envelope(
+                            event_name=event_name,
+                            event_id=event_id,
+                            data_lines=data_lines,
+                        )
+                        event_name = None
+                        event_id = None
+                        data_lines = []
+                        if envelope is None:
+                            continue
+                        sequence, event = envelope
+                        if sequence > after:
+                            yield sequence, event
+                        continue
+                    if line.startswith(":"):
+                        continue
+                    field, separator, raw_value = line.partition(":")
+                    value = raw_value[1:] if separator and raw_value.startswith(" ") else raw_value
+                    if field == "event":
+                        event_name = value
+                    elif field == "id":
+                        event_id = value
+                    elif field == "data":
+                        data_lines.append(value)
+                envelope = _sse_envelope(
+                    event_name=event_name,
+                    event_id=event_id,
+                    data_lines=data_lines,
+                )
+                if envelope is not None and envelope[0] > after:
+                    yield envelope
+        except _LegacyStreamUnsupported:
+            raise
+        except httpx.HTTPStatusError as exc:
+            raise SipProtocolError("cloud market-data SSE request failed") from exc
+
+    async def market_status(self) -> MarketDataHealth:
+        try:
+            response = await self._client.get(
+                f"{self.base_url}/{PLATFORM_API_VERSION}/market-data/status",
+                params={"symbols": ",".join(self.symbols)},
+                headers=self._headers,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise SipProtocolError("cloud market-data health request failed") from exc
+        try:
+            health = MarketDataHealth.model_validate(payload)
+        except Exception as exc:
+            raise SipProtocolError("cloud market-data health contract is invalid") from exc
+        returned = tuple(item.symbol.strip().upper() for item in health.symbols)
+        if (
+            health.api_version != PLATFORM_API_VERSION
+            or len(returned) != len(self.symbols)
+            or set(returned) != set(self.symbols)
+            or any(not SYMBOL_PATTERN.fullmatch(symbol) for symbol in returned)
+        ):
+            raise SipProtocolError("cloud market-data health contract is invalid")
+        return health
+
+    async def require_healthy(self) -> MarketDataHealth:
+        health = await self.market_status()
+        usable_statuses = {"healthy", "market_closed"}
+        if (
+            health.fallback_recommended
+            or health.status not in {"healthy", "market_closed"}
+            or any(
+                not item.subscribed or item.status not in usable_statuses
+                for item in health.symbols
+            )
+        ):
+            raise SipProtocolError("cloud market-data health is not usable")
+        return health
+
+    async def wait_until_healthy(
+        self, *, timeout_seconds: float = 60.0
+    ) -> MarketDataHealth:
+        if timeout_seconds <= 0:
+            raise ValueError("health wait timeout must be positive")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while True:
+            try:
+                return await self.require_healthy()
+            except SipProtocolError:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise SipProtocolError(
+                        "cloud market-data health did not become usable"
+                    ) from None
+                await asyncio.sleep(min(1.0, remaining))
 
     async def probe(self, *, timeout_seconds: float = 20.0) -> SipSubscription:
         async with asyncio.timeout(timeout_seconds):
@@ -268,14 +463,30 @@ class PlatformSipStream:
 
     async def events(self) -> AsyncGenerator[SipEvent, None]:
         after = self._after_sequence
+        use_cursor_polling = False
         try:
             while True:
-                after, events = await self._fetch(after)
-                if not events:
+                if use_cursor_polling:
+                    after, events = await self._fetch(after)
+                    self._after_sequence = after
+                    if not events:
+                        await asyncio.sleep(self.poll_seconds)
+                        continue
+                    for event in events:
+                        yield event
+                    continue
+                try:
+                    async for sequence, event in self._stream(after):
+                        after = sequence
+                        self._after_sequence = sequence
+                        yield event
+                except _LegacyStreamUnsupported:
+                    use_cursor_polling = True
+                    continue
+                except httpx.TransportError:
                     await asyncio.sleep(self.poll_seconds)
                     continue
-                for event in events:
-                    yield event
+                await asyncio.sleep(self.poll_seconds)
         finally:
             if self._owns_client:
                 await self._client.aclose()

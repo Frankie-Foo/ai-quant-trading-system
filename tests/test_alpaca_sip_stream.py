@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncGenerator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -18,6 +18,7 @@ from execution.alpaca_sip_stream import (
     parse_market_data_frame,
 )
 from scripts.run_paper_session import _poll_next_event
+from scripts.stream_alpaca_sip import _lease_window
 
 
 def test_parse_sip_quote_and_bar_with_utc_provenance() -> None:
@@ -54,12 +55,59 @@ def test_parse_sip_quote_and_bar_with_utc_provenance() -> None:
 
 
 def test_platform_stream_uses_scoped_token_and_yields_validated_events() -> None:
-    calls = 0
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer market-token"
+        assert request.url.path == "/v1/market-data/stream"
+        assert request.url.params["after"] == "0"
+        event = {
+            "event_type": "bar",
+            "symbol": "AAPL",
+            "ts_utc": "2026-07-21T14:36:00Z",
+            "open": 224.0,
+            "high": 225.1,
+            "low": 223.9,
+            "close": 225.0,
+            "volume": 1000,
+            "trade_count": 50,
+            "vwap": 224.7,
+            "feed": "sip",
+            "provenance": "cloud.alpaca.sip@test",
+        }
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            text=(
+                "retry: 1000\n\n"
+                "id: 1\n"
+                "event: market-data\n"
+                f"data: {json.dumps({'sequence': 1, 'event': event})}\n\n"
+            ),
+        )
+
+    async def run() -> SipBar:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            stream = PlatformSipStream(
+                base_url="http://localhost:8765",
+                token=SecretStr("market-token"),
+                symbols=("aapl",),
+                client=client,
+            )
+            events = stream.events()
+            event = await anext(events)
+            await events.aclose()
+            assert isinstance(event, SipBar)
+            return event
+
+    assert asyncio.run(run()).symbol == "AAPL"
+
+
+def test_platform_stream_falls_back_to_cursor_polling_for_an_old_server() -> None:
+    calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        assert request.headers["Authorization"] == "Bearer market-token"
+        calls.append(request.url.path)
+        if request.url.path.endswith("/stream"):
+            return httpx.Response(404)
         event = {
             "event_type": "bar",
             "symbol": "AAPL",
@@ -78,7 +126,7 @@ def test_platform_stream_uses_scoped_token_and_yields_validated_events() -> None
             200,
             json={
                 "api_version": "v1",
-                "events": [{"sequence": 1, "event": event}] if calls == 1 else [],
+                "events": [{"sequence": 1, "event": event}],
                 "next_sequence": 1,
             },
         )
@@ -98,6 +146,10 @@ def test_platform_stream_uses_scoped_token_and_yields_validated_events() -> None
             return event
 
     assert asyncio.run(run()).symbol == "AAPL"
+    assert calls == [
+        "/v1/market-data/stream",
+        "/v1/market-data/events",
+    ]
 
 
 def test_platform_stream_leases_symbols_before_consuming_from_returned_cursor() -> None:
@@ -118,6 +170,7 @@ def test_platform_stream_leases_symbols_before_consuming_from_returned_cursor() 
                     "start_after_sequence": 41,
                 },
             )
+        assert request.url.path == "/v1/market-data/stream"
         assert request.url.params["after"] == "41"
         event = {
             "event_type": "bar",
@@ -135,11 +188,12 @@ def test_platform_stream_leases_symbols_before_consuming_from_returned_cursor() 
         }
         return httpx.Response(
             200,
-            json={
-                "api_version": "v1",
-                "events": [{"sequence": 42, "event": event}],
-                "next_sequence": 42,
-            },
+            headers={"Content-Type": "text/event-stream"},
+            text=(
+                "id: 42\n"
+                "event: market-data\n"
+                f"data: {json.dumps({'sequence': 42, 'event': event})}\n\n"
+            ),
         )
 
     async def run() -> SipBar:
@@ -163,8 +217,50 @@ def test_platform_stream_leases_symbols_before_consuming_from_returned_cursor() 
     assert asyncio.run(run()).symbol == "AAPL"
     assert calls == [
         ("POST", "/v1/market-data/subscriptions"),
-        ("GET", "/v1/market-data/events"),
+        ("GET", "/v1/market-data/stream"),
     ]
+
+
+def test_platform_health_snapshot_fails_closed_when_fallback_is_recommended() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/market-data/status"
+        return httpx.Response(
+            200,
+            json={
+                "api_version": "v1",
+                "status": "degraded",
+                "fallback_recommended": True,
+                "symbols": [
+                    {
+                        "symbol": "SMCI",
+                        "subscribed": True,
+                        "status": "stale",
+                        "reason_codes": ["event_delay_above_300_seconds"],
+                    }
+                ],
+            },
+        )
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            stream = PlatformSipStream(
+                base_url="http://localhost:8765",
+                token=SecretStr("market-token"),
+                symbols=("SMCI",),
+                client=client,
+            )
+            with pytest.raises(SipProtocolError, match="health is not usable"):
+                await stream.require_healthy()
+
+    asyncio.run(run())
+
+
+def test_standalone_stream_lease_window_is_bounded_and_replayable() -> None:
+    now = datetime(2026, 7, 21, 13, 30, tzinfo=UTC)
+    replay, expiry = _lease_window(now_utc=now, max_seconds=0)
+    assert replay == now.replace(minute=25)
+    assert expiry == now.replace(hour=1, day=22)
+    assert expiry - replay < timedelta(days=2)
 
 
 def test_platform_authentication_error_fails_closed() -> None:

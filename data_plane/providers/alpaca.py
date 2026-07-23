@@ -87,6 +87,30 @@ def _remote_rows(
     rows = payload.get(endpoint)
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise DownloadError("cloud market-data API rows are invalid")
+    coverage = payload.get("coverage")
+    if not isinstance(coverage, dict):
+        raise DownloadError("cloud market-data coverage contract is invalid")
+    coverage_status = coverage.get("status")
+    fallback_recommended = coverage.get("fallback_recommended")
+    symbol_coverage = coverage.get("symbols")
+    if (
+        not isinstance(coverage_status, str)
+        or not isinstance(fallback_recommended, bool)
+        or not isinstance(symbol_coverage, list)
+        or any(not isinstance(item, dict) for item in symbol_coverage)
+    ):
+        raise DownloadError("cloud market-data coverage contract is invalid")
+    returned_symbols = [
+        str(item.get("symbol", "")).strip().upper() for item in symbol_coverage
+    ]
+    requested_symbols = [symbol.strip().upper() for symbol in symbols]
+    if (
+        len(returned_symbols) != len(requested_symbols)
+        or set(returned_symbols) != set(requested_symbols)
+    ):
+        raise DownloadError("cloud market-data coverage contract is invalid")
+    if fallback_recommended:
+        raise DownloadError("cloud market-data coverage is not usable")
     return rows
 
 

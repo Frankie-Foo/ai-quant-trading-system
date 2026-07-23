@@ -22,7 +22,9 @@ which map data, model, strategy, trading, and application layers onto this repos
 The cloud multi-strategy service is a separate repository and deployment. This
 repository consumes its versioned feature API only through the slow-loop synchronization
 adapter documented in [cloud feature interface](docs/CLOUD_FEATURE_INTERFACE.md). The
-realtime kernel reads the local point-in-time cache and never waits on remote HTTP.
+realtime kernel reads the local point-in-time cache and never waits on remote feature
+HTTP. Its separate market collector declares a bounded lease, verifies detailed market
+health, then consumes resumable cloud SSE into the existing local SIP store.
 
 Real-data bootstrap and local credential setup are documented in
 [data access](docs/DATA_ACCESS.md). Community and undocumented feeds are automatically
@@ -175,8 +177,8 @@ and Paper API access without calling any order endpoint:
 
 The safe output must report an active, unblocked Paper account, authenticated cloud
 market events, and `orders_submitted: 0`. Alpaca WebSocket ownership lives only in the
-separate cloud-strategy-platform repository. This local collector consumes the scoped
-event API:
+separate cloud-strategy-platform repository. This local collector leases its symbols,
+waits for usable market health, then consumes the scoped SSE event API:
 
 ```powershell
 .\.venv\Scripts\python -m scripts.stream_alpaca_sip `
@@ -188,6 +190,11 @@ event API:
 It persists every received minute bar and latest NBBO quote for each symbol-second in a
 WAL/FULL SQLite ledger. API failure yields no event and therefore no decision; missing
 market data is never filled.
+
+Historical cloud bars and quotes must carry a valid per-symbol `coverage` contract.
+When the cloud reports regular-session gaps, an empty upstream response, stale realtime
+events, or `fallback_recommended=true`, the AI process stops that path. It does not
+silently switch to Yahoo/community data or reconnect to Alpaca with a hidden key.
 
 Broker writes remain fail-closed through three independent controls:
 

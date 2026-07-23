@@ -189,6 +189,26 @@ async def _run(args: argparse.Namespace, logger: JsonEventLogger) -> None:
     if not recovery.safe_to_resume:
         broker.close()
         raise RuntimeError("Paper startup reconciliation failed closed")
+    stream = PlatformSipStream(
+        base_url=settings.cloud_platform_base_url,
+        token=settings.cloud_market_data_api_token,
+        symbols=selection.symbols,
+    )
+    try:
+        await stream.ensure_subscription(
+            replay_from_utc=market_open,
+            expires_at_utc=market_close + timedelta(minutes=5),
+        )
+        health = await stream.wait_until_healthy()
+    except BaseException:
+        broker.close()
+        raise
+    logger.emit(
+        "cloud_market_data_healthy",
+        status=health.status,
+        fallback_recommended=health.fallback_recommended,
+        symbols=[item.symbol for item in health.symbols],
+    )
     time_exits = TimeExitCoordinator(
         order_ledger=order_ledger,
         exit_ledger=TimeExitLedger(args.order_db),
@@ -212,15 +232,6 @@ async def _run(args: argparse.Namespace, logger: JsonEventLogger) -> None:
         broker=broker,
         config=cfg,
         kill_switch_active=settings.trading_kill_switch,
-    )
-    stream = PlatformSipStream(
-        base_url=settings.cloud_platform_base_url,
-        token=settings.cloud_market_data_api_token,
-        symbols=selection.symbols,
-    )
-    await stream.ensure_subscription(
-        replay_from_utc=market_open,
-        expires_at_utc=market_close + timedelta(minutes=5),
     )
     started = asyncio.get_running_loop().time()
     session_remaining = max(0.0, (market_close - datetime.now(UTC)).total_seconds())
