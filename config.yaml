@@ -10,7 +10,7 @@ tiers:
   small: {min_cap: 0, weight: 0.05}
 exits: {k_tp: 2.0, k_sl: 1.0, time_stop_et: "15:55"}
 participation_cap: 0.08
-universe: {min_price: 2.0, min_rvol: 3.0, min_beta: 1.5, min_atr_pct: 0.03, luld_low_float_shares: 20000000}
+universe: {min_price: 2.0, min_rvol: 3.0, min_premarket_return: 0.0, min_premarket_gap_return: 0.0, min_premarket_close_location: 0.6, min_beta: 1.5, min_atr_pct: 0.03, max_bearish_open_to_close_return: -0.03, min_distribution_volume_ratio: 1.5, max_distribution_close_location: 0.3, luld_low_float_shares: 20000000}
 costs:
   commission_per_share: 0.0035
   commission_min: 0.35

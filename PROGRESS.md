@@ -486,3 +486,112 @@ cloud repository and still owns no Alpaca credential.
   missing or degraded licensed data to remain explicit and quarantined.
 - Repository acceptance: 204 tests passed, Ruff clean, and strict mypy success across
   171 source files.
+
+## M18 directional-volume and bearish-distribution hard gates - 2026-07-24
+
+Status: implemented and verified; unsigned high RVOL can no longer become a buy
+candidate without price confirmation, and prior-session distribution fails closed.
+
+- Added a point-in-time prior-session distribution veto: open-to-close return at most
+  -3%, volume at least 1.5 times the preceding 20-session average, and a close in the
+  bottom 30% of the range.
+- Added premarket OHLC, aggregate VWAP, return, close-location, and direction evidence.
+  Final survivors require RVOL strictly above 3, a positive premarket return, close
+  above premarket VWAP, close location at least 0.60, and premarket close strictly
+  above the prior daily close.
+- Upgraded daily precheck, premarket feature, and selection snapshots to v2. Historical
+  replay uses the same code path and thresholds; obsolete selection snapshots cannot
+  pass the execution loader.
+- Recomputed 2026-07-24 from accepted SIP evidence. DECK was rejected for prior-day
+  bearish distribution and a -2.0576% premarket gap; RHI, RNG, TOL, and ITRG failed
+  premarket price confirmation. The final locked pool contained zero survivors and no
+  order was submitted.
+- Evidence snapshots:
+  `kernel.universe.daily_precheck-20260724T124931Z-bd17e2d250be`,
+  `kernel.premarket.rvol_candidates-20260724T125001Z-f2bfa7fdd851`, and
+  `kernel.universe.selection_gates-20260724T125058Z-f948332cedca`.
+- Repository acceptance: 209 tests passed, Ruff clean, and strict mypy success across
+  171 source files.
+
+## M19 advisory multi-timeframe technical monitor - 2026-07-24
+
+Status: running locally every 15 minutes for RNG; it is read-only, advisory-only,
+and automatically stops after the regular session.
+
+- Added point-in-time 1/5/15-minute aggregation that excludes unfinished buckets.
+  Deterministic indicators include MACD, Bollinger bands, KDJ, session VWAP,
+  confirmed three-bar fractals, intraday Fibonacci levels, and an explicitly
+  labelled five-minute wave-structure proxy.
+- Added a strict advisory rule: a possible add requires fresh realtime SIP NBBO,
+  spread at most 0.30%, price above VWAP, aligned 15-minute and 5-minute trend,
+  a confirmed 1-minute trigger, and a green 1-minute bar at least 1.5 times its
+  prior-20-bar median volume. Protection levels take precedence over bullish
+  indicators, while every result carries `order_authorized=false`.
+- Preserved the execution downloader's fail-closed coverage rule. A separately
+  named monitoring-only reader may retain sparse/no-trade minutes, reports the
+  provider's gap evidence, and cannot be imported as an execution authorization.
+- Added a single-instance PowerShell supervisor. It verifies ownership and health
+  of the dedicated local cloud API, writes append-only JSONL evidence, aligns
+  checks to 15-minute Eastern-time boundaries, stops after 15:58 ET, and exits
+  after three consecutive failures.
+- Live acceptance at 2026-07-24 11:49 ET returned `HOLD` around a 48.455 midpoint
+  with `order_authorized=false`; the background error log was empty.
+- Repository acceptance: 214 tests passed, Ruff clean, and strict mypy success
+  across 174 source files.
+
+## M20 causal long-green expansion watchlist - 2026-07-24
+
+Status: implemented as an advisory confirmation layer; it does not replace the
+premarket selector or turn a completed long-green candle into a late entry.
+
+- Added a point-in-time long-green profile over completed regular-session bars:
+  session return at least 4%, body/range at least 0.60, close location at least
+  0.80, close above session VWAP, and volume confirmation. Volume can be confirmed
+  either by a green minute at least 1.5 times its preceding 20-minute median or by
+  premarket RVOL strictly above 3, which avoids comparing an already high-volume
+  open only against itself.
+- Added a 0-100 deterministic strength score and a locked-pool watchlist scanner.
+  The scanner preserves sparse-minute evidence, fails unavailable symbols closed,
+  excludes unfinished bars, and carries `automatic_order_authorized=false`.
+- Kept the three causal responsibilities separate: premarket selection identifies
+  potential, ORB-5 supplies an early entry trigger, and the completed long-green
+  profile confirms trend strength for monitoring and staged profit-taking.
+- Replay evidence for RNG: selection snapshot
+  `kernel.universe.selection_gates-20260724T130308Z-74bca7e19fcc` ranked RNG first
+  at 09:03 ET with RVOL 32.073337; the first ORB decision occurred at 09:36 ET
+  from the completed 09:35 bar above a 44.33 opening-range high. The full
+  long-green profile first qualified at 09:51 ET, so it is explicitly not treated
+  as the early entry event.
+- Live confirmation at 12:08 ET scored RNG 89.865687 and returned `HOLD` for the
+  remaining 20 shares with order authorization disabled.
+- Repository acceptance: 217 tests passed, Ruff clean, and strict mypy success
+  across 175 source files.
+
+## M21 cross-symbol structured earnings intensity - 2026-07-24
+
+Status: implemented without a symbol/company whitelist; the remembered object is
+the catalyst/price/volume pattern, not RNG.
+
+- Fixed a generic cleaning defect: short but machine-parseable earnings wires were
+  previously rejected by the 25-word news-noise rule. Structured actual-vs-estimate,
+  forward range-vs-consensus, and raised-guidance range headlines are now preserved;
+  unstructured short news remains excluded.
+- Added deterministic, unit-aware parsing for EPS and sales/revenue actual surprise,
+  forward EPS and revenue guidance versus consensus, and EPS and revenue guidance
+  raises. K/M/B/T suffixes are normalized before comparisons.
+- Added three evidence layers (actual results, forward guide, and guidance raise),
+  a bounded 0-100 earnings intensity score, and an explicit strength-confirmed flag.
+  The generic tests use an `Example` issuer rather than any production ticker.
+- Replayed the 2026-07-24 source evidence. RNG now has three eligible earnings events
+  instead of one: EPS surprise +5.1724%, revenue surprise +0.9963%, forward EPS and
+  revenue guide +2.0000%/+0.5724% versus consensus, and FY EPS/revenue guidance raises
+  +2.0284%/+0.3992%. The resulting intensity is 74.469452 with all three evidence
+  layers confirmed.
+- Accepted evidence:
+  `kernel.catalysts.prepared-20260724T161513Z-b37e0947d774` and
+  `kernel.catalysts.overnight_candidates-20260724T161513Z-b593bc51a244`, both on
+  version-2 schemas. A redundant final-gate rebuild was stopped after Massive's
+  free-float pagination stalled; the next normal selection run will consume the
+  accepted candidate snapshot.
+- Repository acceptance: 219 tests passed, Ruff clean, and strict mypy success
+  across 175 source files.

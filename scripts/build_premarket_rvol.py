@@ -229,6 +229,9 @@ def _feature_checks(
     symbols: tuple[str, ...],
     trade_date: date,
     decision_asof_utc: datetime,
+    min_rvol: float,
+    min_premarket_return: float,
+    min_premarket_close_location: float,
 ) -> tuple[DataQualityCheck, ...]:
     provenance = f"{FEATURE_SOURCE}@{decision_asof_utc.isoformat()}"
     actual = set(frame.get_column("symbol").to_list())
@@ -244,7 +247,19 @@ def _feature_checks(
         )
     ).height
     invalid_pass = frame.filter(
-        pl.col("rvol_pass") != (pl.col("rvol") > 3.0).fill_null(False)
+        pl.col("rvol_pass") != (pl.col("rvol") > min_rvol).fill_null(False)
+    ).height
+    expected_price_confirmation = (
+        (pl.col("premarket_return") > min_premarket_return)
+        & pl.col("premarket_above_vwap")
+        & (
+            pl.col("premarket_close_location")
+            >= min_premarket_close_location
+        )
+    ).fill_null(False)
+    invalid_price_confirmation = frame.filter(
+        pl.col("premarket_price_confirmation")
+        != expected_price_confirmation
     ).height
     return (
         _check(
@@ -292,7 +307,18 @@ def _feature_checks(
             QualitySeverity.CRITICAL,
             invalid_pass == 0,
             invalid_pass,
-            "rvol_pass iff RVOL > 3.0",
+            f"rvol_pass iff RVOL > {min_rvol}",
+            provenance,
+        ),
+        _check(
+            "premarket_price_confirmation",
+            QualitySeverity.CRITICAL,
+            invalid_price_confirmation == 0,
+            invalid_price_confirmation,
+            (
+                f"return > {min_premarket_return}, close > VWAP, and "
+                f"close location >= {min_premarket_close_location}"
+            ),
             provenance,
         ),
     )
@@ -387,6 +413,8 @@ def main() -> None:
         cutoff_et=cutoff_et,
         n=HISTORY_SESSIONS,
         min_rvol=cfg.universe.min_rvol,
+        min_premarket_return=cfg.universe.min_premarket_return,
+        min_premarket_close_location=cfg.universe.min_premarket_close_location,
         provenance=(
             f"alpaca.{policy.feed}.split_adjusted[{len(raw_snapshots)}sessions]"
             f"@{data_cutoff_utc.isoformat()}"
@@ -405,6 +433,9 @@ def main() -> None:
         symbols=symbols,
         trade_date=args.trade_date,
         decision_asof_utc=decision_asof_utc,
+        min_rvol=cfg.universe.min_rvol,
+        min_premarket_return=cfg.universe.min_premarket_return,
+        min_premarket_close_location=cfg.universe.min_premarket_close_location,
     )
     parent_ids = (locked_snapshot.dataset_id,) + tuple(
         snapshot.dataset_id for snapshot in raw_snapshots
@@ -413,7 +444,7 @@ def main() -> None:
         output,
         root=args.data_root,
         source=FEATURE_SOURCE,
-        schema_version="premarket_rvol_candidates.v1",
+        schema_version="premarket_rvol_candidates.v2",
         checks=checks,
         parent_snapshot_ids=parent_ids,
     )

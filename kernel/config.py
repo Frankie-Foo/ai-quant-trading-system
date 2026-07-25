@@ -33,8 +33,14 @@ class ExitConfig(FrozenModel):
 class UniverseConfig(FrozenModel):
     min_price: float = Field(gt=0)
     min_rvol: float = Field(gt=0)
+    min_premarket_return: float = Field(ge=0)
+    min_premarket_gap_return: float = Field(ge=0)
+    min_premarket_close_location: float = Field(ge=0, le=1)
     min_beta: float = Field(gt=0)
     min_atr_pct: float = Field(gt=0)
+    max_bearish_open_to_close_return: float = Field(lt=0)
+    min_distribution_volume_ratio: float = Field(gt=1)
+    max_distribution_close_location: float = Field(ge=0, le=1)
     luld_low_float_shares: int = Field(gt=0)
 
 

@@ -145,7 +145,7 @@ def main() -> None:
         frame,
         root=args.data_root,
         source="kernel.universe.daily_precheck",
-        schema_version="universe_daily_precheck.v1",
+        schema_version="universe_daily_precheck.v2",
         checks=checks,
         parent_snapshot_ids=_parent_snapshot_ids(args.data_root, args.trade_date),
     )

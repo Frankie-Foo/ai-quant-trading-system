@@ -227,3 +227,62 @@ def test_daily_universe_rejects_probable_ticker_identity_discontinuity() -> None
     assert row["max_abs_return"] > 0.9
     assert "suspected_identity_discontinuity" in row["reject_reason"]
     assert row["precheck_pass"] is False
+
+
+def test_daily_universe_rejects_prior_day_bearish_distribution() -> None:
+    frame, trade_date = _daily_fixture()
+    cfg = load_config(ROOT / "config.yaml")
+    previous_close = (
+        frame.filter(pl.col("symbol") == "FAST")
+        .sort("trade_date")
+        .get_column("close")[-2]
+    )
+    amended = frame.with_columns(
+        pl.when(
+            (pl.col("symbol") == "FAST")
+            & (pl.col("trade_date") == trade_date - timedelta(days=1))
+        )
+        .then(pl.lit(previous_close * 1.01))
+        .otherwise(pl.col("open"))
+        .alias("open"),
+        pl.when(
+            (pl.col("symbol") == "FAST")
+            & (pl.col("trade_date") == trade_date - timedelta(days=1))
+        )
+        .then(pl.lit(previous_close * 1.02))
+        .otherwise(pl.col("high"))
+        .alias("high"),
+        pl.when(
+            (pl.col("symbol") == "FAST")
+            & (pl.col("trade_date") == trade_date - timedelta(days=1))
+        )
+        .then(pl.lit(previous_close * 0.94))
+        .otherwise(pl.col("low"))
+        .alias("low"),
+        pl.when(
+            (pl.col("symbol") == "FAST")
+            & (pl.col("trade_date") == trade_date - timedelta(days=1))
+        )
+        .then(pl.lit(previous_close * 0.95))
+        .otherwise(pl.col("close"))
+        .alias("close"),
+        pl.when(
+            (pl.col("symbol") == "FAST")
+            & (pl.col("trade_date") == trade_date - timedelta(days=1))
+        )
+        .then(pl.lit(2_000_000.0))
+        .otherwise(pl.col("volume"))
+        .alias("volume"),
+    )
+    result = _build_universe_from_daily(
+        amended,
+        trade_date=trade_date,
+        cfg=cfg,
+        provenance="test.daily",
+    )
+    row = result.filter(pl.col("symbol") == "FAST").row(0, named=True)
+    assert row["daily_open_to_close_return"] < -0.03
+    assert row["daily_volume_ratio"] == pytest.approx(2.0)
+    assert row["daily_close_location"] < 0.30
+    assert "prior_day_bearish_distribution" in row["reject_reason"]
+    assert row["precheck_pass"] is False

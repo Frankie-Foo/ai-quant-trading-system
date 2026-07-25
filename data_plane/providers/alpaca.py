@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
 import polars as pl
@@ -54,14 +54,14 @@ def platform_access_from_env() -> tuple[str, str]:
     return base_url, token
 
 
-def _remote_rows(
+def _remote_payload(
     endpoint: str,
     *,
     symbols: tuple[str, ...],
     start_utc: datetime,
     end_utc: datetime,
     client: httpx.Client | None,
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], dict[str, Any]]:
     base_url, token = platform_access_from_env()
     owns_client = client is None
     http_client = client or httpx.Client(timeout=60)
@@ -109,7 +109,25 @@ def _remote_rows(
         or set(returned_symbols) != set(requested_symbols)
     ):
         raise DownloadError("cloud market-data coverage contract is invalid")
-    if fallback_recommended:
+    return rows, coverage
+
+
+def _remote_rows(
+    endpoint: str,
+    *,
+    symbols: tuple[str, ...],
+    start_utc: datetime,
+    end_utc: datetime,
+    client: httpx.Client | None,
+) -> list[dict[str, object]]:
+    rows, coverage = _remote_payload(
+        endpoint,
+        symbols=symbols,
+        start_utc=start_utc,
+        end_utc=end_utc,
+        client=client,
+    )
+    if coverage["fallback_recommended"] is True:
         raise DownloadError("cloud market-data coverage is not usable")
     return rows
 
@@ -142,6 +160,47 @@ def fetch_bars(
     return canonicalize_bars(frame).filter(
         (pl.col("ts_utc") >= start_utc) & (pl.col("ts_utc") < end_utc)
     )
+
+
+def fetch_sparse_bars_for_monitoring(
+    symbols: tuple[str, ...],
+    start_utc: datetime,
+    end_utc: datetime,
+    *,
+    feed: AlpacaStockFeed | None = None,
+    client: httpx.Client | None = None,
+) -> tuple[pl.DataFrame, dict[str, Any]]:
+    """Read observed minute bars for advisory charts while preserving gap evidence.
+
+    This function intentionally has a monitoring-specific name.  It must not be
+    used by execution or training paths because it permits upstream coverage to
+    report sparse/no-trade minutes.
+    """
+
+    selected_feed = feed or stock_data_policy_from_env().feed
+    if not symbols:
+        raise ValueError("at least one symbol is required")
+    rows, coverage = _remote_payload(
+        "bars",
+        symbols=symbols,
+        start_utc=start_utc,
+        end_utc=end_utc,
+        client=client,
+    )
+    if not rows:
+        raise DownloadError("cloud market-data API returned no observed bars")
+    status = coverage.get("status")
+    if status not in {"observed", "gaps_detected"}:
+        raise DownloadError("cloud market-data coverage is not observable")
+    for row in rows:
+        row["vwap"] = nullable_float(row.get("vwap"))
+        row["source"] = "cloud.alpaca.market_data"
+        row["feed"] = selected_feed
+        row["adjustment"] = "split_adjusted"
+    frame = canonicalize_bars(pl.DataFrame(rows)).filter(
+        (pl.col("ts_utc") >= start_utc) & (pl.col("ts_utc") < end_utc)
+    )
+    return frame, coverage
 
 
 def fetch_quotes(

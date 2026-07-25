@@ -25,9 +25,35 @@ RVOL_COLUMNS = (
     "historical_nonzero_sessions",
     "rvol",
     "rvol_pass",
+    "premarket_open",
+    "premarket_high",
+    "premarket_low",
+    "premarket_close",
+    "premarket_vwap",
+    "premarket_return",
+    "premarket_close_location",
+    "premarket_above_vwap",
+    "premarket_price_confirmation",
     "availability",
     "rvol_provenance",
+    "premarket_price_provenance",
 )
+
+
+def _positive_float(value: object) -> float:
+    if (
+        not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) <= 0
+    ):
+        raise ValueError("bar price must be finite and positive")
+    return float(value)
+
+
+def _nonnegative_int(value: object) -> int:
+    if not isinstance(value, int) or value < 0:
+        raise ValueError("bar volume must be a nonnegative integer")
+    return value
 
 
 def atr(daily: pl.DataFrame, n: int = 14) -> pl.Series:
@@ -120,6 +146,8 @@ def rvol(
     cutoff_et: time,
     n: int = 20,
     min_rvol: float = 3.0,
+    min_premarket_return: float = 0.0,
+    min_premarket_close_location: float = 0.60,
     provenance: str,
 ) -> pl.DataFrame:
     """Compute no-lookahead premarket relative volume for an explicit symbol pool.
@@ -137,9 +165,25 @@ def rvol(
         raise ValueError("n must be positive")
     if not math.isfinite(min_rvol) or min_rvol <= 0:
         raise ValueError("min_rvol must be a finite positive number")
+    if not math.isfinite(min_premarket_return) or min_premarket_return < 0:
+        raise ValueError("min_premarket_return must be finite and nonnegative")
+    if (
+        not math.isfinite(min_premarket_close_location)
+        or not 0 <= min_premarket_close_location <= 1
+    ):
+        raise ValueError("min_premarket_close_location must be between zero and one")
     if not provenance.strip():
         raise ValueError("provenance must be non-empty")
-    required_bars = {"symbol", "ts_utc", "volume"}
+    required_bars = {
+        "symbol",
+        "ts_utc",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "vwap",
+    }
     missing_bars = required_bars - set(bars.columns)
     if missing_bars:
         raise ValueError(f"bars missing required columns: {sorted(missing_bars)}")
@@ -189,7 +233,10 @@ def rvol(
         for symbol in locked_symbols
         for trade_date in completed
     }
-    for row in relevant.select("symbol", "ts_utc", "volume").iter_rows(named=True):
+    current_bars: dict[str, list[dict[str, object]]] = {
+        symbol: [] for symbol in locked_symbols
+    }
+    for row in relevant.select(*sorted(required_bars)).iter_rows(named=True):
         symbol = str(row["symbol"])
         timestamp = row["ts_utc"]
         volume = row["volume"]
@@ -201,6 +248,8 @@ def rvol(
         start_utc, end_utc = window_by_date[local_date]
         if start_utc <= timestamp < end_utc:
             cumulative[(symbol, local_date)] += volume
+            if local_date == target_date:
+                current_bars[symbol].append(row)
 
     history_session_count = sum(value in completed for value in historical_dates)
     current_complete = target_date in completed
@@ -227,6 +276,65 @@ def rvol(
                 raise AssertionError("complete current session has no cumulative volume")
             value = float(current_volume / historical_median)
             availability = "available"
+
+        target_rows = sorted(
+            current_bars[symbol],
+            key=lambda row: row["ts_utc"]
+            if isinstance(row["ts_utc"], datetime)
+            else datetime.min.replace(tzinfo=UTC),
+        )
+        premarket_open: float | None = None
+        premarket_high: float | None = None
+        premarket_low: float | None = None
+        premarket_close: float | None = None
+        premarket_vwap: float | None = None
+        premarket_return: float | None = None
+        premarket_close_location: float | None = None
+        premarket_above_vwap = False
+        premarket_price_confirmation = False
+        price_values = [
+            row[column]
+            for row in target_rows
+            for column in ("open", "high", "low", "close", "vwap")
+        ]
+        valid_prices = bool(target_rows) and all(
+            isinstance(item, (int, float))
+            and math.isfinite(float(item))
+            and float(item) > 0
+            for item in price_values
+        )
+        if valid_prices:
+            premarket_open = _positive_float(target_rows[0]["open"])
+            premarket_high = max(
+                _positive_float(row["high"]) for row in target_rows
+            )
+            premarket_low = min(
+                _positive_float(row["low"]) for row in target_rows
+            )
+            premarket_close = _positive_float(target_rows[-1]["close"])
+            weighted_volume = sum(
+                _nonnegative_int(row["volume"]) for row in target_rows
+            )
+            if weighted_volume > 0:
+                premarket_vwap = sum(
+                    _positive_float(row["vwap"])
+                    * _nonnegative_int(row["volume"])
+                    for row in target_rows
+                ) / weighted_volume
+            if premarket_vwap is not None:
+                premarket_return = premarket_close / premarket_open - 1
+                price_range = premarket_high - premarket_low
+                premarket_close_location = (
+                    (premarket_close - premarket_low) / price_range
+                    if price_range > 0
+                    else 0.5
+                )
+                premarket_above_vwap = premarket_close > premarket_vwap
+                premarket_price_confirmation = (
+                    premarket_return > min_premarket_return
+                    and premarket_above_vwap
+                    and premarket_close_location >= min_premarket_close_location
+                )
         rows.append(
             {
                 "symbol": symbol,
@@ -240,10 +348,24 @@ def rvol(
                 "historical_nonzero_sessions": sum(item > 0 for item in historical_volumes),
                 "rvol": value,
                 "rvol_pass": value is not None and value > min_rvol,
+                "premarket_open": premarket_open,
+                "premarket_high": premarket_high,
+                "premarket_low": premarket_low,
+                "premarket_close": premarket_close,
+                "premarket_vwap": premarket_vwap,
+                "premarket_return": premarket_return,
+                "premarket_close_location": premarket_close_location,
+                "premarket_above_vwap": premarket_above_vwap,
+                "premarket_price_confirmation": premarket_price_confirmation,
                 "availability": availability,
                 "rvol_provenance": (
-                    f"{provenance}|premarket_rvol_median{n}.v1|"
+                    f"{provenance}|premarket_rvol_median{n}.v2|"
                     f"04:00-{cutoff_et.isoformat()}ET_end_exclusive"
+                ),
+                "premarket_price_provenance": (
+                    f"{provenance}|premarket_direction.v1|"
+                    f"return>{min_premarket_return}|close>vwap|"
+                    f"close_location>={min_premarket_close_location}"
                 ),
             }
         )
@@ -263,8 +385,18 @@ def _rvol_schema() -> dict[str, Any]:
         "historical_nonzero_sessions": pl.UInt32,
         "rvol": pl.Float64,
         "rvol_pass": pl.Boolean,
+        "premarket_open": pl.Float64,
+        "premarket_high": pl.Float64,
+        "premarket_low": pl.Float64,
+        "premarket_close": pl.Float64,
+        "premarket_vwap": pl.Float64,
+        "premarket_return": pl.Float64,
+        "premarket_close_location": pl.Float64,
+        "premarket_above_vwap": pl.Boolean,
+        "premarket_price_confirmation": pl.Boolean,
         "availability": pl.String,
         "rvol_provenance": pl.String,
+        "premarket_price_provenance": pl.String,
     }
 
 

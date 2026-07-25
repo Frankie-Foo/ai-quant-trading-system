@@ -70,15 +70,25 @@ The command is restart-safe: accepted per-session raw snapshots are reused. Befo
 the decision time it downloads history only and leaves the target feature unavailable;
 at or after the decision time it adds the target window allowed by the configured feed
 policy and persists the point-in-time result. Licensed `sip` uses a zero-minute delay;
-`delayed_sip` is an explicit 15-minute fallback. See the historical
+`delayed_sip` is an explicit 15-minute fallback. RVOL is deliberately unsigned, so it
+cannot pass the final gate by itself: the same snapshot must also show a positive
+04:00-to-cutoff return, a close above aggregate premarket VWAP, and a close in the top
+40% of the observed premarket range. The final gate additionally requires the
+premarket close to be strictly above the prior close. See the historical
 [premarket RVOL audit](docs/PREMARKET_RVOL_AUDIT_2026-07-20.md).
 
 Prefetch and apply the remaining L0 selection gates (point-in-time market cap,
-earnings day, current halt, and recent LULD/low-float risk) with:
+earnings day, current halt, recent LULD/low-float risk, and prior-session bearish
+distribution) with:
 
 ```powershell
 .\.venv\Scripts\python -m scripts.build_selection_gates --trade-date 2026-07-20
 ```
+
+The bearish-distribution veto rejects a prior session whose open-to-close return is
+at most -3%, volume is at least 1.5 times the preceding 20-session average, and close
+location is in the bottom 30% of the daily range. These thresholds are frozen and
+visible in `config.yaml`; both feature and final-selection snapshots use v2 schemas.
 
 Build a point-in-time, explicitly non-actionable ORB-5 research snapshot with:
 

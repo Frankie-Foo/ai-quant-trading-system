@@ -3,12 +3,14 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 
 import polars as pl
+import pytest
 
 from data_plane.calendar import build_xnys_schedule
 from data_plane.catalysts import CATALYST_COLUMNS, audit_catalysts, canonicalize_catalysts
 from data_plane.providers.sec_filings import _parse_master_index, _recent_by_accession
 from kernel.catalysts import (
     build_catalyst_candidates,
+    parse_earnings_headline,
     prepare_catalysts,
     select_overnight_catalysts,
 )
@@ -188,6 +190,85 @@ def test_preparation_enforces_cleaning_dedup_and_no_future() -> None:
     assert contract["source_count"] == 2
     assert earnings["eligible"] is True
     assert earnings["catalyst_category"] == "earnings"
+
+
+def test_structured_earnings_headlines_preserve_short_material_evidence() -> None:
+    actual = parse_earnings_headline(
+        "Example Q2 Adj. EPS $1.22 Beats $1.16 Estimate, "
+        "Sales $657.011M Beat $650.530M Estimate"
+    )
+    quarterly = parse_earnings_headline(
+        "Example Sees Q3 Adj EPS $1.25-$1.30 vs $1.25 Est; "
+        "Sees Sales $664.000M-$670.000M vs $663.204M Est"
+    )
+    annual = parse_earnings_headline(
+        "Example Raises FY2026 Adj EPS Guidance from $4.85-$5.01 "
+        "to $4.96-$5.10 vs $4.92 Est; Raises FY2026 Sales Guidance "
+        "from $2.620B-$2.640B to $2.635B-$2.646B vs $2.631B Est"
+    )
+
+    assert actual.structured is True
+    assert actual.actual_eps_surprise == pytest.approx(1.22 / 1.16 - 1)
+    assert actual.actual_revenue_surprise == pytest.approx(657.011 / 650.530 - 1)
+    assert quarterly.forward_eps_vs_consensus == pytest.approx(1.275 / 1.25 - 1)
+    assert quarterly.forward_revenue_vs_consensus == pytest.approx(
+        667.0 / 663.204 - 1
+    )
+    assert annual.eps_guidance_raise == pytest.approx(5.03 / 4.93 - 1)
+    assert annual.revenue_guidance_raise == pytest.approx(2.6405 / 2.63 - 1)
+
+
+def test_earnings_intensity_aggregates_actual_guide_and_raise_layers() -> None:
+    base = _events().head(1)
+    headlines = [
+        (
+            "earnings-actual",
+            "Example Q2 Adj. EPS $1.22 Beats $1.16 Estimate, "
+            "Sales $657.011M Beat $650.530M Estimate",
+        ),
+        (
+            "earnings-quarterly",
+            "Example Sees Q3 Adj EPS $1.25-$1.30 vs $1.25 Est; "
+            "Sees Sales $664.000M-$670.000M vs $663.204M Est",
+        ),
+        (
+            "earnings-annual",
+            "Example Raises FY2026 Adj EPS Guidance from $4.85-$5.01 "
+            "to $4.96-$5.10 vs $4.92 Est; Raises FY2026 Sales Guidance "
+            "from $2.620B-$2.640B to $2.635B-$2.646B vs $2.631B Est",
+        ),
+    ]
+    frames = [
+        base.with_columns(
+            pl.lit(event_id).alias("source_event_id"),
+            pl.lit(["EARN"]).alias("symbols"),
+            pl.lit(headline).alias("headline"),
+            pl.lit("").alias("summary"),
+        )
+        for event_id, headline in headlines
+    ]
+    prepared = prepare_catalysts(
+        canonicalize_catalysts(pl.concat(frames)),
+        asof_utc=datetime(2026, 7, 20, 0, 0, tzinfo=UTC),
+    )
+    assert prepared.get_column("eligible").to_list() == [True, True, True]
+    assert prepared.get_column("catalyst_category").to_list() == [
+        "earnings",
+        "earnings",
+        "earnings",
+    ]
+    overnight = prepared.with_columns(
+        pl.lit(date(2026, 7, 20)).cast(pl.Date).alias("session_date")
+    )
+    candidate = build_catalyst_candidates(
+        pl.DataFrame({"symbol": ["EARN"], "precheck_pass": [True]}),
+        overnight,
+    ).row(0, named=True)
+
+    assert candidate["event_count"] == 3
+    assert candidate["earnings_evidence_layers"] == 3
+    assert candidate["earnings_strength_confirmed"] is True
+    assert candidate["earnings_intensity_score"] >= 70
 
 
 def test_weekend_news_maps_to_next_session_without_post_asof_events() -> None:

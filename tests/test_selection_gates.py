@@ -92,6 +92,15 @@ def _gate_inputs() -> tuple[pl.DataFrame, ...]:
             "rvol": [4.0, 5.0, 6.0, 7.0, 3.0, 8.0],
             "rvol_pass": [True, True, True, True, False, True],
             "availability": ["available"] * 6,
+            "premarket_open": [10.0] * 6,
+            "premarket_high": [11.2] * 6,
+            "premarket_low": [9.9] * 6,
+            "premarket_close": [11.0] * 6,
+            "premarket_vwap": [10.8] * 6,
+            "premarket_return": [0.1] * 6,
+            "premarket_close_location": [1.0 / 1.3] * 6,
+            "premarket_above_vwap": [True] * 6,
+            "premarket_price_confirmation": [True] * 6,
         }
     )
     market = pl.DataFrame(
@@ -173,6 +182,35 @@ def test_future_halt_after_asof_does_not_change_current_halt_gate() -> None:
         low_float_shares=20_000_000,
     )
     assert result.filter(pl.col("symbol") == "PASS").get_column("pass_gate")[0]
+
+
+def test_selection_rejects_unsigned_volume_and_negative_gap() -> None:
+    inputs = list(_gate_inputs())
+    rvol = inputs[2].with_columns(
+        pl.when(pl.col("symbol") == "PASS")
+        .then(pl.lit(False))
+        .otherwise(pl.col("premarket_price_confirmation"))
+        .alias("premarket_price_confirmation"),
+        pl.when(pl.col("symbol") == "EARN")
+        .then(pl.lit(9.9))
+        .otherwise(pl.col("premarket_close"))
+        .alias("premarket_close"),
+    )
+    inputs[2] = rvol
+    result = apply_selection_gates(
+        *inputs,
+        trade_date=date(2026, 7, 20),
+        asof_utc=datetime(2026, 7, 20, 12, 0, tzinfo=UTC),
+        recent_session_dates=[date(2026, 7, day) for day in range(13, 18)],
+        cfg=load_config("config.yaml"),
+        low_float_shares=20_000_000,
+    )
+    rows = {row["symbol"]: row for row in result.iter_rows(named=True)}
+    assert (
+        rows["PASS"]["reject_reason"]
+        == "premarket_volume_not_confirmed_by_price"
+    )
+    assert "premarket_not_above_prior_close" in rows["EARN"]["reject_reason"]
 
 
 def test_unresolved_prior_day_halt_is_still_current() -> None:

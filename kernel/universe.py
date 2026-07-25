@@ -88,7 +88,24 @@ def apply_selection_gates(
     for name, frame, required in (
         ("daily_universe", daily_universe, {"symbol", "precheck_pass", "reject_reason"}),
         ("catalyst_candidates", catalyst_candidates, {"symbol"}),
-        ("rvol_features", rvol_features, {"symbol", "rvol", "availability"}),
+        (
+            "rvol_features",
+            rvol_features,
+            {
+                "symbol",
+                "rvol",
+                "availability",
+                "premarket_open",
+                "premarket_high",
+                "premarket_low",
+                "premarket_close",
+                "premarket_vwap",
+                "premarket_return",
+                "premarket_close_location",
+                "premarket_above_vwap",
+                "premarket_price_confirmation",
+            },
+        ),
         ("market_details", market_details, {"symbol", "market_cap"}),
         ("earnings_calendar", earnings_calendar, {"symbol", "trade_date"}),
         (
@@ -120,6 +137,18 @@ def apply_selection_gates(
             pl.lit(None, dtype=pl.Float64).alias("rvol"),
             pl.lit(None, dtype=pl.String).alias("rvol_availability"),
             pl.lit(None, dtype=pl.String).alias("rvol_provenance"),
+            pl.lit(None, dtype=pl.Float64).alias("premarket_open"),
+            pl.lit(None, dtype=pl.Float64).alias("premarket_high"),
+            pl.lit(None, dtype=pl.Float64).alias("premarket_low"),
+            pl.lit(None, dtype=pl.Float64).alias("premarket_close"),
+            pl.lit(None, dtype=pl.Float64).alias("premarket_vwap"),
+            pl.lit(None, dtype=pl.Float64).alias("premarket_return"),
+            pl.lit(None, dtype=pl.Float64).alias("premarket_gap_return"),
+            pl.lit(None, dtype=pl.Float64).alias("premarket_close_location"),
+            pl.lit(False).alias("premarket_above_vwap"),
+            pl.lit(False).alias("premarket_price_confirmation"),
+            pl.lit(False).alias("directional_volume_confirmed"),
+            pl.lit(None, dtype=pl.String).alias("premarket_price_provenance"),
             pl.lit(None, dtype=pl.Float64).alias("free_float"),
             pl.lit(None, dtype=pl.Date).alias("free_float_effective_date"),
             pl.lit(None, dtype=pl.String).alias("free_float_provenance"),
@@ -166,6 +195,15 @@ def apply_selection_gates(
         float_row = float_map.get(symbol, {})
         cap = _number(market.get("market_cap"))
         rvol_value = _number(rvol_row.get("rvol"))
+        daily_close = _number(daily.get("price"))
+        premarket_close = _number(rvol_row.get("premarket_close"))
+        premarket_gap_return = (
+            premarket_close / daily_close - 1
+            if premarket_close is not None
+            and daily_close is not None
+            and daily_close > 0
+            else None
+        )
         float_value = _number(float_row.get("free_float"))
         symbol_halts = halts_by_symbol.get(symbol, [])
         current_halt = False
@@ -191,6 +229,13 @@ def apply_selection_gates(
             reasons.append("missing_rvol")
         elif rvol_value <= cfg.universe.min_rvol:
             reasons.append("rvol_below_or_equal_min")
+        elif not bool(rvol_row.get("premarket_price_confirmation")):
+            reasons.append("premarket_volume_not_confirmed_by_price")
+        elif (
+            premarket_gap_return is None
+            or premarket_gap_return <= cfg.universe.min_premarket_gap_return
+        ):
+            reasons.append("premarket_not_above_prior_close")
         if cap is None or cap <= 0:
             reasons.append("missing_market_cap")
         if earnings_day:
@@ -211,6 +256,16 @@ def apply_selection_gates(
             "adv_usd_provenance",
             "beta_provenance",
             "atr_pct_provenance",
+            "daily_open",
+            "daily_high",
+            "daily_low",
+            "daily_close",
+            "daily_volume",
+            "daily_open_to_close_return",
+            "daily_close_to_close_return",
+            "daily_volume_ratio",
+            "daily_close_location",
+            "daily_direction_provenance",
         ):
             if column in daily:
                 row[column] = daily[column]
@@ -223,6 +278,32 @@ def apply_selection_gates(
                 "rvol": rvol_value,
                 "rvol_availability": rvol_row.get("availability"),
                 "rvol_provenance": rvol_row.get("rvol_provenance"),
+                "premarket_open": rvol_row.get("premarket_open"),
+                "premarket_high": rvol_row.get("premarket_high"),
+                "premarket_low": rvol_row.get("premarket_low"),
+                "premarket_close": premarket_close,
+                "premarket_vwap": rvol_row.get("premarket_vwap"),
+                "premarket_return": rvol_row.get("premarket_return"),
+                "premarket_gap_return": premarket_gap_return,
+                "premarket_close_location": rvol_row.get(
+                    "premarket_close_location"
+                ),
+                "premarket_above_vwap": bool(
+                    rvol_row.get("premarket_above_vwap")
+                ),
+                "premarket_price_confirmation": bool(
+                    rvol_row.get("premarket_price_confirmation")
+                ),
+                "directional_volume_confirmed": (
+                    rvol_value is not None
+                    and rvol_value > cfg.universe.min_rvol
+                    and bool(rvol_row.get("premarket_price_confirmation"))
+                    and premarket_gap_return is not None
+                    and premarket_gap_return > cfg.universe.min_premarket_gap_return
+                ),
+                "premarket_price_provenance": rvol_row.get(
+                    "premarket_price_provenance"
+                ),
                 "free_float": float_value,
                 "free_float_effective_date": float_row.get("effective_date"),
                 "free_float_provenance": float_row.get("provenance"),
@@ -259,6 +340,11 @@ def _reason(row: dict[str, object], cfg: Config) -> tuple[bool, str]:
     beta_value = _number(row.get("beta"))
     atr_pct = _number(row.get("atr_pct"))
     max_abs_return = _number(row.get("max_abs_return"))
+    daily_open_to_close_return = _number(
+        row.get("daily_open_to_close_return")
+    )
+    daily_volume_ratio = _number(row.get("daily_volume_ratio"))
+    daily_close_location = _number(row.get("daily_close_location"))
 
     if price is None:
         reasons.append("missing_price")
@@ -267,6 +353,17 @@ def _reason(row: dict[str, object], cfg: Config) -> tuple[bool, str]:
 
     if max_abs_return is not None and max_abs_return > IDENTITY_DISCONTINUITY_RETURN:
         reasons.append("suspected_identity_discontinuity")
+
+    if (
+        daily_open_to_close_return is not None
+        and daily_volume_ratio is not None
+        and daily_close_location is not None
+        and daily_open_to_close_return
+        <= cfg.universe.max_bearish_open_to_close_return
+        and daily_volume_ratio >= cfg.universe.min_distribution_volume_ratio
+        and daily_close_location <= cfg.universe.max_distribution_close_location
+    ):
+        reasons.append("prior_day_bearish_distribution")
 
     beta_known = beta_value is not None
     atr_known = atr_pct is not None
@@ -292,7 +389,7 @@ def _build_universe_from_daily(
     reference_provenance: str | None = None,
 ) -> pl.DataFrame:
     """Build target-date candidates using only bars strictly before ``trade_date``."""
-    required = {"symbol", "trade_date", "high", "low", "close", "volume"}
+    required = {"symbol", "trade_date", "open", "high", "low", "close", "volume"}
     missing = required - set(daily.columns)
     if missing:
         raise ValueError(f"daily data missing required columns: {sorted(missing)}")
@@ -320,7 +417,12 @@ def _build_universe_from_daily(
         raise ValueError(f"SPY market benchmark is missing on {asof_date}")
 
     enriched = history.with_columns(
-        pl.col("close").shift(1).over("symbol").alias("previous_close")
+        pl.col("close").shift(1).over("symbol").alias("previous_close"),
+        pl.col("volume")
+        .shift(1)
+        .rolling_mean(window_size=ADV_WINDOW, min_samples=ADV_WINDOW)
+        .over("symbol")
+        .alias("prior_20d_avg_volume"),
     ).with_columns(
         (pl.col("close") / pl.col("previous_close") - 1).alias("asset_return"),
         pl.max_horizontal(
@@ -377,6 +479,22 @@ def _build_universe_from_daily(
         .select(
             "symbol",
             pl.col("close").alias("price"),
+            pl.col("open").alias("daily_open"),
+            pl.col("high").alias("daily_high"),
+            pl.col("low").alias("daily_low"),
+            pl.col("close").alias("daily_close"),
+            pl.col("volume").alias("daily_volume"),
+            (pl.col("close") / pl.col("open") - 1).alias(
+                "daily_open_to_close_return"
+            ),
+            pl.col("asset_return").alias("daily_close_to_close_return"),
+            (pl.col("volume") / pl.col("prior_20d_avg_volume")).alias(
+                "daily_volume_ratio"
+            ),
+            pl.when(pl.col("high") > pl.col("low"))
+            .then((pl.col("close") - pl.col("low")) / (pl.col("high") - pl.col("low")))
+            .otherwise(0.5)
+            .alias("daily_close_location"),
             "beta",
             (pl.col("atr") / pl.col("close")).alias("atr_pct"),
         )
@@ -407,6 +525,12 @@ def _build_universe_from_daily(
         pl.lit(f"{provenance}|max_abs_return.v1").alias(
             "identity_check_provenance"
         ),
+        pl.lit(
+            f"{provenance}|bearish_distribution.v1|"
+            f"open_to_close<={cfg.universe.max_bearish_open_to_close_return}|"
+            f"volume_ratio>={cfg.universe.min_distribution_volume_ratio}|"
+            f"close_location<={cfg.universe.max_distribution_close_location}"
+        ).alias("daily_direction_provenance"),
         pl.lit("CS" if candidate_symbols is not None else None, dtype=pl.String).alias(
             "security_type"
         ),
@@ -436,7 +560,7 @@ def _load_accepted_massive_daily(
     if not selected_dates:
         raise ValueError(f"no accepted Massive data before {trade_date.isoformat()}")
 
-    columns = ["symbol", "trade_date", "high", "low", "close", "volume"]
+    columns = ["symbol", "trade_date", "open", "high", "low", "close", "volume"]
     daily = (
         pl.scan_parquet(path_strings)
         .filter(pl.col("trade_date").is_in(selected_dates))
