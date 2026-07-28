@@ -1,0 +1,43 @@
+{
+  "name": "adaptive-trading-client",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "desktop": "npm run build && electron .",
+    "dist:win": "npm run build && electron-builder --win nsis"
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.6.0",
+    "electron": "^37.2.6",
+    "electron-builder": "^26.0.12",
+    "vite": "^6.1.0"
+  },
+  "build": {
+    "appId": "cn.frank.adaptive-trading-client",
+    "productName": "日内量化决策台",
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

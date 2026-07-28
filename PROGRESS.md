@@ -1,5 +1,27 @@
 # Progress
 
+## Adaptive desktop decision client — 2026-07-28
+
+Status: implemented for local read-only operation; automatic orders remain disabled.
+
+- Added one deterministic adaptive-plan state machine for catalyst and pure-factor
+  routes. It separates 15-second fact polling from completed-bar confirmation, a
+  three-minute soft-revision cooldown, and a per-session revision cap while allowing
+  immediate hard/time-stop decisions.
+- Added risk/notional-bounded probe and add sizing, two distinct completed one-minute
+  confirmations, 1/5/15-minute technical confluence, SPY/sector state, consolidated-tape
+  order flow, frozen catalyst evidence, and broker-authoritative position reconciliation.
+- A position that disappears at the Broker closes the plan and cannot be revived from
+  stale local state. Add advice is not repeated until the Broker position changes.
+- Added WAL/FULL SQLite baselines, runtime state, deduplicated append-only events,
+  historical SIP warmup, resumable SIP ingestion, and a read-only localhost HTTP/SSE
+  interface. No POST/order route exists.
+- Added a Chinese React/Electron Windows client and a one-command PowerShell launcher.
+  The launcher owns and cleans up only the processes it starts; the client contains no
+  credential.
+- Main-repository acceptance: 290 tests passed, Ruff clean, and strict mypy success
+  across 149 source files. Vite production build and Electron syntax validation passed.
+
 ## M0 — environment and invariants
 
 Status: complete

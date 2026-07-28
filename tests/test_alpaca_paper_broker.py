@@ -106,14 +106,24 @@ def test_account_and_positions_are_read_only_api_calls() -> None:
             json={
                 "api_version": "v1",
                 "positions": [
-                    {"symbol": "aapl", "qty": "10", "side": "long", "market_value": "2250"}
+                    {
+                        "symbol": "aapl",
+                        "qty": "10",
+                        "side": "long",
+                        "market_value": "2250",
+                        "avg_entry_price": "220.50",
+                        "current_price": "225.00",
+                    }
                 ],
             },
         )
 
     broker = _broker(handler, writes=False)
     assert broker.get_account().status == "ACTIVE"
-    assert broker.list_positions()[0].symbol == "AAPL"
+    position = broker.list_positions()[0]
+    assert position.symbol == "AAPL"
+    assert position.avg_entry_price == "220.50"
+    assert position.current_price == "225.00"
 
 
 def test_time_exit_cancel_and_close_use_paper_api() -> None:

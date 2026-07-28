@@ -55,6 +55,14 @@ def test_store_deduplicates_bars_and_keeps_last_quote_per_second(tmp_path: Path)
     )
     assert bars.height == 1
     assert bars.get_column("ts_utc")[0] == bar.ts_utc
+    quotes = store.quotes_for_symbol(
+        "aapl",
+        start_utc=datetime(2026, 7, 21, 14, 37, tzinfo=UTC),
+        end_utc=datetime(2026, 7, 21, 14, 38, tzinfo=UTC),
+    )
+    assert quotes.height == 1
+    assert quotes.get_column("bid_price")[0] == 224.95
+    assert quotes.get_column("feed")[0] == "sip"
 
 
 def test_store_preserves_every_trade_and_deduplicates_by_trade_identity(
@@ -91,3 +99,31 @@ def test_store_preserves_every_trade_and_deduplicates_by_trade_identity(
         end_utc=datetime(2026, 7, 21, 14, 38, tzinfo=UTC),
     )
     assert trades.get_column("trade_id").to_list() == [101, 102]
+
+
+def test_batch_append_is_atomic_and_uses_the_same_deduplication(tmp_path: Path) -> None:
+    store = SipEventStore(tmp_path / "sip.sqlite3")
+    quote = SipQuote(
+        symbol="MSFT",
+        ts_utc=datetime(2026, 7, 21, 14, 37, 1, 100000, tzinfo=UTC),
+        bid_price=500.0,
+        bid_size=10,
+        ask_price=500.1,
+        ask_size=12,
+        provenance="alpaca.sip.history@test",
+    )
+    trade = SipTrade(
+        symbol="MSFT",
+        ts_utc=datetime(2026, 7, 21, 14, 37, 1, 200000, tzinfo=UTC),
+        trade_id=7,
+        exchange="Q",
+        price=500.05,
+        size=100,
+        conditions=("@",),
+        tape="C",
+        provenance="alpaca.sip.history@test",
+    )
+
+    store.append_many((quote, quote, trade, trade))
+
+    assert store.counts() == {"bars": 0, "quote_seconds": 1, "trades": 1}

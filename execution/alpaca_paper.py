@@ -36,6 +36,8 @@ class PaperPosition(FrozenModel):
     qty: str
     side: str
     market_value: str
+    avg_entry_price: str | None = None
+    current_price: str | None = None
 
     @field_validator("symbol")
     @classmethod

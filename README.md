@@ -26,6 +26,34 @@ realtime kernel reads the local point-in-time cache and never waits on remote fe
 HTTP. Its separate market collector declares a bounded lease, verifies detailed market
 health, then consumes resumable cloud SSE into the existing local SIP store.
 
+## Windows adaptive decision client
+
+The desktop client is a read-only operating console over a deterministic adaptive-plan
+engine. It reconciles positions from the Broker, evaluates observed SIP quotes/trades
+and completed 1/5/15-minute bars every 15 seconds, and records only material state
+changes in an append-only SQLite event stream. Soft plan revisions have a three-minute
+cooldown and a per-session cap; hard stops and the UTC time stop remain immediate.
+Neither the client nor its HTTP interface contains an order route.
+
+Install the JavaScript dependencies once, copy the secret-free example plan, replace
+every placeholder with accepted point-in-time evidence, and start the complete local
+loop:
+
+```powershell
+Set-Location client
+npm install
+Set-Location ..
+Copy-Item config\adaptive_plans.example.json config\adaptive_plans.local.json
+.\scripts\start_adaptive_client.ps1 -Config config\adaptive_plans.local.json
+```
+
+The launcher registers immutable baselines, warms the local store with historical SIP
+observations, starts the licensed event collector and Broker-authoritative plan monitor,
+and opens the Electron client. Closing the client stops only the background processes
+owned by that launch. Full contracts, state transitions, safety boundaries, and VPS
+deployment topology are documented in
+[adaptive desktop client](docs/ADAPTIVE_DESKTOP_CLIENT.md).
+
 Real-data bootstrap and local credential setup are documented in
 [data access](docs/DATA_ACCESS.md). Community and undocumented feeds are automatically
 quarantined and cannot be used as performance evidence.
