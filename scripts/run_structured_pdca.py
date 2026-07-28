@@ -127,6 +127,19 @@ def _pdca_fact_package(
     if episode.get("availability") != "available":
         raise ValueError("accepted trading episode is unavailable")
     rows = _data(episode)
+    opportunities = service.postgres_query(
+        agent_name="pdca",
+        query=StoreQuery(
+            entity=QueryEntity.INTRADAY_SELECTION_POSTMORTEMS,
+            trade_date=trade_date,
+            limit=200,
+        ),
+    )
+    opportunity_rows = (
+        _data(opportunities)
+        if opportunities.get("availability") == "available"
+        else []
+    )
     metric_index: dict[str, Fact] = {}
     for row in rows:
         case_id = row.get("case_id")
@@ -139,11 +152,30 @@ def _pdca_fact_package(
             metric_index[reference] = fact
             if isinstance(raw_fact, dict):
                 raw_fact["fact_ref"] = reference
-    snapshot_ids = tuple(str(value) for value in cast(list[object], episode["snapshot_ids"]))
+    for row in opportunity_rows:
+        case_id = row.get("case_id")
+        facts = row.get("facts")
+        if not isinstance(case_id, str) or not isinstance(facts, list):
+            raise ValueError("anonymous opportunity row is malformed")
+        for raw_fact in facts:
+            fact = Fact.model_validate(raw_fact)
+            reference = f"opportunity:{case_id}:{fact.name}"
+            metric_index[reference] = fact
+            if isinstance(raw_fact, dict):
+                raw_fact["fact_ref"] = reference
+    snapshot_ids = tuple(
+        dict.fromkeys(
+            str(value)
+            for envelope in (episode, opportunities)
+            for value in cast(list[object], envelope.get("snapshot_ids", []))
+        )
+    )
     package = {
         "trade_date": trade_date.isoformat(),
         "snapshot_ids": snapshot_ids,
         "anonymous_cases": rows,
+        "missed_opportunities": opportunity_rows,
+        "opportunity_availability": opportunities.get("availability", "N/A"),
     }
     return (
         json.dumps(package, ensure_ascii=False, sort_keys=True, default=str),

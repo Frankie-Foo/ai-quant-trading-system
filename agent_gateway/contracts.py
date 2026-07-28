@@ -221,6 +221,7 @@ class QueryEntity(StrEnum):
     FACTOR_SNAPSHOTS = "factor_snapshots"
     UNIVERSE_SNAPSHOTS = "universe_snapshots"
     TRADING_EPISODES = "trading_episodes"
+    INTRADAY_SELECTION_POSTMORTEMS = "intraday_selection_postmortems"
     AUDIT_REPORTS = "audit_reports"
     LESSONS = "lessons"
     PROPOSALS = "evolution_proposals"

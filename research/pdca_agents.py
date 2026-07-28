@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agent_gateway.contracts import AgentRole, Fact, Lesson, LessonCategory
 
-PDCA_PROMPT_VERSION = "postmarket_pdca.v1"
+PDCA_PROMPT_VERSION = "postmarket_pdca.v2"
 
 
 class FrozenModel(BaseModel):
@@ -41,9 +41,13 @@ def lesson_review_prompt(fact_package: str) -> tuple[str, str]:
         "Return only selection_review or signal_decay lessons supported by the supplied facts. "
         "Do not mention or reconstruct ticker symbols. Profit does not prove the thesis and loss "
         "does not refute it. Narrative fields must contain no digits; reference every measured "
-        "value only through metric_refs copied exactly from FACT_PACKAGE. Return an empty lessons "
-        "array when evidence is insufficient. Never propose a parameter change, retraining, "
-        "production eligibility, or a trade. Return exactly one JSON object matching SCHEMA.\n"
+        "value only through metric_refs copied exactly from FACT_PACKAGE. Distinguish captured "
+        "candidates from missed detectable opportunities, intentional hard-gate rejections, "
+        "after-cutoff catalysts, and incomplete evidence. A single missed mover is not a reusable "
+        "lesson. Never treat after-cutoff or incomplete evidence as a factor failure. Return an "
+        "empty lessons array when evidence is insufficient. Never propose a parameter change, "
+        "retraining, production eligibility, or a trade. Return exactly one JSON object matching "
+        "SCHEMA.\n"
         f"PROMPT_VERSION={PDCA_PROMPT_VERSION}\nSCHEMA={schema}\nFACT_PACKAGE={fact_package}"
     )
     return prompt, hashlib.sha256(prompt.encode()).hexdigest()

@@ -148,7 +148,8 @@ out-of-sample calibration approves it.
 ## Automatic postmarket learning loop
 
 After a session is fully available, replay ORB-5, build a frozen Trading Episode, and
-run the read-only Research/Critic pair with:
+build an immutable top-mover selection postmortem before running the read-only
+Research/Critic pair with:
 
 ```powershell
 .\.venv\Scripts\python -m schedule.postmarket --trade-date 2026-07-20
@@ -160,6 +161,13 @@ affected trade outcomes remain explicitly censored. Net returns remain unavailab
 until quote-spread data exists, so the review cannot mistake missing costs for zero.
 Program diagnostics are always available. Research and Critic agents run automatically
 only after deterministic evidence gates pass; their failure cannot bypass those gates.
+The selection postmortem separates captured opportunities, intentional gate rejections,
+detectable misses, after-cutoff catalysts, and incomplete evidence. It stores close
+return and MFE/MAE path facts with provenance, keeps every row
+`production_change_allowed=false`, and exposes anonymized records to PDCA through the
+`intraday_selection_postmortems` allowlist. The repo-local
+`intraday-selection-postmortem` skill may group repeated ticker-free patterns and draft
+sandbox hypotheses; it cannot change a gate, submit an order, or approve production.
 
 Install the complete local Windows observation loop with:
 

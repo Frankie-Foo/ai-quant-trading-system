@@ -145,6 +145,7 @@ class AgentGatewayService:
         data: dict[str, object] | list[dict[str, object]],
         availability: Availability = Availability.AVAILABLE,
         provenance: str | None = None,
+        snapshot_ids: tuple[str, ...] | None = None,
     ) -> dict[str, object]:
         envelope = ToolEnvelope(
             tool=tool,
@@ -152,7 +153,13 @@ class AgentGatewayService:
             availability=availability,
             provenance=provenance
             or (loaded.manifest.source if loaded else f"agent_gateway.{tool}.v1"),
-            snapshot_ids=(loaded.manifest.dataset_id,) if loaded else (),
+            snapshot_ids=(
+                snapshot_ids
+                if snapshot_ids is not None
+                else (loaded.manifest.dataset_id,)
+                if loaded
+                else ()
+            ),
             data=data,
         )
         return envelope.model_dump(mode="json")
@@ -235,6 +242,22 @@ class AgentGatewayService:
         except LookupError:
             return None, [], Availability.UNAVAILABLE
         return loaded, self._snapshot_rows(loaded, limit=query.limit), Availability.AVAILABLE
+
+    def _snapshot_history_query(
+        self,
+        *,
+        source: str,
+        limit: int,
+    ) -> tuple[tuple[LoadedSnapshot, ...], list[dict[str, object]], Availability]:
+        loaded = self.snapshots.history_for_source(source, row_limit=limit)
+        if not loaded:
+            return (), [], Availability.UNAVAILABLE
+        rows = [
+            row
+            for snapshot in loaded
+            for row in self._snapshot_rows(snapshot, limit=limit)
+        ][:limit]
+        return loaded, rows, Availability.AVAILABLE
 
     def _ledger_query(
         self, *, entity: QueryEntity, trade_date: date | None, limit: int
@@ -921,6 +944,7 @@ class AgentGatewayService:
     def postgres_query(self, *, agent_name: str, query: StoreQuery) -> dict[str, object]:
         def handler(actor: AgentRole) -> dict[str, object]:
             loaded: LoadedSnapshot | None = None
+            history_snapshots: tuple[LoadedSnapshot, ...] = ()
             availability = Availability.AVAILABLE
             if query.entity in STORE_ENTITIES:
                 rows = self.store.query(query)
@@ -928,6 +952,19 @@ class AgentGatewayService:
                 loaded, rows, availability = self._snapshot_query(
                     source="research.trading_episodes", query=query
                 )
+            elif query.entity is QueryEntity.INTRADAY_SELECTION_POSTMORTEMS:
+                if query.trade_date is None:
+                    history_snapshots, rows, availability = (
+                        self._snapshot_history_query(
+                            source="research.intraday_selection_postmortem",
+                            limit=query.limit,
+                        )
+                    )
+                else:
+                    loaded, rows, availability = self._snapshot_query(
+                        source="research.intraday_selection_postmortem",
+                        query=query,
+                    )
             elif query.entity is QueryEntity.UNIVERSE_SNAPSHOTS:
                 loaded, rows, availability = self._snapshot_query(
                     source="kernel.universe.selection_gates", query=query
@@ -954,8 +991,18 @@ class AgentGatewayService:
                 availability=availability,
                 provenance=(
                     "agent_gateway.store.parameterized_allowlist.v1"
-                    if loaded is None
+                    if loaded is None and not history_snapshots
                     else f"{loaded.manifest.dataset_id}|parameterized_snapshot_query"
+                    if loaded is not None
+                    else "research.intraday_selection_postmortem|history_snapshot_query.v1"
+                ),
+                snapshot_ids=(
+                    tuple(
+                        snapshot.manifest.dataset_id
+                        for snapshot in history_snapshots
+                    )
+                    if history_snapshots
+                    else None
                 ),
             )
 

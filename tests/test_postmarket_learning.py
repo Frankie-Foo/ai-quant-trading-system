@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import polars as pl
 import pytest
 
+import schedule.postmarket as postmarket_schedule
+from data_plane.contracts import DatasetSnapshot
 from kernel.config import load_config
 from research.evolution import evaluate_proposal
 from research.postmortem import build_trading_episode
@@ -22,6 +25,7 @@ from research.program_review import (
 )
 from schedule.monthly_evolution import is_first_xnys_session
 from schedule.postmarket import postmarket_due
+from schedule.runtime import JsonEventLogger
 from schedule.state import JobLedger, JobStatus
 
 OPEN = datetime(2026, 7, 20, 13, 30, tzinfo=UTC)
@@ -387,3 +391,84 @@ def test_postmarket_time_gate_uses_exchange_close_and_provider_delay() -> None:
 def test_monthly_evolution_runs_only_on_first_xnys_session() -> None:
     assert is_first_xnys_session(date(2026, 7, 1)) is True
     assert is_first_xnys_session(date(2026, 7, 2)) is False
+
+
+def _snapshot(
+    dataset_id: str,
+    source: str,
+    *,
+    parents: tuple[str, ...] = (),
+) -> DatasetSnapshot:
+    return DatasetSnapshot(
+        dataset_id=dataset_id,
+        source=source,
+        asof_utc=datetime(2026, 7, 28, tzinfo=UTC),
+        content_sha256="a" * 64,
+        schema_version="test.v1",
+        row_count=1,
+        parent_snapshot_ids=parents,
+    )
+
+
+def test_postmarket_pipeline_persists_intraday_opportunity_review(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    signal = _snapshot("signal", "kernel.signals.orb5_shadow")
+    episode = _snapshot("episode", "research.trading_episodes", parents=("signal",))
+    program = _snapshot(
+        "program",
+        "research.postmarket.program_review",
+        parents=("episode",),
+    )
+    opportunity = _snapshot(
+        "opportunity",
+        "research.intraday_selection_postmortem",
+        parents=("universe", "gates"),
+    )
+    opportunity_lookups = 0
+    modules: list[str] = []
+
+    def fake_latest_snapshot(
+        data_root: Path,
+        pattern: str,
+        trade_date: date,
+    ) -> DatasetSnapshot | None:
+        del data_root, trade_date
+        nonlocal opportunity_lookups
+        if pattern.startswith("research.trading_episodes"):
+            return episode
+        if pattern.startswith("research.postmarket.program_review"):
+            return program
+        if pattern.startswith("research.intraday_selection_postmortem"):
+            opportunity_lookups += 1
+            return opportunity if opportunity_lookups > 1 else None
+        raise AssertionError(pattern)
+
+    def fake_run_module(
+        module: str,
+        trade_date: date,
+        *,
+        data_root: Path,
+        logger: JsonEventLogger,
+        extra_args: tuple[str, ...] = (),
+    ) -> str:
+        del trade_date, data_root, logger, extra_args
+        modules.append(module)
+        if module == "scripts.run_structured_pdca":
+            return '{"audit_report_id": null, "lesson_ids": []}'
+        return "{}"
+
+    monkeypatch.setattr(postmarket_schedule, "_latest_full_signal", lambda *_: signal)
+    monkeypatch.setattr(postmarket_schedule, "_latest_snapshot", fake_latest_snapshot)
+    monkeypatch.setattr(postmarket_schedule, "_run_module", fake_run_module)
+
+    artifacts = postmarket_schedule._run_one(
+        tmp_path,
+        date(2026, 7, 27),
+        llm_mode="off",
+        logger=cast(JsonEventLogger, object()),
+    )
+
+    assert "scripts.run_postclose_missed_movers_review" in modules
+    assert artifacts == ("signal", "episode", "program", "opportunity")

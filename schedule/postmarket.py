@@ -21,7 +21,7 @@ from schedule.state import JobLedger
 
 ROOT = Path(__file__).resolve().parents[1]
 JOB_NAME = "postmarket_review"
-JOB_VERSION = "postmarket_review.v6"
+JOB_VERSION = "postmarket_review.v7"
 
 
 def _parse_date(value: str) -> date:
@@ -214,6 +214,28 @@ def _run_one(
         )
     if review is None or episode.dataset_id not in review.parent_snapshot_ids:
         raise RuntimeError("programmatic postmarket review snapshot was not produced")
+
+    opportunity_review = _latest_snapshot(
+        data_root,
+        "research.intraday_selection_postmortem-*/data.parquet",
+        trade_date,
+    )
+    if opportunity_review is None:
+        _run_module(
+            "scripts.run_postclose_missed_movers_review",
+            trade_date,
+            data_root=data_root,
+            logger=logger,
+            extra_args=("--top", "20", "--attempts", "5"),
+        )
+        opportunity_review = _latest_snapshot(
+            data_root,
+            "research.intraday_selection_postmortem-*/data.parquet",
+            trade_date,
+        )
+    if opportunity_review is None:
+        raise RuntimeError("accepted intraday selection postmortem was not produced")
+
     pdca_stdout = _run_module(
         "scripts.run_structured_pdca",
         trade_date,
@@ -232,7 +254,13 @@ def _run_one(
         )
         if value
     ]
-    return signal.dataset_id, episode.dataset_id, review.dataset_id, *extra_artifacts
+    return (
+        signal.dataset_id,
+        episode.dataset_id,
+        review.dataset_id,
+        opportunity_review.dataset_id,
+        *extra_artifacts,
+    )
 
 
 def _parser() -> argparse.ArgumentParser:

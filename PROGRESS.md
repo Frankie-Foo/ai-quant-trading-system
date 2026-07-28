@@ -622,3 +622,32 @@ Status: implemented and verified in shadow mode; no new path can submit an order
 - Main-repository acceptance: 255 tests passed, Ruff clean, and strict mypy success
   across 190 source files. Cloud-repository acceptance: 32 tests passed, Ruff clean,
   and strict mypy success across 29 source files.
+
+## M23 deterministic intraday selection postmortem - 2026-07-28
+
+Status: implemented and verified; suitable trade-memory ideas were adapted to the
+intraday system without importing the source project's long-horizon portfolio workflow.
+
+- Added `intraday_selection_postmortem.v1`, an immutable post-close opportunity record
+  that joins liquid top movers to the frozen selection cutoff. It records selection
+  status, close return, MFE/MAE, root cause, ticker-free pattern key, evidence, and an
+  explicitly false production-mutation flag.
+- Replaced hindsight storytelling with a fixed taxonomy: captured opportunity,
+  intentional gate rejection, detectable miss, after-cutoff catalyst, and incomplete
+  evidence. Missing news remains incomplete rather than being relabelled as a factor
+  failure.
+- Upgraded the idempotent postmarket pipeline to `postmarket_review.v7`. It now creates
+  the selection postmortem before structured PDCA and includes its dataset ID in the job
+  artifacts; no message is pushed by the scheduled research step.
+- Added the `intraday-selection-postmortem` skill and extended `postmarket-pdca`.
+  Agent access is allowlisted, snapshot-backed, ticker-anonymized, and able to read
+  bounded multi-session history. Agent output may only create evidence-bound sandbox
+  hypotheses; one-off movers, late catalysts, and incomplete evidence cannot become
+  lessons.
+- A real no-push replay for 2026-07-27 produced eight accepted opportunity rows:
+  three pre-cutoff news ingestion/classification reviews and five price/order-flow
+  factor reviews. All critical quality checks passed and every row retained
+  `production_change_allowed=false`. Accepted evidence:
+  `research.intraday_selection_postmortem-20260728T033817Z-1732804ea2fb`.
+- Repository acceptance: 261 tests passed, Ruff clean, strict mypy success across
+  138 source files, and the new skill passed `quick_validate.py`.
