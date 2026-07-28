@@ -75,7 +75,28 @@ class SipBar(FrozenModel):
         return value
 
 
-SipEvent = SipQuote | SipBar
+class SipTrade(FrozenModel):
+    event_type: str = "trade"
+    symbol: str
+    ts_utc: datetime
+    trade_id: int = Field(ge=0)
+    exchange: str = Field(min_length=1, max_length=4)
+    price: float = Field(gt=0)
+    size: int = Field(gt=0)
+    conditions: tuple[str, ...] = ()
+    tape: str = Field(min_length=1, max_length=1)
+    feed: str = "sip"
+    provenance: str
+
+    @field_validator("ts_utc")
+    @classmethod
+    def utc_only(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() != timedelta(0):
+            raise ValueError("SIP event timestamps must be UTC")
+        return value
+
+
+SipEvent = SipQuote | SipBar | SipTrade
 
 
 class SipSubscription(FrozenModel):
@@ -83,6 +104,7 @@ class SipSubscription(FrozenModel):
     authenticated: bool
     bars: tuple[str, ...]
     quotes: tuple[str, ...]
+    trades: tuple[str, ...]
 
 
 class MarketSymbolHealth(BaseModel):
@@ -130,7 +152,7 @@ def parse_market_data_frame(frame: str | bytes) -> tuple[SipEvent, ...]:
         if not isinstance(item, dict):
             raise SipProtocolError("SIP stream message must be an object")
         event_type = item.get("T")
-        if event_type not in {"q", "b"}:
+        if event_type not in {"q", "b", "t"}:
             continue
         symbol = str(item.get("S", "")).strip().upper()
         if not SYMBOL_PATTERN.fullmatch(symbol):
@@ -152,7 +174,7 @@ def parse_market_data_frame(frame: str | bytes) -> tuple[SipEvent, ...]:
                         }
                     )
                 )
-            else:
+            elif event_type == "b":
                 events.append(
                     SipBar.model_validate(
                         {
@@ -165,6 +187,27 @@ def parse_market_data_frame(frame: str | bytes) -> tuple[SipEvent, ...]:
                             "volume": item.get("v"),
                             "trade_count": item.get("n"),
                             "vwap": item.get("vw"),
+                            "provenance": provenance,
+                        }
+                    )
+                )
+            else:
+                raw_conditions = item.get("c", [])
+                events.append(
+                    SipTrade.model_validate(
+                        {
+                            "symbol": symbol,
+                            "ts_utc": ts_utc,
+                            "trade_id": item.get("i"),
+                            "exchange": item.get("x"),
+                            "price": item.get("p"),
+                            "size": item.get("s"),
+                            "conditions": (
+                                tuple(str(value) for value in raw_conditions)
+                                if isinstance(raw_conditions, list)
+                                else ()
+                            ),
+                            "tape": item.get("z"),
                             "provenance": provenance,
                         }
                     )
@@ -187,11 +230,13 @@ def _event_from_envelope(value: object) -> tuple[int, SipEvent]:
     ):
         raise SipProtocolError("cloud market-data event envelope is invalid")
     event_type = raw_event.get("event_type")
-    model: type[SipBar] | type[SipQuote]
+    model: type[SipBar] | type[SipQuote] | type[SipTrade]
     if event_type == "bar":
         model = SipBar
     elif event_type == "quote":
         model = SipQuote
+    elif event_type == "trade":
+        model = SipTrade
     else:
         raise SipProtocolError("cloud market-data event type is invalid")
     try:
@@ -416,6 +461,7 @@ class PlatformSipStream:
             authenticated=True,
             bars=self.symbols,
             quotes=self.symbols,
+            trades=self.symbols,
         )
 
     async def ensure_subscription(

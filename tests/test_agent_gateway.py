@@ -167,6 +167,56 @@ def test_role_policy_and_unavailable_features_are_fail_closed(
     assert {row["success"] for row in audits} == {0, 1}
 
 
+def test_order_flow_agent_reads_materialized_shadow_snapshot(
+    gateway: AgentGatewayService,
+    synthetic_project: Path,
+) -> None:
+    persist_snapshot(
+        pl.DataFrame(
+            {
+                "symbol": ["ABCD"],
+                "session_date": [FUTURE_SESSION],
+                "availability": ["available"],
+                "data_cutoff_utc": [
+                    datetime(2099, 1, 5, 14, 0, tzinfo=UTC)
+                ],
+                "order_imbalance": [0.4],
+                "vpoc": [12.34],
+                "buy_sell_pressure_ratio": [2.5],
+                "quote_size_imbalance": [0.2],
+                "microprice": [12.35],
+                "spread_bps": [4.0],
+                "order_flow_confirmation_score": [68.0],
+                "order_flow_provenance": ["test.sip|tick_rule.v1"],
+                "production_eligible": [False],
+            }
+        ).with_columns(
+            pl.col("data_cutoff_utc").cast(pl.Datetime("ns", "UTC"))
+        ),
+        root=synthetic_project / "data",
+        source="kernel.features.order_flow_shadow",
+        schema_version="order_flow_shadow.v1",
+        checks=(),
+    )
+
+    result = gateway.features_order_flow(
+        agent_name="order-flow",
+        trade_date=FUTURE_SESSION,
+        symbol="ABCD",
+    )
+
+    assert result["availability"] == "available"
+    assert result["snapshot_ids"]
+    facts = _object_dict(result["data"])["facts"]
+    assert isinstance(facts, list)
+    by_name = {
+        str(_object_dict(fact)["name"]): _object_dict(fact) for fact in facts
+    }
+    assert by_name["order_imbalance"]["value"] == 0.4
+    assert by_name["order_flow_confirmation_score"]["value"] == 68.0
+    assert all(fact["provenance"] == "test.sip|tick_rule.v1" for fact in by_name.values())
+
+
 def test_server_process_identity_binding_is_enforced(
     gateway: AgentGatewayService, monkeypatch: pytest.MonkeyPatch
 ) -> None:

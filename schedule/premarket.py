@@ -23,6 +23,8 @@ LOCK_JOB = "premarket_catalyst_lock"
 LOCK_VERSION = "premarket_catalyst_lock.v4"
 SELECTION_JOB = "premarket_final_selection"
 SELECTION_VERSION = "premarket_final_selection.v4"
+SHADOW_JOB = "premarket_multisignal_shadow"
+SHADOW_VERSION = "premarket_multisignal_shadow.v1"
 
 
 def _parse_date(value: str) -> date:
@@ -187,6 +189,22 @@ def _selection_stage(
     return tuple(dict.fromkeys(artifacts))
 
 
+def _shadow_stage(
+    trade_date: date, data_root: Path, logger: JsonEventLogger
+) -> tuple[str, ...]:
+    return _run(
+        [
+            "-m",
+            "scripts.run_multisignal_shadow_pipeline",
+            "--trade-date",
+            trade_date.isoformat(),
+            "--data-root",
+            str(data_root),
+        ],
+        logger=logger,
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trade-date", type=_parse_date)
@@ -298,7 +316,59 @@ def _run_locked(
                 attempts=record.attempts if record is not None else 0,
             )
             return 1 if exhausted else 0
-    logger.emit("tick_completed", orders_submitted=0)
+    shadow_status = "disabled"
+    if cfg.scheduler.multisignal_shadow_enabled:
+        shadow_status = "pending"
+        shadow_lease = ledger.acquire(
+            SHADOW_JOB,
+            trade_date,
+            SHADOW_VERSION,
+            max_attempts=cfg.scheduler.premarket_max_attempts,
+            retry_after=timedelta(minutes=cfg.scheduler.premarket_retry_minutes),
+        )
+        if shadow_lease is not None:
+            try:
+                shadow_artifacts = _shadow_stage(
+                    trade_date,
+                    args.data_root,
+                    logger,
+                )
+                ledger.complete(shadow_lease, artifact_ids=shadow_artifacts)
+                shadow_status = "complete"
+            except Exception as exc:
+                ledger.fail(shadow_lease, error_code=type(exc).__name__)
+                shadow_status = "failed_retryable"
+                logger.emit(
+                    "multisignal_shadow_failed",
+                    level="warning",
+                    error_code=type(exc).__name__,
+                    primary_selection_affected=False,
+                    orders_submitted=0,
+                )
+        else:
+            shadow_record = ledger.get(SHADOW_JOB, trade_date, SHADOW_VERSION)
+            if (
+                shadow_record is not None
+                and shadow_record.status is JobStatus.SUCCEEDED
+            ):
+                shadow_status = "complete"
+            elif (
+                shadow_record is not None
+                and shadow_record.attempts >= cfg.scheduler.premarket_max_attempts
+            ):
+                shadow_status = "exhausted"
+                logger.emit(
+                    "multisignal_shadow_exhausted",
+                    level="warning",
+                    attempts=shadow_record.attempts,
+                    primary_selection_affected=False,
+                    orders_submitted=0,
+                )
+    logger.emit(
+        "tick_completed",
+        orders_submitted=0,
+        multisignal_shadow_status=shadow_status,
+    )
     return 0
 
 

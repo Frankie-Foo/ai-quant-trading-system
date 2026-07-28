@@ -15,6 +15,7 @@ from execution.alpaca_sip_stream import (
     SipEvent,
     SipProtocolError,
     SipQuote,
+    SipTrade,
     parse_market_data_frame,
 )
 from scripts.run_paper_session import _poll_next_event
@@ -46,11 +47,24 @@ def test_parse_sip_quote_and_bar_with_utc_provenance() -> None:
                     "vw": 224.7,
                     "t": "2026-07-21T14:36:00Z",
                 },
+                {
+                    "T": "t",
+                    "S": "AAPL",
+                    "i": 101,
+                    "x": "Q",
+                    "p": 225.0,
+                    "s": 300,
+                    "c": ["@"],
+                    "z": "C",
+                    "t": "2026-07-21T14:37:01.223456Z",
+                },
             ]
         )
     )
     assert isinstance(events[0], SipQuote)
     assert isinstance(events[1], SipBar)
+    assert isinstance(events[2], SipTrade)
+    assert events[2].trade_id == 101
     assert events[0].ts_utc == datetime(2026, 7, 21, 14, 37, 1, 123456, tzinfo=UTC)
 
 

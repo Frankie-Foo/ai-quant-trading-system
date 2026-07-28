@@ -98,6 +98,8 @@ class LiveSessionProcessor:
                 if latest is not None and latest.ts_utc >= decision_at:
                     return self._execute(candidate, intent, latest, received_at_utc)
             return None
+        if not isinstance(event, SipQuote):
+            return None
         pending_intent = self._pending.get(event.symbol)
         if pending_intent is None or pending_intent.planned_entry_ts_utc is None:
             return None

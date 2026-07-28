@@ -90,6 +90,26 @@ at most -3%, volume is at least 1.5 times the preceding 20-session average, and 
 location is in the bottom 30% of the daily range. These thresholds are frozen and
 visible in `config.yaml`; both feature and final-selection snapshots use v2 schemas.
 
+Run the independent pure-factor selector, consolidated-tape order-flow confirmation,
+and unified research arbitration with:
+
+```powershell
+.\.venv\Scripts\python -m scripts.run_multisignal_shadow_pipeline `
+  --trade-date 2026-07-28 --asof-utc 2026-07-28T14:20:00Z
+```
+
+This pipeline first computes broad-universe premarket RVOL without consulting catalyst
+membership, then scores the eligible daily pool, downloads every SIP trade and NBBO
+quote for the configured confirmation window, and ranks the union of catalyst and
+factor candidates. Tick Rule order imbalance, buy/sell pressure, VPOC, quote-size
+imbalance, microprice, and spread are preserved with point-in-time lineage. Order flow
+can confirm or reduce a candidate's score but cannot create a candidate by itself.
+Every new output is `production_eligible=false` and `execution_eligible=false`; the
+pipeline has no Broker or OMS command. The normal `schedule.premarket` tick runs this
+as a separately leased, restart-safe shadow job after primary selection. Completed
+stages are reused, and a shadow failure is logged and retried without invalidating the
+primary catalyst selection.
+
 Build a point-in-time, explicitly non-actionable ORB-5 research snapshot with:
 
 ```powershell

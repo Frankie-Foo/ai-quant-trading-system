@@ -64,7 +64,8 @@ def _remote_payload(
 ) -> tuple[list[dict[str, object]], dict[str, Any]]:
     base_url, token = platform_access_from_env()
     owns_client = client is None
-    http_client = client or httpx.Client(timeout=60)
+    loopback = base_url.startswith(("http://127.0.0.1", "http://localhost"))
+    http_client = client or httpx.Client(timeout=60, trust_env=not loopback)
     try:
         response = http_client.get(
             f"{base_url}/{PLATFORM_API_VERSION}/market-data/{endpoint}",
@@ -236,6 +237,39 @@ def fetch_quotes(
     )
 
 
+def fetch_trades(
+    symbols: tuple[str, ...],
+    start_utc: datetime,
+    end_utc: datetime,
+    *,
+    feed: AlpacaStockFeed | None = None,
+    client: httpx.Client | None = None,
+) -> pl.DataFrame:
+    """Fetch every historical SIP trade print for point-in-time order-flow research."""
+
+    selected_feed = feed or stock_data_policy_from_env().feed
+    if not symbols:
+        raise ValueError("at least one symbol is required")
+    if start_utc.tzinfo is None or end_utc.tzinfo is None or end_utc <= start_utc:
+        raise ValueError("a valid timezone-aware trade interval is required")
+    rows = _remote_rows(
+        "trades",
+        symbols=symbols,
+        start_utc=start_utc,
+        end_utc=end_utc,
+        client=client,
+    )
+    for row in rows:
+        row["price"] = nullable_float(row.get("price"))
+        row["size"] = nullable_float(row.get("size"))
+        row["source"] = "cloud.alpaca.market_data"
+        row["feed"] = selected_feed
+    frame = pl.DataFrame(rows) if rows else _empty_trades()
+    return _canonicalize_trades(frame).filter(
+        (pl.col("ts_utc") >= start_utc) & (pl.col("ts_utc") < end_utc)
+    )
+
+
 def _empty_frame() -> pl.DataFrame:
     return pl.DataFrame(
         schema={
@@ -274,6 +308,23 @@ def _empty_quotes() -> pl.DataFrame:
     )
 
 
+def _empty_trades() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "symbol": pl.String,
+            "ts_utc": pl.Datetime("ns", "UTC"),
+            "trade_id": pl.Int64,
+            "exchange": pl.String,
+            "price": pl.Float64,
+            "size": pl.Int64,
+            "conditions": pl.List(pl.String),
+            "tape": pl.String,
+            "source": pl.String,
+            "feed": pl.String,
+        }
+    )
+
+
 def _canonicalize_quotes(frame: pl.DataFrame) -> pl.DataFrame:
     columns = _empty_quotes().columns
     missing = set(columns) - set(frame.columns)
@@ -294,4 +345,32 @@ def _canonicalize_quotes(frame: pl.DataFrame) -> pl.DataFrame:
             pl.col("conditions").cast(pl.List(pl.String)),
         )
         .sort("symbol", "ts_utc")
+    )
+
+
+def _canonicalize_trades(frame: pl.DataFrame) -> pl.DataFrame:
+    columns = _empty_trades().columns
+    missing = set(columns) - set(frame.columns)
+    if missing:
+        raise ValueError(f"trades missing required columns: {sorted(missing)}")
+    timestamp = pl.col("ts_utc")
+    if frame.schema["ts_utc"] == pl.String:
+        timestamp = timestamp.str.to_datetime(
+            time_unit="ns",
+            time_zone="UTC",
+            strict=False,
+        )
+    return (
+        frame.select(columns)
+        .with_columns(
+            pl.col("symbol").cast(pl.String),
+            timestamp.cast(pl.Datetime("ns", "UTC")).alias("ts_utc"),
+            pl.col("trade_id").cast(pl.Int64),
+            pl.col("exchange").cast(pl.String),
+            pl.col("price").cast(pl.Float64),
+            pl.col("size").cast(pl.Int64),
+            pl.col("conditions").cast(pl.List(pl.String)),
+            pl.col("tape").cast(pl.String),
+        )
+        .sort("symbol", "ts_utc", "trade_id")
     )

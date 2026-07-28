@@ -595,3 +595,30 @@ the catalyst/price/volume pattern, not RNG.
   accepted candidate snapshot.
 - Repository acceptance: 219 tests passed, Ruff clean, and strict mypy success
   across 175 source files.
+
+## M22 independent factor selection and SIP order-flow arbitration - 2026-07-28
+
+Status: implemented and verified in shadow mode; no new path can submit an order.
+
+- Added an independent pure-factor candidate generator over the broad point-in-time
+  daily precheck universe. Its RVOL collection does not depend on catalyst membership,
+  and its transparent 0-100 score preserves each component, cutoff, reject reason,
+  rank, provenance, and parent snapshot.
+- Added end-to-end SIP trade support to the cloud service, local WebSocket parser,
+  durable event store, and historical client. Every trade print is retained with
+  nanosecond timestamps; trade events update the feature store but do not trigger a
+  strategy decision on every tick.
+- Added deterministic consolidated-tape order-flow features: Tick Rule buy/sell volume,
+  classified coverage, order imbalance, pressure ratio, cent-bucket VPOC, NBBO size
+  imbalance, microprice, spread, and a bounded confirmation score. Future observations
+  are mechanically excluded.
+- Added unified shadow arbitration over the union of catalyst and factor candidates.
+  Agreement receives a configured bonus; order flow may confirm or reduce an existing
+  score but cannot originate a candidate. Missing order flow is neutral and explicit.
+- Added a single shadow pipeline command, immutable raw/feature/ranking snapshots, and
+  an independently leased automatic premarket job. Completed stages are reused; a
+  shadow failure retries without invalidating primary catalyst selection. The Agent
+  gateway serves materialized order-flow facts and otherwise fails closed to `N/A`.
+- Main-repository acceptance: 255 tests passed, Ruff clean, and strict mypy success
+  across 190 source files. Cloud-repository acceptance: 32 tests passed, Ruff clean,
+  and strict mypy success across 29 source files.

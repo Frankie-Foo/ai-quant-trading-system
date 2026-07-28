@@ -61,3 +61,52 @@ def test_abruptly_interrupted_lock_stage_is_recoverable_on_next_tick(
     assert record is not None
     assert record.status is JobStatus.SUCCEEDED
     assert record.attempts == 2
+
+
+def test_shadow_failure_does_not_invalidate_primary_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = date(2026, 7, 22)
+    now = datetime(2026, 7, 22, 13, 0, tzinfo=UTC)
+    state_db = tmp_path / "jobs.sqlite3"
+    argv = [
+        "--trade-date",
+        target.isoformat(),
+        "--data-root",
+        str(tmp_path / "data"),
+        "--state-db",
+        str(state_db),
+        "--lock-file",
+        str(tmp_path / "premarket.lock"),
+    ]
+    monkeypatch.setattr(
+        premarket,
+        "_lock_stage",
+        lambda *args, **kwargs: ("lock-snapshot",),
+    )
+    monkeypatch.setattr(
+        premarket,
+        "_selection_stage",
+        lambda *args, **kwargs: ("selection-snapshot",),
+    )
+
+    def failed_shadow(*args: object, **kwargs: object) -> tuple[str, ...]:
+        raise RuntimeError("shadow unavailable")
+
+    monkeypatch.setattr(premarket, "_shadow_stage", failed_shadow)
+
+    assert premarket.run(argv, now_utc=now) == 0
+    ledger = JobLedger(state_db)
+    primary = ledger.get(
+        premarket.SELECTION_JOB,
+        target,
+        premarket.SELECTION_VERSION,
+    )
+    shadow = ledger.get(
+        premarket.SHADOW_JOB,
+        target,
+        premarket.SHADOW_VERSION,
+    )
+    assert primary is not None and primary.status is JobStatus.SUCCEEDED
+    assert shadow is not None and shadow.status is JobStatus.FAILED

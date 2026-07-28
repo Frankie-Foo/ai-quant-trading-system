@@ -14,6 +14,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TypeVar
 
+import polars as pl
+
 from agent_gateway.contracts import (
     AgentRole,
     AuditReport,
@@ -476,12 +478,116 @@ class AgentGatewayService:
     def features_order_flow(
         self, *, agent_name: str, trade_date: date, symbol: str
     ) -> dict[str, object]:
-        return self._unavailable_feature(
+        request = {"trade_date": trade_date.isoformat(), "symbol": symbol}
+
+        def handler(_: AgentRole) -> dict[str, object]:
+            normalized = symbol.strip().upper()
+            selection_loaded, _selection_row = self.snapshots.selection_row(
+                trade_date, normalized
+            )
+            try:
+                loaded = self.snapshots.latest_for_source(
+                    "kernel.features.order_flow_shadow",
+                    trade_date=trade_date,
+                )
+            except LookupError:
+                loaded = None
+            rows = (
+                []
+                if loaded is None
+                else loaded.frame.filter(pl.col("symbol") == normalized).to_dicts()
+            )
+            if len(rows) != 1:
+                names = (
+                    "order_imbalance",
+                    "vpoc",
+                    "buy_sell_pressure_ratio",
+                    "quote_size_imbalance",
+                    "microprice",
+                    "spread_bps",
+                    "order_flow_confirmation_score",
+                )
+                unavailable_facts = [
+                    Fact(
+                        name=name,
+                        value=None,
+                        availability=Availability.UNAVAILABLE,
+                        provenance=(
+                            "agent_gateway.features_order_flow|"
+                            "shadow_snapshot_not_materialized"
+                        ),
+                        asof_utc=selection_loaded.manifest.asof_utc,
+                    ).model_dump(mode="json")
+                    for name in names
+                ]
+                return self._envelope(
+                    tool="features_order_flow",
+                    loaded=selection_loaded,
+                    data={"symbol": normalized, "facts": unavailable_facts},
+                    availability=Availability.UNAVAILABLE,
+                    provenance="agent_gateway.features_order_flow|explicit_degradation",
+                )
+
+            row = rows[0]
+            if loaded is None:
+                raise RuntimeError("order-flow snapshot resolution is inconsistent")
+            cutoff = row.get("data_cutoff_utc")
+            fact_asof = (
+                cutoff
+                if isinstance(cutoff, datetime)
+                else loaded.manifest.asof_utc
+            )
+            names = (
+                "order_imbalance",
+                "vpoc",
+                "buy_sell_pressure_ratio",
+                "quote_size_imbalance",
+                "microprice",
+                "spread_bps",
+                "order_flow_confirmation_score",
+            )
+            available_facts = [
+                self._fact(
+                    row,
+                    name=name,
+                    provenance_field="order_flow_provenance",
+                    fallback_provenance=(
+                        "agent_gateway.features_order_flow|metric_unavailable"
+                    ),
+                    asof_utc=fact_asof,
+                )
+                for name in names
+            ]
+            availability = (
+                Availability.AVAILABLE
+                if any(
+                    fact.availability is Availability.AVAILABLE
+                    for fact in available_facts
+                )
+                else Availability.UNAVAILABLE
+            )
+            return self._envelope(
+                tool="features_order_flow",
+                loaded=loaded,
+                data={
+                    "symbol": normalized,
+                    "source_availability": row.get("availability"),
+                    "facts": [
+                        fact.model_dump(mode="json") for fact in available_facts
+                    ],
+                },
+                availability=availability,
+                provenance=str(
+                    row.get("order_flow_provenance")
+                    or "agent_gateway.features_order_flow|unknown_provenance"
+                ),
+            )
+
+        return self._execute(
             tool="features_order_flow",
             agent_name=agent_name,
-            trade_date=trade_date,
-            symbol=symbol,
-            names=("order_imbalance", "vpoc", "buy_sell_pressure_ratio"),
+            request=request,
+            handler=handler,
         )
 
     def features_short_flow(

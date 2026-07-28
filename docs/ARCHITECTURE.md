@@ -10,7 +10,7 @@ high-level design reference, not as evidence that any trading signal is profitab
 |---|---|---|
 | Data | `data_plane/`, `db/`, M1/M2 adapters | Ingestion, quality, immutable snapshots, lineage, point-in-time features |
 | Model | `research/`, training jobs, `kernel/meta.py` inference | Train, validate, register, and serve model outputs; never create orders directly |
-| Strategy | `kernel/universe.py`, `signals.py`, `meta.py`, `sizing.py`, `exits.py` | Convert verified data/model outputs into a long-only `TradePlan` |
+| Strategy | `kernel/universe.py`, `factor_selection.py`, `selection_arbitration.py`, `signals.py`, `meta.py`, `sizing.py`, `exits.py` | Generate independent candidate evidence, arbitrate research ranks, and convert approved inputs into a long-only `TradePlan` |
 | Trading | `execution/`, `kernel/guardrails.py`, future broker adapters | OMS state, EMS child orders, pre-trade checks, fills, reconciliation |
 | Application | `agent_gateway/`, `plugins/`, `schedule/` | Human interaction and slow-loop orchestration only |
 
@@ -96,6 +96,25 @@ Postmarket scheduling runs deterministic Episode and program review first, then 
 discipline/PDCA slow loop. The monthly timer clusters only accepted anonymous lessons and
 may create a research draft after minimum evidence gates. Neither path can modify
 configuration, retrain a production model, write an OMS order, or call a Broker.
+
+### 3c. Independent candidate generators and order-flow confirmation
+
+The premarket research surface now has two independent candidate generators. The
+catalyst branch retains its event-evidence lock and hard gates. The factor branch starts
+from the broad point-in-time daily precheck universe, computes its own premarket RVOL,
+and assigns a transparent 0-100 score without reading catalyst membership.
+
+The order-flow module consumes consolidated SIP trades and top-of-book NBBO quotes. It
+materializes Tick Rule buy/sell volume, order imbalance, pressure ratio, cent-bucket
+VPOC, quote-size imbalance, microprice, and spread. This is consolidated-tape evidence,
+not Level-2 or market-by-order depth. Every trade is retained; timestamps remain at
+nanosecond precision through the cloud API and local snapshot.
+
+`kernel.selection_arbitration` ranks the union of catalyst and factor candidates.
+Cross-branch agreement earns a configurable bonus. Available order flow can only adjust
+an existing candidate within a configured bound; absent order flow is neutral and
+explicitly unavailable. The factor, order-flow, and unified snapshots are shadow-only,
+and the orchestration script has no execution dependency.
 
 ### 4. OMS/EMS separation and an explicit order state machine
 
