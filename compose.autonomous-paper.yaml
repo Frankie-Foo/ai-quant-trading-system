@@ -35,7 +35,7 @@ services:
       - --config
       - /app/config/autonomous_paper.local.json
       - --sip-db
-      - /app/runs/sip-stream.sqlite3
+      - /app/runs/autonomous-sip.sqlite3
       - --lock-file
       - /app/runs/autonomous-sip-refresher.lock
       - --refresh-lock-file
@@ -80,7 +80,7 @@ services:
       - --state-db
       - /app/runs/autonomous-paper.sqlite3
       - --sip-db
-      - /app/runs/sip-stream.sqlite3
+      - /app/runs/autonomous-sip.sqlite3
       - --notification-db
       - /app/runs/autonomous-notifications.sqlite3
       - --push-health
