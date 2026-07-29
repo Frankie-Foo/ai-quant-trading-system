@@ -171,7 +171,15 @@ def test_sip_adapter_builds_multitimeframe_market_and_order_flow_facts() -> None
     assert facts.relative_strength is not None and facts.relative_strength > 0
     assert facts.order_flow_imbalance is not None
     assert facts.order_flow_imbalance > 0.20
+    assert facts.order_flow_confirmation_score is not None
+    assert 0.0 <= facts.order_flow_confirmation_score <= 100.0
+    assert facts.order_flow_provenance is not None
+    assert "tick_rule.v1" in facts.order_flow_provenance
     assert facts.catalyst_score == 0.82
+    assert facts.below_anchored_vwap_5m_bars == 0
+    assert facts.failed_vwap_reclaim is False
+    assert facts.chandelier_stop_hit is False
+    assert facts.tail_hard_breakdown is False
 
 
 class FakePaperBroker:

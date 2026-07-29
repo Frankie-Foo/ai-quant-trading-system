@@ -19,6 +19,14 @@ commit them to the repository.
 The frozen specification is supplemented by [architecture decisions](docs/ARCHITECTURE.md),
 which map data, model, strategy, trading, and application layers onto this repository.
 
+## 本地自主模拟盘
+
+三进程 Docker 运行方式现已覆盖 SIP 数据刷新、催化剂/红队/确定性监督器、
+安全信封、Alpaca Paper 执行和利弗莫尔中文通知。默认 compose 只有读取权限；
+Paper 写入必须同时通过环境授权、关闭 kill switch，并显式加载带
+`--arm-paper` 的覆盖文件。完整启动、紧急停止、状态保留和迁移说明见
+[本地自主模拟盘运行手册](docs/AUTONOMOUS_PAPER_LOCAL.md)。
+
 The cloud multi-strategy service is a separate repository and deployment. This
 repository consumes its versioned feature API only through the slow-loop synchronization
 adapter documented in [cloud feature interface](docs/CLOUD_FEATURE_INTERFACE.md). The

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 from kernel.adaptive_trade_plan import BaselineTradePlan, PlanMode
 from operations.adaptive_client_api import (
@@ -10,6 +11,7 @@ from operations.adaptive_client_api import (
     encode_plan_event,
 )
 from operations.adaptive_plan_store import AdaptivePlanStore
+from operations.emergency_stop import EmergencyStopStore
 
 OPEN = datetime(2026, 7, 28, 13, 30, tzinfo=UTC)
 
@@ -49,7 +51,8 @@ def test_health_and_dashboard_are_read_only_and_explicitly_non_executable(
     assert health.body["status"] == "ready"
     assert health.body["orders_authorized"] is False
     assert dashboard.status == 200
-    assert dashboard.body["plans"][0]["symbol"] == "XYZ"
+    plans = cast(list[dict[str, object]], dashboard.body["plans"])
+    assert plans[0]["symbol"] == "XYZ"
     assert rejected.status == 405
 
 
@@ -81,3 +84,25 @@ def test_sse_encoder_uses_sequence_as_cursor_and_utf8_json() -> None:
     assert encoded.startswith(b"id: 7\nevent: plan-decision\n")
     assert "两根分钟线确认" in encoded.decode("utf-8")
     assert encoded.endswith(b"\n\n")
+
+
+def test_only_global_emergency_stop_is_mutating_and_it_persists(
+    tmp_path: Path,
+) -> None:
+    stop_path = tmp_path / "emergency.sqlite3"
+    app = AdaptiveClientApplication(
+        store=_store(tmp_path),
+        emergency_stop=EmergencyStopStore(stop_path),
+    )
+
+    activated = app.handle("POST", "/v1/emergency-stop", {})
+    replay = AdaptiveClientApplication(
+        store=_store(tmp_path),
+        emergency_stop=EmergencyStopStore(stop_path),
+    ).handle("GET", "/v1/health", {})
+    order_attempt = app.handle("POST", "/v1/orders", {})
+
+    assert activated.status == 200
+    assert activated.body["emergency_stop_active"] is True
+    assert replay.body["emergency_stop_active"] is True
+    assert order_attempt.status == 405

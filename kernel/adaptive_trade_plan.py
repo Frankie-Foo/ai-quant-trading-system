@@ -138,6 +138,13 @@ class RealtimePlanFacts:
     data_complete: bool
     proposed_structural_stop: float | None = None
     first_target_filled: bool = False
+    order_flow_confirmation_score: float | None = None
+    order_flow_provenance: str | None = None
+    quote_provenance: str | None = None
+    below_anchored_vwap_5m_bars: int = 0
+    failed_vwap_reclaim: bool = False
+    chandelier_stop_hit: bool = False
+    tail_hard_breakdown: bool = False
 
     def __post_init__(self) -> None:
         _require_utc(self.observed_at_utc, name="observed_at_utc")
@@ -166,9 +173,26 @@ class RealtimePlanFacts:
             ("order_flow_imbalance", self.order_flow_imbalance),
             ("catalyst_score", self.catalyst_score),
             ("proposed_structural_stop", self.proposed_structural_stop),
+            (
+                "order_flow_confirmation_score",
+                self.order_flow_confirmation_score,
+            ),
         ):
             if optional_value is not None and not math.isfinite(optional_value):
                 raise ValueError(f"{name} must be finite when present")
+        if self.order_flow_confirmation_score is not None:
+            if not 0 <= self.order_flow_confirmation_score <= 100:
+                raise ValueError(
+                    "order_flow_confirmation_score must be in [0, 100]"
+                )
+            if not (self.order_flow_provenance or "").strip():
+                raise ValueError(
+                    "order_flow_provenance is required when score is available"
+                )
+        if self.quote_provenance is not None and not self.quote_provenance.strip():
+            raise ValueError("quote_provenance cannot be blank")
+        if self.below_anchored_vwap_5m_bars < 0:
+            raise ValueError("below_anchored_vwap_5m_bars cannot be negative")
 
     @property
     def midpoint(self) -> float:

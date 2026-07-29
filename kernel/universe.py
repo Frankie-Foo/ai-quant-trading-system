@@ -585,19 +585,29 @@ def _load_accepted_common_stocks(
             "no accepted point-in-time Massive common-stock reference snapshot found"
         )
 
-    frames = [
-        pl.read_parquet(
-            path,
-            columns=["asof_date", "symbol", "security_type", "active"],
+    eligible: list[tuple[date, Path]] = []
+    for path in paths:
+        dates = (
+            pl.read_parquet(path, columns=["asof_date"])
+            .get_column("asof_date")
+            .unique()
+            .to_list()
         )
-        for path in paths
-    ]
-    reference = pl.concat(frames)
-    eligible_dates = reference.filter(pl.col("asof_date") < trade_date).get_column("asof_date")
-    reference_date = eligible_dates.max()
-    if not isinstance(reference_date, date):
+        if len(dates) != 1 or not isinstance(dates[0], date):
+            raise ValueError(f"common-stock reference has invalid asof_date: {path}")
+        if dates[0] < trade_date:
+            eligible.append((dates[0], path))
+    if not eligible:
         raise ValueError(f"no point-in-time common-stock reference before {trade_date}")
-    selected = reference.filter(pl.col("asof_date") == reference_date)
+
+    # A retry may persist the same valid reference content more than once.
+    # Select the newest accepted snapshot for the latest eligible reference date;
+    # concatenating equivalent snapshots would create artificial duplicates.
+    reference_date, selected_path = max(eligible)
+    selected = pl.read_parquet(
+        selected_path,
+        columns=["asof_date", "symbol", "security_type", "active"],
+    )
     if selected.select(pl.col("symbol").n_unique()).item() != selected.height:
         raise ValueError("duplicate symbols in common-stock reference")
     invalid = selected.filter(

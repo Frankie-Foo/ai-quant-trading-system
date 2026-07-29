@@ -12,6 +12,7 @@ import polars as pl
 
 from data_plane.calendar import build_xnys_schedule
 from execution.alpaca_paper import PaperPosition
+from execution.autonomous_paper_session import AutonomousPaperPlan
 from kernel.adaptive_trade_plan import BaselineTradePlan, RealtimePlanFacts
 from kernel.features.order_flow import order_flow_features
 from kernel.technical_monitor import (
@@ -116,6 +117,44 @@ def _one_minute_trigger(snapshot: TimeframeSnapshot | None) -> bool:
     )
 
 
+def _average_true_range(
+    bars: tuple[AggregatedBar, ...],
+    *,
+    period: int = 14,
+) -> float | None:
+    if len(bars) < period + 1:
+        return None
+    ranges = [
+        max(
+            current.high - current.low,
+            abs(current.high - previous.close),
+            abs(current.low - previous.close),
+        )
+        for previous, current in zip(
+            bars[-period - 1 : -1],
+            bars[-period:],
+            strict=True,
+        )
+    ]
+    return sum(ranges) / period
+
+
+def _consecutive_closes_below(
+    bars: tuple[AggregatedBar, ...],
+    *,
+    trade_date: date,
+    level: float | None,
+) -> int:
+    if level is None:
+        return 0
+    count = 0
+    for bar in reversed(bars):
+        if bar.trade_date != trade_date or bar.close >= level:
+            break
+        count += 1
+    return count
+
+
 class SipStoreMarketFactsAdapter:
     """Build causal multi-timeframe facts from the restart-safe SIP event store."""
 
@@ -138,7 +177,7 @@ class SipStoreMarketFactsAdapter:
 
     def read(
         self,
-        plan: BaselineTradePlan,
+        plan: BaselineTradePlan | AutonomousPaperPlan,
         *,
         observed_at_utc: datetime,
     ) -> RealtimePlanFacts:
@@ -255,6 +294,9 @@ class SipStoreMarketFactsAdapter:
         bid = float(quote["bid_price"])
         ask = float(quote["ask_price"])
         midpoint = (bid + ask) / 2
+        quote_source = str(quote.get("source", "unknown")).strip().lower()
+        quote_feed = str(quote.get("feed", "unknown")).strip().lower()
+        quote_provenance = f"{quote_source}.{quote_feed}.nbbo"
 
         order_start = observed_at_utc - self.order_flow_window
         trades = self.store.trades_for_symbol(
@@ -280,6 +322,20 @@ class SipStoreMarketFactsAdapter:
             float(raw_imbalance)
             if isinstance(raw_imbalance, (int, float))
             and not isinstance(raw_imbalance, bool)
+            else None
+        )
+        raw_confirmation_score = flow["order_flow_confirmation_score"]
+        confirmation_score = (
+            float(raw_confirmation_score)
+            if isinstance(raw_confirmation_score, (int, float))
+            and not isinstance(raw_confirmation_score, bool)
+            else None
+        )
+        raw_flow_provenance = flow["order_flow_provenance"]
+        flow_provenance = (
+            str(raw_flow_provenance)
+            if isinstance(raw_flow_provenance, str)
+            and raw_flow_provenance.strip()
             else None
         )
 
@@ -315,7 +371,7 @@ class SipStoreMarketFactsAdapter:
             if (
                 five is not None
                 and five.last_confirmed_bottom is not None
-                and plan.hard_stop < five.last_confirmed_bottom < bid
+                and float(plan.hard_stop) < five.last_confirmed_bottom < bid
             )
             else None
         )
@@ -336,6 +392,32 @@ class SipStoreMarketFactsAdapter:
             and 0
             <= (observed_at_utc - one.completed_at_utc).total_seconds()
             <= 180
+        )
+        below_vwap_bars = _consecutive_closes_below(
+            symbol_five,
+            trade_date=plan.trade_date,
+            level=session_vwap,
+        )
+        session_bars = tuple(
+            bar for bar in symbol_one if bar.trade_date == plan.trade_date
+        )
+        session_high = (
+            max(bar.high for bar in session_bars) if session_bars else None
+        )
+        atr_15m = _average_true_range(symbol_fifteen)
+        chandelier_stop_hit = bool(
+            session_high is not None
+            and atr_15m is not None
+            and midpoint <= session_high - (3 * atr_15m)
+        )
+        failed_vwap_reclaim = bool(
+            below_vwap_bars >= 3 and not _one_minute_trigger(one)
+        )
+        tail_hard_breakdown = bool(
+            below_vwap_bars >= 2
+            and not _trend_confirmed(fifteen)
+            and confirmation_score is not None
+            and confirmation_score < 35.0
         )
         return RealtimePlanFacts(
             observed_at_utc=observed_at_utc,
@@ -360,6 +442,13 @@ class SipStoreMarketFactsAdapter:
             data_complete=data_complete,
             proposed_structural_stop=proposed_stop,
             first_target_filled=False,
+            order_flow_confirmation_score=confirmation_score,
+            order_flow_provenance=flow_provenance,
+            quote_provenance=quote_provenance,
+            below_anchored_vwap_5m_bars=below_vwap_bars,
+            failed_vwap_reclaim=failed_vwap_reclaim,
+            chandelier_stop_hit=chandelier_stop_hit,
+            tail_hard_breakdown=tail_hard_breakdown,
         )
 
     def _bars(

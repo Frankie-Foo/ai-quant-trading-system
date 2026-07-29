@@ -1,0 +1,206 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">人工智能量化投资系统新架构</title>
+  <desc id="desc">全中文架构图，展示数据证据层、确定性交易快环、受治理研究慢环、晋级防火墙和生产安全护栏。</desc>
+  <!--
+    设计口径：
+    - 面向管理层和技术团队共同汇报。
+    - 主叙事是“能自动进化，但不能自行改变生产决策”。
+    - 融合五层架构、每日决策流水线和双闭环治理。
+    - 当前成熟度按仓库真实状态标为“研究态”，不做收益成熟度暗示。
+  -->
+  <defs>
+    <style>
+      .背景 { fill:#eef2ed; }
+      .正文 { fill:#16332d; }
+      .次要 { fill:#617870; }
+      .微标 { font:700 12px "Cascadia Code","Microsoft YaHei UI",monospace; letter-spacing:2px; }
+      .主标题 { font:700 51px "Noto Serif SC","Microsoft YaHei UI",serif; letter-spacing:-2px; }
+      .副标题 { font:400 18px "Microsoft YaHei UI",sans-serif; }
+      .层标题 { font:700 24px "Noto Serif SC","Microsoft YaHei UI",serif; }
+      .节点标题 { font:700 15px "Microsoft YaHei UI",sans-serif; }
+      .节点说明 { font:400 11px "Microsoft YaHei UI",sans-serif; }
+      .小字 { font:700 10px "Cascadia Code","Microsoft YaHei UI",monospace; }
+      .分隔线 { stroke:#708b83; stroke-width:1; }
+      .橙箭头 { stroke:#dc5238; stroke-width:2.3; fill:none; marker-end:url(#橙箭头); }
+      .白箭头 { stroke:#f6f3e9; stroke-width:2.1; fill:none; marker-end:url(#白箭头); }
+    </style>
+    <marker id="橙箭头" viewBox="0 0 10 10" refX="8.4" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#dc5238"/>
+    </marker>
+    <marker id="白箭头" viewBox="0 0 10 10" refX="8.4" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#f6f3e9"/>
+    </marker>
+    <pattern id="网格" width="22" height="22" patternUnits="userSpaceOnUse">
+      <path d="M22 0H0V22" fill="none" stroke="#718c84" stroke-width=".45"/>
+    </pattern>
+  </defs>
+
+  <rect class="背景" width="1600" height="900"/>
+  <rect width="1600" height="900" fill="url(#网格)" opacity=".32"/>
+
+  <text x="54" y="50" class="微标" fill="#dc5238">全中文汇报版 · 二〇二六年七月</text>
+  <text x="54" y="108" class="主标题 正文">人工智能量化投资系统 · 新架构</text>
+  <text x="54" y="143" class="副标题 次要">确定性交易快环 × 受治理研究慢环 × 可追溯生产防线</text>
+  <rect x="1270" y="72" width="276" height="62" fill="#dc5238"/>
+  <text x="1292" y="98" class="小字" fill="#17231f">核心原则</text>
+  <text x="1292" y="122" class="节点标题" fill="#17231f">能自动进化，但不能自作主张</text>
+
+  <!-- 左侧层级：应用协作 -->
+  <rect x="54" y="181" width="1030" height="96" fill="#fffdf6" stroke="#708b83"/>
+  <rect x="54" y="181" width="166" height="96" fill="#d95037"/>
+  <text x="74" y="211" class="小字" fill="#17231f">第五层</text>
+  <text x="74" y="246" class="层标题" fill="#17231f">应用协作层</text>
+  <text x="248" y="213" class="节点标题 正文">多智能体网关</text>
+  <text x="248" y="237" class="节点说明 次要">八个角色身份、工具白名单、来源事实、调用审计</text>
+  <text x="524" y="213" class="节点标题 正文">人机协作入口</text>
+  <text x="524" y="237" class="节点说明 次要">研究结论、纪律报告、非执行交易草案</text>
+  <text x="788" y="213" class="节点标题 正文">任务调度</text>
+  <text x="788" y="237" class="节点说明 次要">盘前、盘中、盘后、月度研究的一次性任务</text>
+  <text x="248" y="260" class="小字" fill="#d95037">智能体只能写研究产物，不能写经纪商订单</text>
+
+  <!-- 研究慢环 -->
+  <rect x="54" y="289" width="1030" height="214" fill="#f7f8f3" stroke="#708b83"/>
+  <rect x="54" y="289" width="166" height="214" fill="#243f38"/>
+  <text x="74" y="320" class="小字" fill="#f5f1e8">第四层</text>
+  <text x="74" y="355" class="层标题" fill="#f5f1e8">研究进化层</text>
+  <text x="74" y="389" class="节点说明" fill="#b7c6c0">收盘后慢环</text>
+  <text x="74" y="410" class="节点说明" fill="#b7c6c0">月度聚合</text>
+  <text x="74" y="452" class="小字" fill="#e9b29f">不直接改参数</text>
+  <text x="74" y="470" class="小字" fill="#e9b29f">不自动晋级</text>
+
+  <text x="248" y="320" class="微标" fill="#dc5238">自动复盘与进化闭环</text>
+
+  <rect x="248" y="344" width="128" height="112" fill="#efe3d9" stroke="#bd6b55"/>
+  <text x="263" y="370" class="小字" fill="#a53b27">第一步</text>
+  <text x="263" y="398" class="节点标题 正文">冻结交易剧集</text>
+  <text x="263" y="421" class="节点说明 次要">信号、成交、成本</text>
+  <text x="263" y="440" class="节点说明 次要">回撤、缺口、结果</text>
+
+  <path d="M376 400H397" class="橙箭头"/>
+  <rect x="397" y="344" width="128" height="112" fill="#efe3d9" stroke="#bd6b55"/>
+  <text x="412" y="370" class="小字" fill="#a53b27">第二步</text>
+  <text x="412" y="398" class="节点标题 正文">程序事实审查</text>
+  <text x="412" y="421" class="节点说明 次要">样本、标签、成本</text>
+  <text x="412" y="440" class="节点说明 次要">缺失路径、可用实验</text>
+
+  <path d="M525 400H546" class="橙箭头"/>
+  <rect x="546" y="344" width="128" height="112" fill="#ead9ce" stroke="#bd6b55"/>
+  <text x="561" y="370" class="小字" fill="#a53b27">第三步</text>
+  <text x="561" y="398" class="节点标题 正文">研究智能体</text>
+  <text x="561" y="421" class="节点说明 次要">提出可证伪假设</text>
+  <text x="561" y="440" class="节点说明 次要">限定研究范围</text>
+
+  <path d="M674 400H695" class="橙箭头"/>
+  <rect x="695" y="344" width="128" height="112" fill="#ead9ce" stroke="#bd6b55"/>
+  <text x="710" y="370" class="小字" fill="#a53b27">第四步</text>
+  <text x="710" y="398" class="节点标题 正文">批判智能体</text>
+  <text x="710" y="421" class="节点说明 次要">反驳泄漏与过拟合</text>
+  <text x="710" y="440" class="节点说明 次要">检查因果与成本</text>
+
+  <path d="M823 400H844" class="橙箭头"/>
+  <rect x="844" y="344" width="132" height="112" fill="#e2ebe6" stroke="#708b83"/>
+  <text x="859" y="370" class="小字" fill="#2c6b5b">第五步</text>
+  <text x="859" y="398" class="节点标题 正文">样本外验证</text>
+  <text x="859" y="421" class="节点说明 次要">净成本、稳定性</text>
+  <text x="859" y="440" class="节点说明 次要">挑战者对比基线</text>
+
+  <path d="M976 400H997" class="橙箭头"/>
+  <rect x="997" y="322" width="65" height="157" fill="#dc5238"/>
+  <text x="1029.5" y="350" text-anchor="middle" class="小字" fill="#17231f">晋级</text>
+  <text x="1029.5" y="369" text-anchor="middle" class="小字" fill="#17231f">防火墙</text>
+  <line x1="1013" y1="389" x2="1046" y2="389" stroke="#8b2d1e"/>
+  <text x="1029.5" y="414" text-anchor="middle" class="小字" fill="#17231f">独立留出</text>
+  <text x="1029.5" y="438" text-anchor="middle" class="小字" fill="#17231f">人工批准</text>
+  <text x="1029.5" y="462" text-anchor="middle" class="小字" fill="#17231f">默认拒绝</text>
+
+  <!-- 快环 -->
+  <rect x="54" y="515" width="1030" height="193" fill="#285f52" stroke="#1d4a40"/>
+  <rect x="54" y="515" width="166" height="96.5" fill="#2f7664"/>
+  <rect x="54" y="611.5" width="166" height="96.5" fill="#c99c36"/>
+  <text x="74" y="545" class="小字" fill="#f5f1e8">第三层</text>
+  <text x="74" y="579" class="层标题" fill="#f5f1e8">确定性内核</text>
+  <text x="74" y="641" class="小字" fill="#18251f">第二层</text>
+  <text x="74" y="675" class="层标题" fill="#18251f">交易执行层</text>
+
+  <text x="248" y="545" class="微标" fill="#c3d9d1">盘前与盘中确定性快环</text>
+
+  <rect x="248" y="570" width="112" height="103" fill="#19493e"/>
+  <text x="261" y="597" class="小字" fill="#b8d4ca">一</text>
+  <text x="261" y="624" class="节点标题" fill="#f5f1e8">盘前证据</text>
+  <text x="261" y="648" class="节点说明" fill="#b8d4ca">催化、相对量</text>
+
+  <path d="M360 621H379" class="白箭头"/>
+  <rect x="379" y="570" width="112" height="103" fill="#19493e"/>
+  <text x="392" y="597" class="小字" fill="#b8d4ca">二</text>
+  <text x="392" y="624" class="节点标题" fill="#f5f1e8">候选硬闸</text>
+  <text x="392" y="648" class="节点说明" fill="#b8d4ca">市值、停牌、风险</text>
+
+  <path d="M491 621H510" class="白箭头"/>
+  <rect x="510" y="570" width="112" height="103" fill="#19493e"/>
+  <text x="523" y="597" class="小字" fill="#b8d4ca">三</text>
+  <text x="523" y="624" class="节点标题" fill="#f5f1e8">实时行情</text>
+  <text x="523" y="648" class="节点说明" fill="#b8d4ca">分钟线、买卖报价</text>
+
+  <path d="M622 621H641" class="白箭头"/>
+  <rect x="641" y="570" width="112" height="103" fill="#19493e"/>
+  <text x="654" y="597" class="小字" fill="#b8d4ca">四</text>
+  <text x="654" y="624" class="节点标题" fill="#f5f1e8">开盘确认</text>
+  <text x="654" y="648" class="节点说明" fill="#b8d4ca">只读完成行情柱</text>
+
+  <path d="M753 621H772" class="白箭头"/>
+  <rect x="772" y="570" width="112" height="103" fill="#19493e"/>
+  <text x="785" y="597" class="小字" fill="#b8d4ca">五</text>
+  <text x="785" y="624" class="节点标题" fill="#f5f1e8">仓位与退出</text>
+  <text x="785" y="648" class="节点说明" fill="#b8d4ca">止损、止盈、时限</text>
+
+  <path d="M884 621H903" class="白箭头"/>
+  <rect x="903" y="570" width="137" height="103" fill="#1d4038"/>
+  <text x="916" y="597" class="小字" fill="#e6c879">六</text>
+  <text x="916" y="624" class="节点标题" fill="#f5f1e8">三级风险硬闸</text>
+  <text x="916" y="648" class="节点说明" fill="#b8d4ca">优先级不可覆盖</text>
+  <text x="248" y="692" class="小字" fill="#d4e3dd">远程智能体不进入快环 · 在线与离线使用同一时点函数 · 永久只做多</text>
+
+  <!-- 数据层 -->
+  <rect x="54" y="720" width="1030" height="110" fill="#d6dfdb" stroke="#708b83"/>
+  <rect x="54" y="720" width="166" height="110" fill="#17342e"/>
+  <text x="74" y="750" class="小字" fill="#f5f1e8">第一层</text>
+  <text x="74" y="785" class="层标题" fill="#f5f1e8">数据证据层</text>
+  <text x="248" y="751" class="节点标题 正文">授权数据源</text>
+  <text x="248" y="775" class="节点说明 次要">云端实时行情、历史行情、公告、新闻、参考数据</text>
+  <text x="520" y="751" class="节点标题 正文">不可变快照</text>
+  <text x="520" y="775" class="节点说明 次要">内容哈希、时点、父快照、来源与版本</text>
+  <text x="782" y="751" class="节点标题 正文">质量隔离与本地缓存</text>
+  <text x="782" y="775" class="节点说明 次要">关键失败隔离；缺失行情不填充；故障返回不可用</text>
+  <text x="248" y="810" class="小字" fill="#2b6c5b">决策时不等待远程接口 · 所有关键数字都能追溯到证据</text>
+
+  <!-- 生产治理 -->
+  <rect x="1110" y="181" width="436" height="649" fill="#111a17"/>
+  <text x="1138" y="216" class="微标" fill="#dc5238">跨层生产治理</text>
+  <text x="1138" y="257" class="层标题" fill="#f5f1e8">安全护栏与成熟度</text>
+  <line x1="1138" y1="279" x2="1518" y2="279" stroke="#53635e"/>
+
+  <text x="1138" y="315" class="节点标题" fill="#f5f1e8">一、数据防线</text>
+  <text x="1138" y="340" class="节点说明" fill="#aebcb7">来源、时点、质量、隔离、禁止静默替代</text>
+
+  <text x="1138" y="385" class="节点标题" fill="#f5f1e8">二、决策防线</text>
+  <text x="1138" y="410" class="节点说明" fill="#aebcb7">确定性快环、无未来信息、模型不能覆盖硬闸</text>
+
+  <text x="1138" y="455" class="节点标题" fill="#f5f1e8">三、执行防线</text>
+  <text x="1138" y="480" class="节点说明" fill="#aebcb7">无直接密钥、写入关闭、总开关开启、订单幂等</text>
+
+  <text x="1138" y="525" class="节点标题" fill="#f5f1e8">四、进化防线</text>
+  <text x="1138" y="550" class="节点说明" fill="#aebcb7">净成本验证、独立留出、人工批准、默认不晋级</text>
+
+  <text x="1138" y="595" class="节点标题" fill="#f5f1e8">五、运行防线</text>
+  <text x="1138" y="620" class="节点说明" fill="#aebcb7">审计日志、告警、备份恢复、安全演练</text>
+
+  <rect x="1138" y="663" width="380" height="86" fill="#dc5238"/>
+  <text x="1160" y="692" class="小字" fill="#17231f">当前成熟度</text>
+  <text x="1160" y="725" class="层标题" fill="#17231f">研究态 · 生产晋级为否</text>
+
+  <text x="1138" y="782" class="节点说明" fill="#aebcb7">经纪商写入默认关闭</text>
+  <text x="1138" y="804" class="节点说明" fill="#aebcb7">交易总开关默认开启保护</text>
+
+  <text x="54" y="873" class="节点说明 次要">汇报结论：数据有证据、交易有硬闸、复盘能自动、晋级必须慢、资本使用权始终由人掌握。</text>
+  <text x="1546" y="873" text-anchor="end" class="微标" fill="#dc5238">快速学习 · 谨慎晋级</text>
+</svg>

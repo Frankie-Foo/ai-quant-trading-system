@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -104,12 +105,16 @@ def test_dashboard_contains_real_runtime_and_never_order_authority(
     store.evaluate(_plan().plan_id, _facts(7), position=None)
 
     dashboard = store.dashboard()
+    plans = cast(list[dict[str, object]], dashboard["plans"])
+    first_plan = plans[0]
+    runtime = cast(dict[str, object], first_plan["runtime"])
+    latest_decision = cast(dict[str, object], first_plan["latest_decision"])
 
     assert dashboard["schema_version"] == "adaptive_trade_dashboard.v1"
     assert dashboard["orders_authorized"] is False
-    assert dashboard["plans"][0]["symbol"] == "XYZ"
-    assert dashboard["plans"][0]["runtime"]["state"] == "entry_ready"
-    assert dashboard["plans"][0]["latest_decision"]["action"] == "enter_probe"
+    assert first_plan["symbol"] == "XYZ"
+    assert runtime["state"] == "entry_ready"
+    assert latest_decision["action"] == "enter_probe"
     assert dashboard["latest_sequence"] == 2
 
 
@@ -127,8 +132,9 @@ def test_dashboard_only_shows_latest_registered_trade_date(tmp_path: Path) -> No
     store.register(_plan())
 
     dashboard = store.dashboard()
+    plans = cast(list[dict[str, object]], dashboard["plans"])
 
-    assert [item["symbol"] for item in dashboard["plans"]] == ["XYZ"]
+    assert [item["symbol"] for item in plans] == ["XYZ"]
 
 
 def test_runtime_survives_store_reopen(tmp_path: Path) -> None:
@@ -140,7 +146,10 @@ def test_runtime_survives_store_reopen(tmp_path: Path) -> None:
     reopened = AdaptivePlanStore(path)
 
     assert reopened.runtime(_plan().plan_id).consecutive_confirmations == 1
-    assert reopened.dashboard()["plans"][0]["runtime"]["state"] == "armed"
+    dashboard = reopened.dashboard()
+    plans = cast(list[dict[str, object]], dashboard["plans"])
+    runtime = cast(dict[str, object], plans[0]["runtime"])
+    assert runtime["state"] == "armed"
 
 
 def test_cleared_blocker_can_be_emitted_again_without_poll_noise(

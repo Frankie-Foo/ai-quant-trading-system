@@ -6,6 +6,7 @@ import json
 import mimetypes
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from operations.adaptive_plan_store import AdaptivePlanStore
+from operations.emergency_stop import EmergencyStopStore
 
 
 def _event_sequence(event: dict[str, object]) -> int:
@@ -37,10 +39,16 @@ def encode_plan_event(event: dict[str, object]) -> bytes:
 
 
 class AdaptiveClientApplication:
-    """Small read-only interface over the deep adaptive-plan store module."""
+    """Read-only plan interface plus a one-way global emergency stop."""
 
-    def __init__(self, *, store: AdaptivePlanStore):
+    def __init__(
+        self,
+        *,
+        store: AdaptivePlanStore,
+        emergency_stop: EmergencyStopStore | None = None,
+    ):
         self.store = store
+        self.emergency_stop = emergency_stop
 
     def handle(
         self,
@@ -48,6 +56,32 @@ class AdaptiveClientApplication:
         path: str,
         query: dict[str, list[str]],
     ) -> ClientApiResponse:
+        if method == "POST" and path == "/v1/emergency-stop":
+            if self.emergency_stop is None:
+                return ClientApiResponse(
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
+                    body={
+                        "error": "emergency-stop store unavailable",
+                        "orders_authorized": False,
+                    },
+                )
+            state = self.emergency_stop.activate(
+                at_utc=datetime.now(UTC),
+                reason="desktop_global_stop",
+            )
+            return ClientApiResponse(
+                status=HTTPStatus.OK,
+                body={
+                    "schema_version": "emergency_stop.v1",
+                    "emergency_stop_active": state.active,
+                    "activated_at_utc": (
+                        state.activated_at_utc.isoformat()
+                        if state.activated_at_utc is not None
+                        else None
+                    ),
+                    "orders_authorized": False,
+                },
+            )
         if method != "GET":
             return ClientApiResponse(
                 status=HTTPStatus.METHOD_NOT_ALLOWED,
@@ -57,12 +91,21 @@ class AdaptiveClientApplication:
                 },
             )
         if path == "/v1/health":
+            stop_active = (
+                self.emergency_stop.read().active
+                if self.emergency_stop is not None
+                else False
+            )
             return ClientApiResponse(
                 status=HTTPStatus.OK,
                 body={
                     "schema_version": "adaptive_client_health.v1",
                     "status": "ready",
                     "orders_authorized": False,
+                    "emergency_stop_active": stop_active,
+                    "execution_mode": "alpaca_paper",
+                    "live_trading_authorized": False,
+                    "ui_order_entry_enabled": False,
                 },
             )
         if path == "/v1/dashboard":

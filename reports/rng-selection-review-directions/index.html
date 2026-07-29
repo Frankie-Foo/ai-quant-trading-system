@@ -1,0 +1,1210 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RNG 选股复盘 · 三种视觉方向</title>
+  <!--
+    DESIGN-DIRECTION DRAFT — not the final review.
+    Audience: strategy owner and research team.
+    Evidence priority: stock-selection 80%, execution 20%.
+    The user's “操作只占60%” is represented as execution quality = 60/100.
+    P&L uses user-provided net profit ($950); broker-level fee detail is not inferred.
+    The supplied screenshots are used as evidence; no company logo is required because
+    this is an internal research document rather than RingCentral brand collateral.
+  -->
+  <style>
+    :root {
+      color-scheme: light;
+      --shell: #e8e7e2;
+      --shell-ink: #1c1d1b;
+      --shell-muted: #6d6f69;
+      --accent: #d84a32;
+      --line: rgba(28, 29, 27, .16);
+      --shadow: 0 22px 70px rgba(25, 24, 20, .14);
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      background:
+        linear-gradient(90deg, rgba(24, 25, 23, .035) 1px, transparent 1px) 0 0 / 36px 36px,
+        var(--shell);
+      color: var(--shell-ink);
+      font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif;
+    }
+
+    button { font: inherit; }
+
+    .shell {
+      width: min(1560px, calc(100% - 48px));
+      margin: 0 auto;
+      padding: 34px 0 70px;
+    }
+
+    .brief {
+      display: grid;
+      grid-template-columns: minmax(0, 1.5fr) minmax(320px, .8fr);
+      gap: 42px;
+      align-items: end;
+      padding: 22px 4px 28px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      color: #a23a29;
+      font: 650 12px/1.3 "Cascadia Code", Consolas, monospace;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+
+    .brief h1 {
+      max-width: 840px;
+      margin: 0;
+      font-family: "Noto Serif SC", "Songti SC", SimSun, serif;
+      font-size: clamp(38px, 5.2vw, 74px);
+      font-weight: 600;
+      letter-spacing: -.045em;
+      line-height: .98;
+    }
+
+    .brief-copy {
+      margin: 0;
+      color: var(--shell-muted);
+      font-size: 15px;
+      line-height: 1.8;
+    }
+
+    .brief-copy strong { color: var(--shell-ink); }
+
+    .tabbar {
+      position: sticky;
+      z-index: 20;
+      top: 0;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      margin: 24px 0 18px;
+      padding: 1px;
+      background: #bdbdb8;
+      box-shadow: 0 10px 28px rgba(27, 27, 23, .10);
+    }
+
+    .tab {
+      min-height: 64px;
+      border: 0;
+      background: #f5f4f0;
+      color: #696a65;
+      cursor: pointer;
+      text-align: left;
+      padding: 11px 16px;
+      transition: background .2s ease, color .2s ease;
+    }
+
+    .tab small {
+      display: block;
+      margin-bottom: 3px;
+      font: 650 10px/1.2 "Cascadia Code", Consolas, monospace;
+      letter-spacing: .14em;
+    }
+
+    .tab strong { font-size: 15px; font-weight: 680; }
+    .tab[aria-selected="true"] { background: #20211f; color: #fff; }
+    .tab:hover { background: #fff; color: #171815; }
+    .tab[aria-selected="true"]:hover { background: #20211f; color: #fff; }
+
+    .direction { display: none; }
+    .direction.active { display: block; animation: reveal .42s ease both; }
+
+    @keyframes reveal {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .direction-note {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      margin: 0 2px 12px;
+      color: #666761;
+      font-size: 13px;
+    }
+
+    .direction-note strong { color: #242521; }
+    .stage { overflow: hidden; box-shadow: var(--shadow); }
+
+    /* Direction A — investment committee memo */
+    .memo {
+      min-height: 910px;
+      padding: 52px 56px 46px;
+      background: #f7f3e9;
+      color: #182220;
+      border-top: 7px solid #a63d2d;
+      font-family: "Noto Serif SC", "Songti SC", SimSun, serif;
+    }
+
+    .memo .topline {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 14px;
+      border-bottom: 1px solid #27312e;
+      font: 600 11px/1.3 "Cascadia Code", Consolas, monospace;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    .memo .hero {
+      display: grid;
+      grid-template-columns: 1.45fr .75fr;
+      gap: 54px;
+      align-items: end;
+      padding: 42px 0 36px;
+      border-bottom: 1px solid rgba(24, 34, 32, .2);
+    }
+
+    .memo h2 {
+      margin: 0;
+      max-width: 850px;
+      font-size: clamp(44px, 5.4vw, 78px);
+      font-weight: 600;
+      letter-spacing: -.055em;
+      line-height: .98;
+    }
+
+    .memo .dek {
+      max-width: 720px;
+      margin: 20px 0 0;
+      color: #5d635d;
+      font-size: 15px;
+      line-height: 1.8;
+    }
+
+    .memo .verdict {
+      border-left: 4px solid #a63d2d;
+      padding-left: 22px;
+    }
+
+    .memo .verdict-label,
+    .memo .section-label {
+      margin: 0 0 9px;
+      color: #8e382a;
+      font: 700 10px/1.3 "Cascadia Code", Consolas, monospace;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+
+    .memo .verdict strong {
+      display: block;
+      font-size: 36px;
+      font-weight: 600;
+      line-height: 1.1;
+    }
+
+    .memo .verdict span {
+      display: block;
+      margin-top: 8px;
+      color: #60655f;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .memo-grid {
+      display: grid;
+      grid-template-columns: minmax(250px, .68fr) minmax(0, 1.65fr);
+      gap: 44px;
+      padding-top: 34px;
+    }
+
+    .memo-score {
+      padding-right: 34px;
+      border-right: 1px solid rgba(24, 34, 32, .18);
+    }
+
+    .memo-score .score {
+      margin: 2px 0 0;
+      color: #a63d2d;
+      font: 600 94px/.88 Georgia, serif;
+      letter-spacing: -.08em;
+    }
+
+    .memo-score .score span {
+      color: #7c7f78;
+      font-size: 22px;
+      letter-spacing: -.03em;
+    }
+
+    .memo-score h3 {
+      margin: 16px 0 8px;
+      font-size: 24px;
+      font-weight: 600;
+    }
+
+    .memo-score p {
+      margin: 0;
+      color: #626760;
+      font-size: 13px;
+      line-height: 1.7;
+    }
+
+    .memo-stat {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      padding: 13px 0;
+      border-bottom: 1px solid rgba(24, 34, 32, .14);
+      font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif;
+    }
+
+    .memo-stat:first-of-type { margin-top: 24px; border-top: 1px solid rgba(24, 34, 32, .14); }
+    .memo-stat span { color: #70746e; font-size: 12px; }
+    .memo-stat strong { font-size: 13px; }
+
+    .signal-ledger { counter-reset: signal; }
+
+    .signal-row {
+      counter-increment: signal;
+      display: grid;
+      grid-template-columns: 40px 135px minmax(0, 1fr) auto;
+      gap: 18px;
+      align-items: start;
+      padding: 16px 0;
+      border-bottom: 1px solid rgba(24, 34, 32, .14);
+    }
+
+    .signal-row::before {
+      content: "0" counter(signal);
+      padding-top: 2px;
+      color: #a63d2d;
+      font: 700 11px/1.4 "Cascadia Code", Consolas, monospace;
+    }
+
+    .signal-row time {
+      color: #656a64;
+      font: 600 11px/1.4 "Cascadia Code", Consolas, monospace;
+    }
+
+    .signal-row h4 {
+      margin: 0 0 4px;
+      font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif;
+      font-size: 14px;
+    }
+
+    .signal-row p {
+      margin: 0;
+      color: #666b65;
+      font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .signal-row b {
+      color: #284339;
+      font: 700 12px/1.4 "Cascadia Code", Consolas, monospace;
+      white-space: nowrap;
+    }
+
+    .memo-foot {
+      display: grid;
+      grid-template-columns: 1.35fr .65fr;
+      gap: 34px;
+      margin-top: 30px;
+      padding-top: 23px;
+      border-top: 2px solid #26302d;
+    }
+
+    .memo-foot h4 { margin: 0 0 10px; font-size: 18px; }
+    .memo-foot p { margin: 0; color: #60655f; font-size: 12px; line-height: 1.65; }
+
+    .execution-strip {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      padding-left: 24px;
+      border-left: 1px solid rgba(24, 34, 32, .25);
+    }
+
+    .execution-strip strong {
+      color: #a63d2d;
+      font: 600 42px/.9 Georgia, serif;
+    }
+
+    .execution-strip span {
+      color: #575d57;
+      font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    /* Direction B — signal forensics */
+    .forensics {
+      min-height: 910px;
+      padding: 36px 40px 40px;
+      background:
+        radial-gradient(circle at 72% 10%, rgba(221, 91, 36, .14), transparent 28%),
+        #111514;
+      color: #f1f1e9;
+      font-family: "Segoe UI Variable", "Microsoft YaHei UI", sans-serif;
+    }
+
+    .forensics .mast {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 30px;
+      align-items: start;
+      padding-bottom: 26px;
+      border-bottom: 1px solid rgba(237, 239, 229, .18);
+    }
+
+    .forensics .case {
+      margin: 0 0 7px;
+      color: #ec6a37;
+      font: 650 11px/1.3 "Cascadia Code", Consolas, monospace;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+    }
+
+    .forensics h2 {
+      margin: 0;
+      font: 650 clamp(38px, 5vw, 70px)/.98 "Bahnschrift", "Segoe UI Variable", sans-serif;
+      letter-spacing: -.055em;
+      text-transform: uppercase;
+    }
+
+    .forensics .tagline {
+      margin: 12px 0 0;
+      color: #a8afa9;
+      font-size: 14px;
+    }
+
+    .plaque {
+      min-width: 235px;
+      padding: 14px 17px 16px;
+      border: 1px solid rgba(237, 239, 229, .24);
+      border-top: 3px solid #ec6a37;
+    }
+
+    .plaque span {
+      display: block;
+      color: #9da39e;
+      font: 600 10px/1.3 "Cascadia Code", Consolas, monospace;
+      letter-spacing: .12em;
+    }
+
+    .plaque strong {
+      display: block;
+      margin-top: 6px;
+      font-size: 27px;
+      font-weight: 660;
+    }
+
+    .forensic-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.5fr) minmax(330px, .7fr);
+      gap: 28px;
+      padding-top: 28px;
+    }
+
+    .chain-label {
+      margin: 0 0 14px;
+      color: #8e9790;
+      font: 600 10px/1.3 "Cascadia Code", Consolas, monospace;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+
+    .causal-chain {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+      background: rgba(237, 239, 229, .15);
+      border: 1px solid rgba(237, 239, 229, .15);
+    }
+
+    .causal-node {
+      min-height: 210px;
+      padding: 18px 16px;
+      background: #171c1a;
+      position: relative;
+    }
+
+    .causal-node::after {
+      content: "→";
+      position: absolute;
+      z-index: 2;
+      top: 50%;
+      right: -12px;
+      width: 23px;
+      height: 23px;
+      margin-top: -12px;
+      background: #ec6a37;
+      color: #111514;
+      font-weight: 800;
+      line-height: 21px;
+      text-align: center;
+    }
+
+    .causal-node:last-child::after { display: none; }
+
+    .node-no {
+      color: #ec6a37;
+      font: 700 11px/1.3 "Cascadia Code", Consolas, monospace;
+    }
+
+    .causal-node h3 {
+      min-height: 54px;
+      margin: 18px 0 10px;
+      font-size: 18px;
+      line-height: 1.35;
+    }
+
+    .causal-node p {
+      margin: 0;
+      color: #9ca49e;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    .node-proof {
+      display: block;
+      margin-top: 18px;
+      color: #f1f1e9;
+      font: 650 12px/1.45 "Cascadia Code", Consolas, monospace;
+    }
+
+    .forensic-evidence {
+      display: grid;
+      grid-template-columns: .76fr 1.24fr;
+      gap: 1px;
+      margin-top: 22px;
+      background: rgba(237, 239, 229, .15);
+      border: 1px solid rgba(237, 239, 229, .15);
+    }
+
+    .intensity {
+      padding: 22px;
+      background: #171c1a;
+    }
+
+    .intensity .big {
+      color: #ec6a37;
+      font: 700 66px/.92 "Cascadia Code", Consolas, monospace;
+      letter-spacing: -.08em;
+    }
+
+    .intensity .big span { color: #7e8881; font-size: 18px; }
+    .intensity h4 { margin: 14px 0 6px; font-size: 16px; }
+    .intensity p { margin: 0; color: #9ca49e; font-size: 12px; line-height: 1.55; }
+
+    .proof-table { background: #171c1a; }
+
+    .proof-line {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 16px;
+      padding: 13px 18px;
+      border-bottom: 1px solid rgba(237, 239, 229, .11);
+      font-size: 12px;
+    }
+
+    .proof-line:last-child { border-bottom: 0; }
+    .proof-line span { color: #a5aca7; }
+    .proof-line strong { font: 650 12px/1.3 "Cascadia Code", Consolas, monospace; }
+
+    .evidence-photo {
+      margin: 0;
+      border: 1px solid rgba(237, 239, 229, .17);
+      background: #090c0b;
+    }
+
+    .evidence-photo img {
+      display: block;
+      width: 100%;
+      height: 436px;
+      object-fit: cover;
+      object-position: 13% center;
+      filter: saturate(.78) contrast(1.05);
+    }
+
+    .evidence-photo figcaption {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 13px 15px;
+      color: #909791;
+      font: 600 10px/1.4 "Cascadia Code", Consolas, monospace;
+      letter-spacing: .05em;
+    }
+
+    .forensics .bottom {
+      display: grid;
+      grid-template-columns: 1.6fr .4fr;
+      gap: 1px;
+      margin-top: 22px;
+      background: rgba(237, 239, 229, .15);
+      border: 1px solid rgba(237, 239, 229, .15);
+    }
+
+    .pattern-card,
+    .execution-card { padding: 19px 22px; background: #171c1a; }
+    .pattern-card h4, .execution-card h4 { margin: 0 0 7px; font-size: 15px; }
+    .pattern-card p, .execution-card p { margin: 0; color: #9ca49e; font-size: 12px; line-height: 1.6; }
+    .execution-card strong { color: #ec6a37; font: 700 30px/1 "Cascadia Code", Consolas, monospace; }
+
+    /* Direction C — causal replay notebook */
+    .notebook {
+      min-height: 910px;
+      padding: 0;
+      background:
+        linear-gradient(rgba(41, 68, 65, .065) 1px, transparent 1px) 0 0 / 22px 22px,
+        linear-gradient(90deg, rgba(41, 68, 65, .065) 1px, transparent 1px) 0 0 / 22px 22px,
+        #eef2ed;
+      color: #19332f;
+      font-family: "Cascadia Code", Consolas, monospace;
+    }
+
+    .notebook-head {
+      display: grid;
+      grid-template-columns: 1.1fr .9fr;
+      gap: 0;
+      border-bottom: 2px solid #23443e;
+    }
+
+    .notebook-title {
+      padding: 38px 42px 34px;
+      border-right: 1px solid #6c8982;
+    }
+
+    .notebook .run-id {
+      margin: 0 0 13px;
+      color: #ca4b36;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .12em;
+    }
+
+    .notebook h2 {
+      margin: 0;
+      max-width: 720px;
+      font-size: clamp(34px, 4.8vw, 62px);
+      font-weight: 700;
+      letter-spacing: -.065em;
+      line-height: .96;
+    }
+
+    .notebook-title p {
+      max-width: 680px;
+      margin: 16px 0 0;
+      color: #56706a;
+      font-size: 12px;
+      line-height: 1.65;
+    }
+
+    .hypothesis {
+      padding: 38px 42px;
+      background: rgba(255,255,255,.38);
+    }
+
+    .hypothesis span {
+      color: #ca4b36;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .hypothesis strong {
+      display: block;
+      margin-top: 12px;
+      font: 600 22px/1.45 "Noto Serif SC", "Songti SC", serif;
+    }
+
+    .notebook-body {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(330px, .65fr);
+    }
+
+    .replay { padding: 30px 42px 42px; border-right: 1px solid #6c8982; }
+
+    .code-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+      color: #607b74;
+      font-size: 10px;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    .replay-line {
+      display: grid;
+      grid-template-columns: 100px 22px minmax(0, 1fr) auto;
+      gap: 14px;
+      align-items: start;
+      min-height: 93px;
+    }
+
+    .replay-line time { color: #244b44; font-size: 11px; font-weight: 700; }
+    .trace {
+      position: relative;
+      width: 12px;
+      height: 100%;
+      border-left: 1px solid #6a8e86;
+    }
+
+    .trace::before {
+      content: "";
+      position: absolute;
+      top: 1px;
+      left: -5px;
+      width: 9px;
+      height: 9px;
+      background: #eef2ed;
+      border: 2px solid #ca4b36;
+    }
+
+    .replay-line h3 {
+      margin: -3px 0 5px;
+      font: 650 16px/1.35 "Segoe UI Variable", "Microsoft YaHei UI", sans-serif;
+    }
+
+    .replay-line p {
+      margin: 0;
+      color: #58736d;
+      font-size: 11px;
+      line-height: 1.6;
+    }
+
+    .replay-line output {
+      color: #ca4b36;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .feature-matrix {
+      margin-top: 4px;
+      border: 1px solid #638079;
+      background: rgba(238, 242, 237, .7);
+    }
+
+    .matrix-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(90px, .6fr) 58px;
+      gap: 16px;
+      padding: 10px 13px;
+      border-bottom: 1px solid rgba(76, 108, 101, .35);
+      font-size: 11px;
+    }
+
+    .matrix-row:last-child { border-bottom: 0; }
+    .matrix-row span { color: #5f7771; }
+    .matrix-row code { color: #244b44; }
+    .matrix-row b { color: #ca4b36; text-align: right; }
+
+    .notebook-side { background: rgba(255,255,255,.32); }
+
+    .notebook-panel {
+      padding: 26px 28px;
+      border-bottom: 1px solid #779089;
+    }
+
+    .notebook-panel:last-child { border-bottom: 0; }
+    .notebook-panel h3 { margin: 0 0 13px; font-size: 13px; }
+    .notebook-panel p { margin: 0; color: #5d7770; font-size: 11px; line-height: 1.62; }
+
+    .promotion-rule {
+      display: grid;
+      grid-template-columns: 27px minmax(0, 1fr);
+      gap: 11px;
+      margin-top: 12px;
+      align-items: start;
+    }
+
+    .promotion-rule b {
+      display: grid;
+      place-items: center;
+      width: 25px;
+      height: 25px;
+      border: 1px solid #ca4b36;
+      color: #ca4b36;
+      font-size: 10px;
+    }
+
+    .promotion-rule span { color: #365d55; font-size: 11px; line-height: 1.5; }
+
+    .dual-score {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1px;
+      margin-top: 16px;
+      border: 1px solid #6d8881;
+      background: #6d8881;
+    }
+
+    .dual-score div { padding: 15px; background: #eff3ee; }
+    .dual-score span { display: block; color: #627a74; font-size: 9px; }
+    .dual-score strong { display: block; margin-top: 6px; font-size: 25px; }
+    .dual-score div:first-child strong { color: #1f5549; }
+    .dual-score div:last-child strong { color: #ca4b36; }
+
+    .selection-cta {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 20px;
+      align-items: center;
+      margin-top: 16px;
+      padding: 15px 17px;
+      border: 1px solid #ca4b36;
+      color: #8f3022;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .selection-cta::after { content: "GENERALIZE →"; }
+
+    .choice {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 24px;
+      align-items: center;
+      margin-top: 16px;
+      padding: 17px 18px;
+      background: #f5f4f0;
+      border-left: 5px solid #222320;
+      color: #5f615c;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .choice strong { color: #222320; }
+
+    .choose-button {
+      border: 1px solid #222320;
+      border-radius: 0;
+      background: transparent;
+      color: #222320;
+      cursor: pointer;
+      padding: 10px 14px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .choose-button:hover, .choose-button.selected { background: #222320; color: #fff; }
+
+    #selection-status {
+      min-height: 24px;
+      margin: 15px 2px 0;
+      color: #4f514d;
+      font-size: 13px;
+      text-align: right;
+    }
+
+    @media (max-width: 1050px) {
+      .shell { width: min(100% - 28px, 900px); }
+      .brief { grid-template-columns: 1fr; gap: 20px; }
+      .memo { padding: 38px 30px; }
+      .memo .hero, .memo-grid, .memo-foot { grid-template-columns: 1fr; }
+      .memo-score { padding-right: 0; border-right: 0; }
+      .signal-row { grid-template-columns: 34px 110px minmax(0,1fr); }
+      .signal-row b { grid-column: 3; }
+      .forensic-layout { grid-template-columns: 1fr; }
+      .evidence-photo img { height: 330px; }
+      .notebook-body { grid-template-columns: 1fr; }
+      .replay { border-right: 0; border-bottom: 1px solid #6c8982; }
+    }
+
+    @media (max-width: 720px) {
+      .shell { width: min(100% - 18px, 650px); padding-top: 18px; }
+      .brief h1 { font-size: 43px; }
+      .tabbar { position: static; grid-template-columns: 1fr; }
+      .tab { min-height: 50px; }
+      .direction-note { display: block; }
+      .direction-note span { display: block; margin-top: 5px; }
+      .memo { padding: 28px 20px; }
+      .memo .topline, .forensics .mast { display: block; }
+      .memo .topline span { display: block; margin-top: 5px; }
+      .memo h2 { font-size: 43px; }
+      .signal-row { grid-template-columns: 26px minmax(0, 1fr); }
+      .signal-row time, .signal-row div, .signal-row b { grid-column: 2; }
+      .forensics { padding: 28px 18px; }
+      .plaque { margin-top: 22px; }
+      .causal-chain { grid-template-columns: 1fr; }
+      .causal-node { min-height: 0; }
+      .causal-node::after { content: "↓"; top: auto; right: 50%; bottom: -12px; margin-right: -12px; }
+      .forensic-evidence, .forensics .bottom { grid-template-columns: 1fr; }
+      .notebook-head { grid-template-columns: 1fr; }
+      .notebook-title { border-right: 0; border-bottom: 1px solid #6c8982; padding: 28px 20px; }
+      .hypothesis, .replay { padding: 28px 20px; }
+      .replay-line { grid-template-columns: 75px 16px minmax(0, 1fr); }
+      .replay-line output { grid-column: 3; }
+      .matrix-row { grid-template-columns: 1fr auto; }
+      .matrix-row b { grid-column: 2; }
+      .choice { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="brief">
+      <div>
+        <p class="eyebrow">Design direction gate / 01</p>
+        <h1>不是复盘一只 RNG，<br />而是复盘系统为何选中它。</h1>
+      </div>
+      <p class="brief-copy">
+        三个方向使用同一组真实证据：<strong>三层财报催化、盘前 RVOL 32.07、09:36 ORB-5 确认、
+        09:51 长阳结构确认</strong>。页面主角是可复制的选股逻辑；操作仅作为次要诊断，
+        暂按你的判断记为 <strong>60/100</strong>。
+      </p>
+    </header>
+
+    <nav class="tabbar" aria-label="设计方向">
+      <button class="tab" type="button" data-target="a" aria-selected="true">
+        <small>DIRECTION A</small>
+        <strong>机构投委会报告</strong>
+      </button>
+      <button class="tab" type="button" data-target="b" aria-selected="false">
+        <small>DIRECTION B</small>
+        <strong>信号取证战情室</strong>
+      </button>
+      <button class="tab" type="button" data-target="c" aria-selected="false">
+        <small>DIRECTION C</small>
+        <strong>因果回放实验本</strong>
+      </button>
+    </nav>
+
+    <section class="direction active" id="direction-a">
+      <div class="direction-note">
+        <strong>A · 适合每天阅读与保存归档</strong>
+        <span>编辑式研究报告 / 信息密度高 / 结论先行</span>
+      </div>
+      <article class="stage memo">
+        <div class="topline">
+          <span>Post-trade selection review · 2026.07.24</span>
+          <span>Case 001 / RNG / as-of discipline</span>
+        </div>
+
+        <header class="hero">
+          <div>
+            <p class="section-label">Selection thesis</p>
+            <h2>系统选中的不是涨幅，<br />而是“催化已被资金验证”。</h2>
+            <p class="dek">
+              RNG 的价值不在于事后上涨 25.53%，而在于决策时已有三层财报证据、
+              极端盘前相对量与开盘突破相互印证。这个组合可以抽象成下一次仍可执行的筛选模板。
+            </p>
+          </div>
+          <div class="verdict">
+            <p class="verdict-label">Committee verdict</p>
+            <strong>可泛化的 A 级样本</strong>
+            <span>保留特征，不记忆代码；进入同类财报强催化观察模板。</span>
+          </div>
+        </header>
+
+        <div class="memo-grid">
+          <aside class="memo-score">
+            <p class="section-label">Selection quality</p>
+            <div class="score">92<span>/100</span></div>
+            <h3>四层证据闭环</h3>
+            <p>
+              分数衡量选股过程，而非结果。价格上涨只用于检验信号，不反向抬高评分。
+            </p>
+            <div class="memo-stat"><span>催化强度</span><strong>74.47 / 100</strong></div>
+            <div class="memo-stat"><span>盘前 RVOL</span><strong>32.07 ×</strong></div>
+            <div class="memo-stat"><span>锁定池排名</span><strong>#1</strong></div>
+            <div class="memo-stat"><span>净收益（用户口径）</span><strong>$950</strong></div>
+          </aside>
+
+          <section>
+            <p class="section-label">Evidence ledger · known at the time</p>
+            <div class="signal-ledger">
+              <div class="signal-row">
+                <time>PRE-MKT</time>
+                <div>
+                  <h4>财报不是单点超预期，而是三层同时成立</h4>
+                  <p>实际业绩、前瞻指引、上调幅度均被结构化解析；避免只靠标题情绪。</p>
+                </div>
+                <b>3 / 3 LAYERS</b>
+              </div>
+              <div class="signal-row">
+                <time>09:03 ET</time>
+                <div>
+                  <h4>盘前资金完成第一次真实性验证</h4>
+                  <p>RVOL 32.07，硬闸通过并在锁定池排名第一；信号从“新闻”升级为“可交易候选”。</p>
+                </div>
+                <b>RANK #1</b>
+              </div>
+              <div class="signal-row">
+                <time>09:36 ET</time>
+                <div>
+                  <h4>只使用已完成 K 线，ORB-5 给出因果确认</h4>
+                  <p>09:35 完成栏收于开盘区间高点 44.33 上方，排除盘中未完成数据与未来函数。</p>
+                </div>
+                <b>ORB PASS</b>
+              </div>
+              <div class="signal-row">
+                <time>09:51 ET</time>
+                <div>
+                  <h4>长阳结构用于确认持有，不用于高位追买</h4>
+                  <p>价格、VWAP、收盘位置和绿量共同确认趋势延续；职责从选股切换为仓位管理。</p>
+                </div>
+                <b>HOLD SIGNAL</b>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <footer class="memo-foot">
+          <div>
+            <h4>该记住的形态</h4>
+            <p>
+              “结构化财报力度 ≥ 两层 + 盘前异常量 + 开盘完成栏突破 + VWAP 上方强收盘”。
+              这是一条跨股票规则；RNG 只是第一份被完整记录的真实样本。
+            </p>
+          </div>
+          <div class="execution-strip">
+            <strong>60</strong>
+            <span>操作质量 / 100<br />早盘切换过快、首轮持仓未充分吃到主升；盈利结果优秀但执行仍可提升。</span>
+          </div>
+        </footer>
+      </article>
+      <div class="choice">
+        <span><strong>选择 A，最终版会像一份可打印的投委会复盘：</strong>结论、证据、反事实、改进项与模板沉淀，适合每日归档。</span>
+        <button class="choose-button" type="button" data-choice="A">选择 A</button>
+      </div>
+    </section>
+
+    <section class="direction" id="direction-b">
+      <div class="direction-note">
+        <strong>B · 适合盘后迅速找出“为什么赢”</strong>
+        <span>深色战情室 / 因果链强 / 视觉冲击更大</span>
+      </div>
+      <article class="stage forensics">
+        <header class="mast">
+          <div>
+            <p class="case">Signal forensics / RNG / case 001</p>
+            <h2>From catalyst<br />to capital flow</h2>
+            <p class="tagline">把 25.53% 的结果拆回四个当时可见的证据节点。</p>
+          </div>
+          <div class="plaque">
+            <span>PRIMARY FINDING</span>
+            <strong>不是赌财报，是等验证。</strong>
+          </div>
+        </header>
+
+        <div class="forensic-layout">
+          <section>
+            <p class="chain-label">Causal chain / no future data</p>
+            <div class="causal-chain">
+              <div class="causal-node">
+                <span class="node-no">NODE 01</span>
+                <h3>结构化财报<br />三层共振</h3>
+                <p>业绩、前瞻、上调幅度分别提取，避免被单一 headline 误导。</p>
+                <span class="node-proof">74.47 / 100</span>
+              </div>
+              <div class="causal-node">
+                <span class="node-no">NODE 02</span>
+                <h3>盘前量能<br />证明有人买单</h3>
+                <p>消息只有得到真实成交验证，才能从催化剂进入锁定池。</p>
+                <span class="node-proof">RVOL 32.07×</span>
+              </div>
+              <div class="causal-node">
+                <span class="node-no">NODE 03</span>
+                <h3>开盘突破<br />证明趋势延续</h3>
+                <p>使用完成的 09:35 K 线，收于开盘区间高点 44.33 上方。</p>
+                <span class="node-proof">09:36 ET</span>
+              </div>
+              <div class="causal-node">
+                <span class="node-no">NODE 04</span>
+                <h3>长阳画像<br />支持继续持有</h3>
+                <p>强收盘、VWAP 上方、绿量确认；不是“涨了就追”的买点。</p>
+                <span class="node-proof">SCORE 93.65</span>
+              </div>
+            </div>
+
+            <div class="forensic-evidence">
+              <div class="intensity">
+                <div class="big">3<span>/3</span></div>
+                <h4>证据层完整度</h4>
+                <p>Actual → Forward → Raise。系统以后应优先寻找这种“财报力度有纵深”的股票。</p>
+              </div>
+              <div class="proof-table">
+                <div class="proof-line"><span>实际 EPS 相对预期</span><strong>+5.17%</strong></div>
+                <div class="proof-line"><span>实际营收相对预期</span><strong>+1.00%</strong></div>
+                <div class="proof-line"><span>前瞻 EPS 相对一致预期</span><strong>+2.00%</strong></div>
+                <div class="proof-line"><span>EPS 指引上调</span><strong>+2.03%</strong></div>
+                <div class="proof-line"><span>锁定池位置</span><strong>#1 @ 09:03</strong></div>
+              </div>
+            </div>
+          </section>
+
+          <figure class="evidence-photo">
+            <img src="assets/rng-intraday.jpg" alt="RNG 当日分时走势证据截图" />
+            <figcaption>
+              <span>EXHIBIT A · USER EVIDENCE</span>
+              <span>+25.53% / HIGH 49.25</span>
+            </figcaption>
+          </figure>
+        </div>
+
+        <div class="bottom">
+          <div class="pattern-card">
+            <h4>应写入系统的，不是 “RNG”</h4>
+            <p>写入的是：强财报结构 × 极端盘前相对量 × 完成栏 ORB 突破 × VWAP 上方长阳确认。下一只股票必须重新通过四道证据，而不能靠相似名字或事后涨幅。</p>
+          </div>
+          <div class="execution-card">
+            <h4>执行诊断</h4>
+            <p><strong>60/100</strong><br />盈利，但首轮过早兑现。</p>
+          </div>
+        </div>
+      </article>
+      <div class="choice">
+        <span><strong>选择 B，最终版会强化“信号 → 资金 → 确认 → 持有”的取证过程：</strong>更像交易战情室，图表与证据链是主角。</span>
+        <button class="choose-button" type="button" data-choice="B">选择 B</button>
+      </div>
+    </section>
+
+    <section class="direction" id="direction-c">
+      <div class="direction-note">
+        <strong>C · 适合训练系统自动复盘与进化</strong>
+        <span>因果实验本 / 时间点严格 / 最强调可复制规则</span>
+      </div>
+      <article class="stage notebook">
+        <header class="notebook-head">
+          <div class="notebook-title">
+            <p class="run-id">RUN / 2026-07-24 / RNG / SELECTION-REPLAY</p>
+            <h2>把成功样本变成<br />下一次可检验的假设。</h2>
+            <p>
+              不问“RNG 为什么涨”，先问“在每个决策时点，系统究竟知道什么”。
+              只有当时可见的信息才能进入学习样本。
+            </p>
+          </div>
+          <div class="hypothesis">
+            <span>HYPOTHESIS H₁</span>
+            <strong>多层财报超预期在获得盘前异常量验证后，若开盘完成栏突破 ORB，则更可能形成 VWAP 上方长阳延续。</strong>
+          </div>
+        </header>
+
+        <div class="notebook-body">
+          <section class="replay">
+            <div class="code-label">
+              <span>Point-in-time replay</span>
+              <span>future_leakage = false</span>
+            </div>
+
+            <div class="replay-line">
+              <time>T−1 / NEWS</time>
+              <i class="trace"></i>
+              <div>
+                <h3>解析三层财报证据</h3>
+                <p>actual surprise + forward vs consensus + guidance raise；短结构化标题不再被通用字数阈值误杀。</p>
+              </div>
+              <output>PASS</output>
+            </div>
+            <div class="replay-line">
+              <time>09:03 ET</time>
+              <i class="trace"></i>
+              <div>
+                <h3>形成锁定池</h3>
+                <p>盘前 RVOL 32.073337，候选排名 #1；所有硬闸均在当时快照内核验。</p>
+              </div>
+              <output>LOCK #1</output>
+            </div>
+            <div class="replay-line">
+              <time>09:36 ET</time>
+              <i class="trace"></i>
+              <div>
+                <h3>ORB-5 因果确认</h3>
+                <p>仅用已经结束的 09:35 bar；close &gt; 44.33，禁止盘中未完成栏和任何未来数据。</p>
+              </div>
+              <output>ENTRY OK</output>
+            </div>
+            <div class="replay-line">
+              <time>09:51 ET</time>
+              <i class="trace"></i>
+              <div>
+                <h3>职责切换：从选股到持仓</h3>
+                <p>长阳画像达标后只提供持有/减仓证据，不把“已经涨起来”重新包装成追买理由。</p>
+              </div>
+              <output>HOLD</output>
+            </div>
+
+            <div class="feature-matrix">
+              <div class="matrix-row"><span>earnings.evidence_layers</span><code>required ≥ 2</code><b>3</b></div>
+              <div class="matrix-row"><span>premarket.relative_volume</span><code>required &gt; 3.0</code><b>32.07</b></div>
+              <div class="matrix-row"><span>orb5.completed_bar_break</span><code>required = true</code><b>TRUE</b></div>
+              <div class="matrix-row"><span>profile.close_above_vwap</span><code>required = true</code><b>TRUE</b></div>
+              <div class="matrix-row"><span>profile.green_volume_ratio</span><code>required ≥ 1.5</code><b>3.75</b></div>
+            </div>
+          </section>
+
+          <aside class="notebook-side">
+            <section class="notebook-panel">
+              <h3>// 自动进化该学什么</h3>
+              <p>把样本拆成可测量的特征组合，并等待更多独立交易日验证；单次盈利只能进入候选规则，不能直接晋升生产参数。</p>
+              <div class="promotion-rule"><b>01</b><span>同类样本进入 purged OOS，不与当日训练数据混用。</span></div>
+              <div class="promotion-rule"><b>02</b><span>对比无盘前量、无 ORB 确认的反事实组。</span></div>
+              <div class="promotion-rule"><b>03</b><span>净成本、最大回撤和错失收益一起评价。</span></div>
+            </section>
+
+            <section class="notebook-panel">
+              <h3>// 本次评分分离</h3>
+              <p>把“选得好”与“做得好”拆开，防止盈利结果掩盖执行缺陷。</p>
+              <div class="dual-score">
+                <div><span>SELECTION</span><strong>92</strong></div>
+                <div><span>EXECUTION</span><strong>60</strong></div>
+              </div>
+            </section>
+
+            <section class="notebook-panel">
+              <h3>// 下一步可执行规则</h3>
+              <p>扫描所有股票，而非 RNG 白名单；满足财报层数与盘前量后进入观察，ORB 只做开盘后确认，长阳画像只负责持有管理。</p>
+              <div class="selection-cta">pattern_id: earnings_rvol_orb_v1</div>
+            </section>
+          </aside>
+        </div>
+      </article>
+      <div class="choice">
+        <span><strong>选择 C，最终版会成为“人能读、程序也能读”的自动复盘模板：</strong>每条结论绑定时间点、阈值、证据和下一轮实验。</span>
+        <button class="choose-button" type="button" data-choice="C">选择 C</button>
+      </div>
+    </section>
+
+    <p id="selection-status" aria-live="polite">请在页面内选择一个方向，或直接回复 A / B / C。</p>
+  </main>
+
+  <script>
+    const tabs = [...document.querySelectorAll(".tab")];
+    const directions = [...document.querySelectorAll(".direction")];
+    const buttons = [...document.querySelectorAll(".choose-button")];
+    const status = document.getElementById("selection-status");
+
+    function activate(target) {
+      tabs.forEach((tab) => tab.setAttribute("aria-selected", String(tab.dataset.target === target)));
+      directions.forEach((panel) => panel.classList.toggle("active", panel.id === `direction-${target}`));
+      window.scrollTo({ top: document.querySelector(".tabbar").offsetTop - 4, behavior: "smooth" });
+    }
+
+    tabs.forEach((tab) => tab.addEventListener("click", () => activate(tab.dataset.target)));
+
+    buttons.forEach((button) => {
+      button.addEventListener("click", () => {
+        buttons.forEach((item) => item.classList.remove("selected"));
+        button.classList.add("selected");
+        const choice = button.dataset.choice;
+        localStorage.setItem("rng-review-direction", choice);
+        status.textContent = `已在本机标记方向 ${choice}。回到对话回复 ${choice}，我会据此制作最终完整版。`;
+      });
+    });
+
+    const saved = localStorage.getItem("rng-review-direction");
+    if (saved) {
+      const savedButton = document.querySelector(`[data-choice="${saved}"]`);
+      if (savedButton) savedButton.classList.add("selected");
+      status.textContent = `本机已标记方向 ${saved}。回到对话回复 ${saved}，我会据此制作最终完整版。`;
+    }
+  </script>
+</body>
+</html>

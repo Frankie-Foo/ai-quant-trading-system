@@ -673,3 +673,76 @@ intraday system without importing the source project's long-horizon portfolio wo
   `research.intraday_selection_postmortem-20260728T033817Z-1732804ea2fb`.
 - Repository acceptance: 261 tests passed, Ruff clean, strict mypy success across
   138 source files, and the new skill passed `quick_validate.py`.
+
+## M24 bounded autonomous Paper client foundation - 2026-07-29
+
+Status: implemented and verified as a local-first Alpaca Paper foundation. It is not
+authorized for live trading and still requires multi-session Paper acceptance before
+any production-readiness claim.
+
+- Added a deterministic intraday policy for the independent catalyst and
+  factor/order-flow routes. It enforces the 07:00-09:25 ET premarket entry window,
+  the 09:25-09:31 no-entry lock, 09:35/10:00 confirmation exits, 12:00 entry stop,
+  13:00 flat rule, route-specific score/risk thresholds, and fail-closed 2.5R first
+  target plus 3R weighted reward requirements.
+- Added separate standard, high-right-tail, and A++ exit policies. Initial position
+  sizing is identical; only the retained tail changes from 20% to 25% or 30%.
+  Structural, anchored-VWAP, order-flow, giveback, hard-negative, and time exits are
+  deterministic.
+- Added the ten-second premarket limit-order lifecycle and a durable one-second
+  synthetic stop. Stop command intent is persisted before broker I/O, uses idempotent
+  client IDs, recovers after restart, reprices at bounded 0.25%/0.50%/1.00% buffers,
+  adjusts for partial fills, and fails closed on market-data or broker faults.
+- Added Paper-account exclusivity. Unknown/manual orders or positions cause all open
+  orders to be cancelled, all reconciled long positions to be flattened, and the day
+  to remain locked across restart. Extended-hours sells are quantity bounded and can
+  never open a short.
+- Upgraded the Electron client to six Chinese pages: today, opportunities, positions,
+  automatic review, Agent audit, and system. It has no manual order controls. Its only
+  mutation is a durable one-way global emergency stop; live mode remains explicitly
+  unavailable.
+- Added bidirectional decision-quality review with disciplined-win,
+  disciplined-loss, lucky-win, and avoidable-loss labels. Standard 20%, high 25%,
+  and A++ 30% tail outcomes are kept in separate research-only shadow ledgers and
+  cannot mutate production parameters.
+- Repository acceptance: 345 tests passed, Ruff clean, strict mypy success across
+  230 source files, and the Electron production build completed successfully.
+
+## M25 fail-closed autonomous Paper runtime - 2026-07-29
+
+Status: implemented and locally packaged; Alpaca Paper remains disarmed by default,
+the desktop client remains paused, and no live-trading route exists.
+
+- Added strict, atomic evidence contracts for catalyst, red-team, deterministic
+  supervisor, and Livermore push health. Direct Alpaca news and current SIP quotes
+  feed bounded fact packages; missing, malformed, stale, or unhealthy evidence
+  produces a fail-closed safety envelope.
+- Kept the deterministic kernel authoritative. Catalyst and red-team roles currently
+  use the configured DeepSeek V4-Pro JSON client; the supervisor is programmatic.
+  Cached classifications may be renewed only when role, model, and prompt hash are
+  unchanged. Deep-learning training remains deliberately deferred.
+- Completed restart-safe position sizing and lifecycle control. Target quantities use
+  the immutable plan reference price, standard/high/A++ tails retain 20%/25%/30%,
+  main and tail entries have separate protected order components, and main-target
+  realization survives restart.
+- Added the 09:30 ET handoff for premarket fills. A regular-hours protective stop is
+  attached idempotently before any upgrade. Tail management persists MFE, requires
+  uninterrupted weak-order-flow duration, and combines anchored VWAP, failed reclaim,
+  Chandelier, structure, and hard-breakdown evidence.
+- Closed the empty-position race in runtime failure handling: pending entry orders are
+  cancelled even when Broker position state has not yet appeared. A failed action
+  notification records a five-minute delivery latch and immediately invokes the same
+  fail-closed cancellation/exit path using only a quote no older than 30 seconds.
+- Centralized UTF-8 Chinese Livermore delivery with verified `sender_type=bot`,
+  restart-safe deduplication, and percentage-only return/protection reporting. Channel
+  discovery cannot overwrite a current actual-delivery failure; a later successful
+  delivery can prove recovery.
+- Added local Docker packaging for three isolated processes: SIP refresher, runtime
+  agents, and Paper executor. The default compose is read-only; Paper writes require
+  `BROKER_WRITE_ENABLED=true`, `TRADING_KILL_SWITCH=false`, and the separate
+  `--arm-paper` override. Containers are non-root, read-only, capability-free, and
+  share only the explicit config and durable `runs` mounts.
+- Repository acceptance: 429 tests passed in 64.07 seconds, Ruff clean, and strict
+  mypy success across 260 Python files. Both compose configurations passed quiet
+  validation, all three images built successfully, and the executor image passed a
+  container import smoke test. No trading service was started and no order was sent.

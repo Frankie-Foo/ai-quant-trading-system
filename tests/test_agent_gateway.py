@@ -249,9 +249,10 @@ def test_pdca_can_read_anonymized_intraday_selection_postmortem(
         ),
     )
     history_rows = history["data"]
+    history_snapshot_ids = cast(list[object], history["snapshot_ids"])
     assert isinstance(history_rows, list)
     assert len(history_rows) == 2
-    assert len(history["snapshot_ids"]) == 2
+    assert len(history_snapshot_ids) == 2
 
     persist_snapshot(
         pl.DataFrame(

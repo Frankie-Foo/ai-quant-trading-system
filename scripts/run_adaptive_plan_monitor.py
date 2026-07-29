@@ -42,6 +42,11 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=ROOT / "runs" / "adaptive-plan-monitor.lock",
     )
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        help="Stop cleanly after this many seconds; omit for continuous operation.",
+    )
     parser.add_argument("--once", action="store_true")
     return parser
 
@@ -49,6 +54,8 @@ def _parser() -> argparse.ArgumentParser:
 def main() -> int:
     load_dotenv(ROOT / ".env")
     args = _parser().parse_args()
+    if args.max_seconds is not None and args.max_seconds <= 0:
+        raise ValueError("max-seconds must be positive")
     config = load_adaptive_plan_config(args.config)
     store = AdaptivePlanStore(args.state_db)
     for plan in config.plans:
@@ -69,6 +76,11 @@ def main() -> int:
         broker=CloudBrokerPositionAdapter(broker),
     )
     logger = JsonEventLogger(service="adaptive_plan_monitor")
+    deadline = (
+        None
+        if args.max_seconds is None
+        else time.monotonic() + float(args.max_seconds)
+    )
     try:
         with ProcessLock(args.lock_file):
             while True:
@@ -107,7 +119,15 @@ def main() -> int:
                 if args.once:
                     return 0
                 elapsed = time.monotonic() - started
-                time.sleep(max(0.0, config.poll_seconds - elapsed))
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return 0
+                    time.sleep(
+                        min(remaining, max(0.0, config.poll_seconds - elapsed))
+                    )
+                else:
+                    time.sleep(max(0.0, config.poll_seconds - elapsed))
     finally:
         broker.close()
 

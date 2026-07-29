@@ -14,9 +14,71 @@ from kernel.features.liquidity import (
 )
 from kernel.features.momentum import atr, beta, days_in_play
 from kernel.features.overnight_intraday import decompose
-from kernel.universe import REQUIRED_UNIVERSE_COLUMNS, _build_universe_from_daily
+from kernel.universe import (
+    REQUIRED_UNIVERSE_COLUMNS,
+    _build_universe_from_daily,
+    _load_accepted_common_stocks,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _write_common_stock_reference(
+    root: Path,
+    *,
+    snapshot_name: str,
+    asof_date: date,
+    symbols: list[str],
+) -> None:
+    path = root / "accepted" / snapshot_name
+    path.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "asof_date": [asof_date] * len(symbols),
+            "symbol": symbols,
+            "security_type": ["CS"] * len(symbols),
+            "active": [True] * len(symbols),
+        }
+    ).write_parquet(path / "data.parquet")
+
+
+def test_common_stock_loader_uses_latest_snapshot_without_cross_snapshot_duplicates(
+    tmp_path: Path,
+) -> None:
+    reference_date = date(2026, 7, 24)
+    _write_common_stock_reference(
+        tmp_path,
+        snapshot_name="massive.reference_tickers.cs-20260727T010000Z-old",
+        asof_date=reference_date,
+        symbols=["A", "B"],
+    )
+    _write_common_stock_reference(
+        tmp_path,
+        snapshot_name="massive.reference_tickers.cs-20260727T020000Z-new",
+        asof_date=reference_date,
+        symbols=["A", "B", "C"],
+    )
+
+    symbols, provenance = _load_accepted_common_stocks(
+        date(2026, 7, 27), tmp_path
+    )
+
+    assert symbols == {"A", "B", "C"}
+    assert provenance == "massive.reference_tickers.cs@2026-07-24"
+
+
+def test_common_stock_loader_rejects_duplicates_inside_selected_snapshot(
+    tmp_path: Path,
+) -> None:
+    _write_common_stock_reference(
+        tmp_path,
+        snapshot_name="massive.reference_tickers.cs-20260727T020000Z-duplicate",
+        asof_date=date(2026, 7, 24),
+        symbols=["A", "A"],
+    )
+
+    with pytest.raises(ValueError, match="duplicate symbols"):
+        _load_accepted_common_stocks(date(2026, 7, 27), tmp_path)
 
 
 def test_atr_is_zero_for_constant_prices() -> None:

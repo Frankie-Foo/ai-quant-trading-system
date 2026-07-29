@@ -40,6 +40,27 @@ def test_nasdaq_earnings_parser_preserves_schedule_and_provenance() -> None:
     assert row["retrieved_utc"] == retrieved
 
 
+def test_nasdaq_earnings_parser_deduplicates_identical_provider_rows() -> None:
+    item = {
+        "symbol": "ARIS",
+        "name": "Aris Mining Corporation",
+        "time": "time-after-hours",
+        "marketCap": "$3,075,545,255",
+        "fiscalQuarterEnding": "Jun/2026",
+        "epsForecast": "$0.39",
+        "noOfEsts": "1",
+    }
+
+    frame = _parse_earnings_payload(
+        {"data": {"rows": [item, item.copy()]}},
+        trade_date=date(2026, 7, 29),
+        retrieved_utc=datetime(2026, 7, 29, 12, 41, tzinfo=UTC),
+    )
+
+    assert frame.height == 1
+    assert frame.get_column("symbol").to_list() == ["ARIS"]
+
+
 def test_nasdaq_halt_parser_handles_luld_and_resumption_times() -> None:
     xml = b"""<?xml version="1.0" encoding="utf-8"?>
     <rss xmlns:ndaq="http://www.nasdaqtrader.com/"><channel><item>

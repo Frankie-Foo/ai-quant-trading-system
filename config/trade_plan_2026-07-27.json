@@ -1,0 +1,45 @@
+{
+  "trade_date": "2026-07-27",
+  "poll_seconds": 15,
+  "entry_window_end_et": "11:30:00",
+  "exit_decision_time_bjt": "00:00:00",
+  "force_exit_time_bjt": "01:00:00",
+  "market_close_time_et": "16:00:00",
+  "channel_id": "4edcd570-603f-4c5f-a070-db88c48a5c9b",
+  "account_value": 100000,
+  "daily_loss_limit": 700,
+  "plans": [
+    {
+      "symbol": "BX",
+      "priority": 1,
+      "premarket_high": 132.28,
+      "premarket_vwap": 131.36,
+      "support_low": 131.20,
+      "support_high": 131.50,
+      "reclaim_price": 131.60,
+      "pullback_stop": 130.90,
+      "breakout_stop": 131.20,
+      "max_spread_ratio": 0.0025,
+      "max_chase_ratio": 0.01,
+      "max_risk": 350,
+      "max_notional": 35000,
+      "minimum_opening_dollar_volume": 0
+    },
+    {
+      "symbol": "KKR",
+      "priority": 2,
+      "premarket_high": 100.50,
+      "premarket_vwap": 100.03,
+      "support_low": 100.00,
+      "support_high": 100.15,
+      "reclaim_price": 100.50,
+      "pullback_stop": 99.75,
+      "breakout_stop": 99.80,
+      "max_spread_ratio": 0.0015,
+      "max_chase_ratio": 0.01,
+      "max_risk": 250,
+      "max_notional": 20000,
+      "minimum_opening_dollar_volume": 1000000
+    }
+  ]
+}

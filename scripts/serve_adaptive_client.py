@@ -11,6 +11,7 @@ from operations.adaptive_client_api import (
     build_client_http_server,
 )
 from operations.adaptive_plan_store import AdaptivePlanStore
+from operations.emergency_stop import EmergencyStopStore
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -40,7 +41,13 @@ def main() -> int:
             "remote deployment requires the authenticated HTTPS gateway"
         )
     store = AdaptivePlanStore(args.state_db)
-    application = AdaptiveClientApplication(store=store)
+    emergency_stop = EmergencyStopStore(
+        args.state_db.with_name("emergency-stop.sqlite3")
+    )
+    application = AdaptiveClientApplication(
+        store=store,
+        emergency_stop=emergency_stop,
+    )
     server = build_client_http_server(
         application,
         host=args.host,

@@ -6,15 +6,31 @@ import {
   ArrowUpRight,
   BarChart3,
   BellRing,
+  Bot,
+  BrainCircuit,
+  BriefcaseBusiness,
   CheckCircle2,
   Clock3,
   Database,
   Gauge,
+  LayoutDashboard,
+  Power,
+  Radar,
   RefreshCw,
+  Settings,
   ShieldCheck,
   Target,
   Waves,
 } from 'lucide-react'
+
+const PAGES = [
+  { id: 'today', label: '今日', icon: LayoutDashboard },
+  { id: 'opportunities', label: '机会', icon: Radar },
+  { id: 'positions', label: '持仓', icon: BriefcaseBusiness },
+  { id: 'review', label: '复盘', icon: BrainCircuit },
+  { id: 'agents', label: 'Agent', icon: Bot },
+  { id: 'system', label: '系统', icon: Settings },
+]
 
 const STATE_LABELS = {
   watching: '观察',
@@ -241,18 +257,138 @@ function Detail({ plan }) {
   )
 }
 
+function PageHeader({ eyebrow, title, detail }) {
+  return (
+    <header className="page-header">
+      <div><span className="eyebrow">{eyebrow}</span><h2>{title}</h2></div>
+      <p>{detail}</p>
+    </header>
+  )
+}
+
+function OpportunitiesPage({ plans, onOpen }) {
+  return (
+    <div className="page-stack">
+      <PageHeader eyebrow="LIVE OPPORTUNITY QUEUE" title="候选机会" detail="催化剂路线与纯因子/订单流路线分别评分，只有完整证据通过才进入执行。" />
+      <div className="wide-card-grid">
+        {plans.length ? plans.map((plan) => {
+          const evaluation = plan.latest_evaluation || plan.latest_decision
+          return (
+            <button className="opportunity-card" type="button" key={plan.plan_id} onClick={() => onOpen(plan.plan_id)}>
+              <div><strong>{plan.symbol}</strong><span>{plan.baseline.mode === 'factor' ? '因子 / 订单流' : '催化剂'}</span></div>
+              <b>{STATE_LABELS[plan.runtime.state] || plan.runtime.state}</b>
+              <p>{ACTION_LABELS[evaluation?.action || 'no_action']}</p>
+              <small>{(evaluation?.blockers || []).length} 个阻断项 · {localTime(plan.updated_at_utc)}</small>
+            </button>
+          )
+        }) : <section className="empty compact"><Radar size={28} /><h2>当前没有合格候选</h2><p>空仓也是系统的正式决策。</p></section>}
+      </div>
+    </div>
+  )
+}
+
+function PositionsPage({ plans }) {
+  const active = plans.filter((plan) => ['holding', 'add_allowed', 'reduce_required', 'exit_required'].includes(plan.runtime.state))
+  return (
+    <div className="page-stack">
+      <PageHeader eyebrow="PAPER POSITION CONTROL" title="模拟盘持仓与保护" detail="客户端不提供手工买卖；止损、减仓、尾仓和 13:00 ET 清仓由确定性执行层管理。" />
+      <section className="panel table-panel">
+        <div className="table-row table-head"><span>标的</span><span>状态</span><span>保护位</span><span>尾仓规则</span><span>更新时间</span></div>
+        {active.length ? active.map((plan) => (
+          <div className="table-row" key={plan.plan_id}>
+            <strong>{plan.symbol}</strong>
+            <span>{STATE_LABELS[plan.runtime.state]}</span>
+            <span>{number(plan.runtime.protective_stop)}</span>
+            <span>标准 20% · 强右尾 25% · A++ 30%</span>
+            <span>{localTime(plan.updated_at_utc)}</span>
+          </div>
+        )) : <p className="table-empty">当前无模拟盘持仓。系统不会为了保持活跃而强制交易。</p>}
+      </section>
+    </div>
+  )
+}
+
+function ReviewPage({ events }) {
+  return (
+    <div className="page-stack">
+      <PageHeader eyebrow="BIDIRECTIONAL POSTMORTEM" title="自动复盘" detail="同时回答“赚为什么赚、亏为什么亏”，并复查被拒绝标的、漏选强势股和尾仓反事实。" />
+      <div className="review-grid">
+        <section className="panel review-card"><h3>每日闭环</h3><p>冻结盘前证据 → 对齐成交与盘口 → 归因选股/时机/执行/退出 → 生成沙盒假设。</p><span>任何 Agent 结论都不能直接改生产参数</span></section>
+        <section className="panel review-card"><h3>决策四象限</h3><p>好决策盈利 · 好决策亏损 · 坏决策侥幸盈利 · 坏决策亏损。</p><span>不把一次赚钱误判成策略正确</span></section>
+        <section className="panel review-card"><h3>漏选扫描</h3><p>已选中、硬闸主动放弃、盘中新催化、新闻缺口、技术/资金流缺口逐只归因。</p><span>只提出可证伪的沙盒实验</span></section>
+      </div>
+      <section className="panel timeline">
+        <h3>最近决策事实</h3>
+        {events.slice().reverse().slice(0, 12).map((item) => (
+          <div key={item.sequence}><time>{localTime(item.observed_at_utc)}</time><strong>{item.event.symbol}</strong><span>{ACTION_LABELS[item.event.action] || item.event.action}</span></div>
+        ))}
+        {!events.length && <p className="muted">尚无可复盘的实时事件。</p>}
+      </section>
+    </div>
+  )
+}
+
+function AgentsPage({ online }) {
+  const agents = [
+    ['催化剂分析 Agent', 'DeepSeek V4 Pro · 只生成有证据绑定的语义评分', '研究建议'],
+    ['复盘研究 Agent', 'DeepSeek · 总结双向归因并提出可证伪假设', '沙盒权限'],
+    ['红队 Agent', '独立模型 · 查找未来函数、过拟合和错误因果', '否决权限'],
+  ]
+  return (
+    <div className="page-stack">
+      <PageHeader eyebrow="BOUNDED MULTI-AGENT" title="Agent 审计" detail="Agent 负责难以程序化的语义判断；风控、仓位、时钟和下单永远由确定性程序掌控。" />
+      <div className="agent-grid">
+        {agents.map(([name, detail, authority]) => (
+          <section className="panel agent-card" key={name}>
+            <span className={`agent-status ${online ? 'online' : ''}`}>{online ? '可用' : '故障保护'}</span>
+            <Bot size={22} /><h3>{name}</h3><p>{detail}</p><small>{authority} · 无直接下单权</small>
+          </section>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function SystemPage({ health, error }) {
+  const rows = [
+    ['本地决策服务', error ? '异常' : '在线'],
+    ['执行环境', 'Alpaca Paper'],
+    ['实盘权限', '永久关闭（第一版）'],
+    ['客户端手工下单', '禁止'],
+    ['深度学习训练', '暂缓；接口保留'],
+    ['全局急停', health?.emergency_stop_active ? '已触发' : '待命'],
+  ]
+  return (
+    <div className="page-stack">
+      <PageHeader eyebrow="LOCAL-FIRST CONTROL PLANE" title="系统与安全边界" detail="Docker 本地运行、密钥不进 Git；后续迁移服务器时保持同一接口。" />
+      <section className="panel system-list">
+        {rows.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}
+      </section>
+    </div>
+  )
+}
+
 export default function App() {
   const [dashboard, setDashboard] = useState(null)
+  const [health, setHealth] = useState(null)
   const [events, setEvents] = useState([])
   const [selectedId, setSelectedId] = useState(null)
+  const [page, setPage] = useState('today')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [stopping, setStopping] = useState(false)
 
   const refresh = useCallback(async () => {
     try {
-      const dashboardResponse = await fetch('/v1/dashboard', { cache: 'no-store' })
-      if (!dashboardResponse.ok) throw new Error('状态接口不可用')
-      const nextDashboard = await dashboardResponse.json()
+      const [dashboardResponse, healthResponse] = await Promise.all([
+        fetch('/v1/dashboard', { cache: 'no-store' }),
+        fetch('/v1/health', { cache: 'no-store' }),
+      ])
+      if (!dashboardResponse.ok || !healthResponse.ok) throw new Error('状态接口不可用')
+      const [nextDashboard, nextHealth] = await Promise.all([
+        dashboardResponse.json(),
+        healthResponse.json(),
+      ])
       const after = Math.max(0, Number(nextDashboard.latest_sequence || 0) - 50)
       const eventsResponse = await fetch(
         `/v1/events?after=${after}&limit=50`,
@@ -261,6 +397,7 @@ export default function App() {
       if (!eventsResponse.ok) throw new Error('事件接口不可用')
       const nextEvents = await eventsResponse.json()
       setDashboard(nextDashboard)
+      setHealth(nextHealth)
       setEvents(nextEvents.events || [])
       setSelectedId((current) => current || nextDashboard.plans?.[0]?.plan_id || null)
       setError('')
@@ -272,6 +409,21 @@ export default function App() {
       setLoading(false)
     }
   }, [])
+
+  const emergencyStop = useCallback(async () => {
+    if (health?.emergency_stop_active) return
+    if (!window.confirm('确认触发全局急停？触发后本日不可在客户端恢复。')) return
+    setStopping(true)
+    try {
+      const response = await fetch('/v1/emergency-stop', { method: 'POST' })
+      if (!response.ok) throw new Error('急停接口不可用')
+      await refresh()
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '急停失败')
+    } finally {
+      setStopping(false)
+    }
+  }, [health, refresh])
 
   useEffect(() => {
     let cancelled = false
@@ -304,24 +456,47 @@ export default function App() {
     .reverse()
     .slice(0, 8)
 
+  const openPlan = (planId) => {
+    setSelectedId(planId)
+    setPage('today')
+  }
+
+  const pageContent = page === 'today'
+    ? <section className="content"><Detail plan={selected} /></section>
+    : page === 'opportunities'
+      ? <section className="content"><OpportunitiesPage plans={plans} onOpen={openPlan} /></section>
+      : page === 'positions'
+        ? <section className="content"><PositionsPage plans={plans} /></section>
+        : page === 'review'
+          ? <section className="content"><ReviewPage events={events} /></section>
+          : page === 'agents'
+            ? <section className="content"><AgentsPage online={!error} /></section>
+            : <section className="content"><SystemPage health={health} error={error} /></section>
+
   return (
     <main className="app">
       <header className="topbar">
         <div className="brand"><span><Activity size={21} /></span><div><strong>日内量化决策台</strong><small>ADAPTIVE SIGNAL DESK</small></div></div>
-        <div className="system-state"><StatusDot ok={!error} /><span>{error ? '引擎连接异常' : '确定性引擎在线'}</span></div>
+        <div className="system-state"><StatusDot ok={!error && !health?.emergency_stop_active} /><span>{health?.emergency_stop_active ? '全局急停已触发' : error ? '引擎连接异常' : 'Paper 执行引擎在线'}</span></div>
         <button type="button" className="refresh" onClick={refresh}><RefreshCw size={15} />刷新</button>
+        <button type="button" className={`emergency ${health?.emergency_stop_active ? 'active' : ''}`} disabled={stopping || health?.emergency_stop_active} onClick={emergencyStop}><Power size={15} />{health?.emergency_stop_active ? '已急停' : '全局急停'}</button>
       </header>
 
       <section className="safety-banner">
         <ShieldCheck size={18} />
-        <div><strong>只读建议模式</strong><span>客户端没有订单接口；风险基线、状态机和券商持仓对账均在独立引擎执行。</span></div>
-        <span className="readonly">ORDERS OFF</span>
+        <div><strong>模拟盘自动执行</strong><span>客户端没有手工买卖入口；确定性程序管理风险、订单和 Alpaca Paper 持仓。</span></div>
+        <span className="readonly">LIVE 永久关闭</span>
       </section>
 
       {error && <div className="error-banner"><AlertTriangle size={17} />{error}。客户端保留最后一次已知状态，不生成新建议。</div>}
 
-      <div className="workspace">
-        <aside>
+      <div className={`workspace ${page !== 'today' ? 'page-mode' : ''}`}>
+        <nav className="nav-rail">
+          {PAGES.map(({ id, label, icon: Icon }) => (
+            <button key={id} type="button" className={page === id ? 'active' : ''} onClick={() => setPage(id)}><Icon size={17} /><span>{label}</span></button>
+          ))}
+        </nav>
+        {page === 'today' && <aside>
           <div className="aside-title"><div><span className="eyebrow">TODAY</span><h3>动态交易预案</h3></div><span>{plans.length}</span></div>
           <div className="plan-list">
             {loading ? <p className="muted">正在读取真实状态……</p> : plans.map((plan) => (
@@ -338,14 +513,14 @@ export default function App() {
               </div>
             )) : <p className="muted">尚无实质性状态变化。</p>}
           </section>
-        </aside>
-        <section className="content"><Detail plan={selected} /></section>
+        </aside>}
+        {pageContent}
       </div>
 
       <footer>
         <span><Database size={13} /> SQLite 可恢复状态与追加式事件记录</span>
         <span><Clock3 size={13} /> 15 秒感知 · 完整 K 线/风险事件驱动决策</span>
-        <span>{dashboard?.orders_authorized === false ? '订单权限：关闭' : '安全状态未知'}</span>
+        <span>客户端下单：禁止 · Paper 自动执行：由独立运行时授权</span>
       </footer>
     </main>
   )
