@@ -1,0 +1,57 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "perp_risk_outcome.v1",
+      "default": "perp_risk_outcome.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "snapshot_id": {
+      "title": "Snapshot Id",
+      "type": "string"
+    },
+    "target_id": {
+      "title": "Target Id",
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "benchmark",
+        "trade"
+      ],
+      "title": "Kind",
+      "type": "string"
+    },
+    "observed_at_utc": {
+      "format": "date-time",
+      "title": "Observed At Utc",
+      "type": "string"
+    },
+    "horizon_minutes": {
+      "exclusiveMinimum": 0,
+      "maximum": 10080,
+      "title": "Horizon Minutes",
+      "type": "integer"
+    },
+    "return_pct": {
+      "title": "Return Pct",
+      "type": "number"
+    },
+    "metadata": {
+      "additionalProperties": true,
+      "title": "Metadata",
+      "type": "object"
+    }
+  },
+  "required": [
+    "snapshot_id",
+    "target_id",
+    "kind",
+    "observed_at_utc",
+    "horizon_minutes",
+    "return_pct"
+  ],
+  "title": "OutcomeRecord",
+  "type": "object"
+}
