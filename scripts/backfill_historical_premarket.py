@@ -326,7 +326,12 @@ def main() -> None:
                         schema={
                             "symbol": pl.String,
                             "ts_utc": pl.Datetime("ms", "UTC"),
+                            "open": pl.Float64,
+                            "high": pl.Float64,
+                            "low": pl.Float64,
+                            "close": pl.Float64,
                             "volume": pl.Int64,
+                            "vwap": pl.Float64,
                         }
                     )
                 features = rvol(
@@ -338,6 +343,10 @@ def main() -> None:
                     cutoff_et=cutoff_et,
                     n=HISTORY_SESSIONS,
                     min_rvol=cfg.universe.min_rvol,
+                    min_premarket_return=cfg.universe.min_premarket_return,
+                    min_premarket_close_location=(
+                        cfg.universe.min_premarket_close_location
+                    ),
                     provenance=(
                         f"alpaca.{policy.feed}.split_adjusted"
                         f"[{len(session_dates)}sessions]"
@@ -355,12 +364,17 @@ def main() -> None:
                     symbols=symbols,
                     trade_date=target,
                     decision_asof_utc=decision_asof,
+                    min_rvol=cfg.universe.min_rvol,
+                    min_premarket_return=cfg.universe.min_premarket_return,
+                    min_premarket_close_location=(
+                        cfg.universe.min_premarket_close_location
+                    ),
                 )
                 snapshot, _ = persist_snapshot(
                     output,
                     root=args.data_root,
                     source=FEATURE_SOURCE,
-                    schema_version="premarket_rvol_candidates.v1",
+                    schema_version="premarket_rvol_candidates.v2",
                     checks=checks,
                     parent_snapshot_ids=(
                         candidate_snapshots[target].dataset_id,

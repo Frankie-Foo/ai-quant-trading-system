@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from contextlib import aclosing
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from execution.alpaca_sip_stream import PlatformSipStream, SipBar
@@ -24,6 +24,23 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _lease_window(
+    *, now_utc: datetime, max_seconds: float
+) -> tuple[datetime, datetime]:
+    if now_utc.tzinfo is None or now_utc.utcoffset() != timedelta(0):
+        raise ValueError("lease clock must be UTC")
+    if max_seconds < 0:
+        raise ValueError("maximum runtime cannot be negative")
+    duration_seconds = (
+        12 * 60 * 60 if max_seconds == 0 else max(60 * 60, max_seconds)
+    )
+    duration_seconds = min(duration_seconds, 47 * 60 * 60)
+    return (
+        now_utc - timedelta(minutes=5),
+        now_utc + timedelta(seconds=duration_seconds),
+    )
+
+
 async def _run(args: argparse.Namespace, logger: JsonEventLogger) -> None:
     settings = ExecutionSettings()  # type: ignore[call-arg]
     symbols = tuple(item.strip().upper() for item in args.symbols.split(",") if item.strip())
@@ -32,6 +49,15 @@ async def _run(args: argparse.Namespace, logger: JsonEventLogger) -> None:
         token=settings.cloud_market_data_api_token,
         symbols=symbols,
     )
+    replay_from_utc, expires_at_utc = _lease_window(
+        now_utc=datetime.now(UTC),
+        max_seconds=args.max_seconds,
+    )
+    await stream.ensure_subscription(
+        replay_from_utc=replay_from_utc,
+        expires_at_utc=expires_at_utc,
+    )
+    health = await stream.wait_until_healthy()
     store = SipEventStore(args.state_db)
     started = asyncio.get_running_loop().time()
     event_count = 0
@@ -39,6 +65,8 @@ async def _run(args: argparse.Namespace, logger: JsonEventLogger) -> None:
         "sip_stream_starting",
         symbol_count=len(symbols),
         feed="sip",
+        market_status=health.status,
+        fallback_recommended=health.fallback_recommended,
         orders_submitted=0,
     )
     async with aclosing(stream.events()) as events:

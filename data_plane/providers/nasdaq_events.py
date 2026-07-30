@@ -70,7 +70,11 @@ def _parse_earnings_payload(
                 ),
             }
         )
-    return pl.DataFrame(rows, schema=_earnings_schema()).sort("symbol")
+    return (
+        pl.DataFrame(rows, schema=_earnings_schema())
+        .unique(subset=["trade_date", "symbol"], keep="last")
+        .sort("symbol")
+    )
 
 
 def fetch_earnings_calendar(trade_date: date) -> pl.DataFrame:

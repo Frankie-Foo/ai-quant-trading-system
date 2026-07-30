@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 
@@ -54,8 +56,22 @@ class SipEventStore:
                     received_at_utc TEXT NOT NULL,
                     PRIMARY KEY (symbol, second_utc)
                 );
+                CREATE TABLE IF NOT EXISTS sip_trades (
+                    symbol TEXT NOT NULL,
+                    ts_utc TEXT NOT NULL,
+                    trade_id INTEGER NOT NULL,
+                    exchange_code TEXT NOT NULL,
+                    price REAL NOT NULL,
+                    size INTEGER NOT NULL,
+                    conditions_json TEXT NOT NULL,
+                    tape TEXT NOT NULL,
+                    provenance TEXT NOT NULL,
+                    received_at_utc TEXT NOT NULL,
+                    PRIMARY KEY (symbol, ts_utc, trade_id, tape)
+                );
                 CREATE INDEX IF NOT EXISTS ix_sip_bars_ts ON sip_bars(ts_utc);
                 CREATE INDEX IF NOT EXISTS ix_sip_quotes_ts ON sip_quote_seconds(quote_ts_utc);
+                CREATE INDEX IF NOT EXISTS ix_sip_trades_ts ON sip_trades(ts_utc);
                 """
             )
 
@@ -63,59 +79,98 @@ class SipEventStore:
         received = datetime.now(UTC).isoformat()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            if isinstance(event, SipBar):
-                connection.execute(
-                    """
-                    INSERT OR IGNORE INTO sip_bars (
-                        symbol, ts_utc, open, high, low, close, volume, trade_count,
-                        vwap, provenance, received_at_utc
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        event.symbol,
-                        event.ts_utc.isoformat(),
-                        event.open,
-                        event.high,
-                        event.low,
-                        event.close,
-                        event.volume,
-                        event.trade_count,
-                        event.vwap,
-                        event.provenance,
-                        received,
-                    ),
-                )
-            else:
-                second = event.ts_utc.replace(microsecond=0).isoformat()
-                connection.execute(
-                    """
-                    INSERT INTO sip_quote_seconds (
-                        symbol, second_utc, quote_ts_utc, bid_price, bid_size,
-                        ask_price, ask_size, provenance, received_at_utc
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(symbol, second_utc) DO UPDATE SET
-                        quote_ts_utc = excluded.quote_ts_utc,
-                        bid_price = excluded.bid_price,
-                        bid_size = excluded.bid_size,
-                        ask_price = excluded.ask_price,
-                        ask_size = excluded.ask_size,
-                        provenance = excluded.provenance,
-                        received_at_utc = excluded.received_at_utc
-                    WHERE excluded.quote_ts_utc > sip_quote_seconds.quote_ts_utc
-                    """,
-                    (
-                        event.symbol,
-                        second,
-                        event.ts_utc.isoformat(),
-                        event.bid_price,
-                        event.bid_size,
-                        event.ask_price,
-                        event.ask_size,
-                        event.provenance,
-                        received,
-                    ),
-                )
+            self._append_one(connection, event, received)
             connection.commit()
+
+    def append_many(self, events: tuple[SipEvent, ...]) -> None:
+        if not events:
+            return
+        received = datetime.now(UTC).isoformat()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for event in events:
+                self._append_one(connection, event, received)
+            connection.commit()
+
+    @staticmethod
+    def _append_one(
+        connection: sqlite3.Connection,
+        event: SipEvent,
+        received: str,
+    ) -> None:
+        if isinstance(event, SipBar):
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO sip_bars (
+                    symbol, ts_utc, open, high, low, close, volume, trade_count,
+                    vwap, provenance, received_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.symbol,
+                    event.ts_utc.isoformat(),
+                    event.open,
+                    event.high,
+                    event.low,
+                    event.close,
+                    event.volume,
+                    event.trade_count,
+                    event.vwap,
+                    event.provenance,
+                    received,
+                ),
+            )
+        elif isinstance(event, SipQuote):
+            second = event.ts_utc.replace(microsecond=0).isoformat()
+            connection.execute(
+                """
+                INSERT INTO sip_quote_seconds (
+                    symbol, second_utc, quote_ts_utc, bid_price, bid_size,
+                    ask_price, ask_size, provenance, received_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol, second_utc) DO UPDATE SET
+                    quote_ts_utc = excluded.quote_ts_utc,
+                    bid_price = excluded.bid_price,
+                    bid_size = excluded.bid_size,
+                    ask_price = excluded.ask_price,
+                    ask_size = excluded.ask_size,
+                    provenance = excluded.provenance,
+                    received_at_utc = excluded.received_at_utc
+                WHERE excluded.quote_ts_utc > sip_quote_seconds.quote_ts_utc
+                """,
+                (
+                    event.symbol,
+                    second,
+                    event.ts_utc.isoformat(),
+                    event.bid_price,
+                    event.bid_size,
+                    event.ask_price,
+                    event.ask_size,
+                    event.provenance,
+                    received,
+                ),
+            )
+        else:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO sip_trades (
+                    symbol, ts_utc, trade_id, exchange_code, price, size,
+                    conditions_json, tape, provenance, received_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.symbol,
+                    event.ts_utc.isoformat(),
+                    event.trade_id,
+                    event.exchange,
+                    event.price,
+                    event.size,
+                    json.dumps(event.conditions),
+                    event.tape,
+                    event.provenance,
+                    received,
+                ),
+            )
 
     def counts(self) -> dict[str, int]:
         with self._connect() as connection:
@@ -123,7 +178,10 @@ class SipEventStore:
             quotes = int(
                 connection.execute("SELECT COUNT(*) FROM sip_quote_seconds").fetchone()[0]
             )
-        return {"bars": bars, "quote_seconds": quotes}
+            trades = int(
+                connection.execute("SELECT COUNT(*) FROM sip_trades").fetchone()[0]
+            )
+        return {"bars": bars, "quote_seconds": quotes, "trades": trades}
 
     def latest_quote(self, symbol: str) -> SipQuote | None:
         normalized = symbol.strip().upper()
@@ -203,3 +261,119 @@ class SipEventStore:
             ],
             orient="row",
         ).with_columns(pl.col("ts_utc").str.to_datetime(time_zone="UTC"))
+
+    def quotes_for_symbol(
+        self,
+        symbol: str,
+        *,
+        start_utc: datetime,
+        end_utc: datetime,
+    ) -> pl.DataFrame:
+        if start_utc.tzinfo is None or start_utc.utcoffset() != timedelta(0):
+            raise ValueError("start_utc must be timezone-aware UTC")
+        if end_utc.tzinfo is None or end_utc.utcoffset() != timedelta(0):
+            raise ValueError("end_utc must be timezone-aware UTC")
+        if end_utc <= start_utc:
+            raise ValueError("end_utc must be after start_utc")
+        normalized = symbol.strip().upper()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT symbol, quote_ts_utc, bid_price, ask_price, bid_size,
+                       ask_size, provenance
+                FROM sip_quote_seconds
+                WHERE symbol = ? AND quote_ts_utc >= ? AND quote_ts_utc < ?
+                ORDER BY quote_ts_utc
+                """,
+                (normalized, start_utc.isoformat(), end_utc.isoformat()),
+            ).fetchall()
+        schema: dict[str, Any] = {
+            "symbol": pl.String,
+            "ts_utc": pl.Datetime("us", "UTC"),
+            "bid_price": pl.Float64,
+            "ask_price": pl.Float64,
+            "bid_size": pl.Int64,
+            "ask_size": pl.Int64,
+            "source": pl.String,
+            "feed": pl.String,
+            "provenance": pl.String,
+        }
+        if not rows:
+            return pl.DataFrame(schema=schema)
+        return pl.DataFrame(
+            [
+                {
+                    "symbol": str(row[0]),
+                    "ts_utc": datetime.fromisoformat(str(row[1])),
+                    "bid_price": float(row[2]),
+                    "ask_price": float(row[3]),
+                    "bid_size": int(row[4]),
+                    "ask_size": int(row[5]),
+                    "source": "alpaca",
+                    "feed": "sip",
+                    "provenance": str(row[6]),
+                }
+                for row in rows
+            ],
+            schema=schema,
+        )
+
+    def trades_for_symbol(
+        self,
+        symbol: str,
+        *,
+        start_utc: datetime,
+        end_utc: datetime,
+    ) -> pl.DataFrame:
+        if start_utc.tzinfo is None or start_utc.utcoffset() != timedelta(0):
+            raise ValueError("start_utc must be timezone-aware UTC")
+        if end_utc.tzinfo is None or end_utc.utcoffset() != timedelta(0):
+            raise ValueError("end_utc must be timezone-aware UTC")
+        if end_utc <= start_utc:
+            raise ValueError("end_utc must be after start_utc")
+        normalized = symbol.strip().upper()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT symbol, ts_utc, trade_id, exchange_code, price, size,
+                       conditions_json, tape, provenance
+                FROM sip_trades
+                WHERE symbol = ? AND ts_utc >= ? AND ts_utc < ?
+                ORDER BY ts_utc, trade_id
+                """,
+                (normalized, start_utc.isoformat(), end_utc.isoformat()),
+            ).fetchall()
+        schema: dict[str, Any] = {
+            "symbol": pl.String,
+            "ts_utc": pl.Datetime("us", "UTC"),
+            "trade_id": pl.Int64,
+            "exchange": pl.String,
+            "price": pl.Float64,
+            "size": pl.Int64,
+            "conditions": pl.List(pl.String),
+            "tape": pl.String,
+            "source": pl.String,
+            "feed": pl.String,
+            "provenance": pl.String,
+        }
+        if not rows:
+            return pl.DataFrame(schema=schema)
+        return pl.DataFrame(
+            [
+                {
+                    "symbol": str(row[0]),
+                    "ts_utc": datetime.fromisoformat(str(row[1])),
+                    "trade_id": int(row[2]),
+                    "exchange": str(row[3]),
+                    "price": float(row[4]),
+                    "size": int(row[5]),
+                    "conditions": list(json.loads(str(row[6]))),
+                    "tape": str(row[7]),
+                    "source": "alpaca",
+                    "feed": "sip",
+                    "provenance": str(row[8]),
+                }
+                for row in rows
+            ],
+            schema=schema,
+        )

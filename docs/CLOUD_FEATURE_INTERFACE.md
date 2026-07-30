@@ -17,6 +17,15 @@ Authorization: Bearer <CLOUD_MARKET_DATA_API_TOKEN>
 Content-Type: application/json
 {"symbols":["AAPL","MSFT"],"replay_from_utc":"<UTC>","expires_at_utc":"<UTC>"}
 
+GET /ready
+
+GET /v1/market-data/status?symbols=AAPL,MSFT
+Authorization: Bearer <CLOUD_MARKET_DATA_API_TOKEN>
+
+GET /v1/market-data/stream?after=<sequence>&symbols=AAPL,MSFT
+Accept: text/event-stream
+Authorization: Bearer <CLOUD_MARKET_DATA_API_TOKEN>
+
 GET /v1/market-data/events?after=<sequence>&symbols=AAPL,MSFT
 Authorization: Bearer <CLOUD_MARKET_DATA_API_TOKEN>
 
@@ -31,17 +40,28 @@ The response is a versioned point-in-time feature vector containing a definition
 version and provenance for every value. Unsupported versions, invalid timestamps,
 authorization failures, network failures, and schema drift all fail closed.
 
-Before realtime polling, the client creates a bounded symbol lease. The cloud service
-returns the event cursor immediately before the requested replay point, then its single
-SIP owner dynamically maintains the union of active leases. The dedicated token has
+Before realtime consumption, the client creates a bounded symbol lease. The cloud
+service returns the event cursor immediately before the requested replay point, then its
+single SIP owner dynamically maintains the union of active leases. The client waits for
+the detailed status contract to become usable and consumes resumable Server-Sent Events.
+It falls back to cursor polling only when an old server explicitly lacks the SSE route.
+The dedicated token has
 `market-data:write`, which also grants normalized market-data reads; a read-only token
 cannot change subscriptions.
 
-The market API returns bounded normalized events and historical rows, not Alpaca
-credentials or a generic upstream proxy. Every minute bar is retained; quote events are
-sampled to at most one per symbol per UTC second. The Paper API is restricted to Paper
-accounts and long-only contracts. Collaborator signal tokens cannot call any AI endpoint.
-Market, feature, Paper, and signal scopes cannot be exchanged.
+`/health` is only an HTTP-process liveness check. `/ready` validates the raw ledger,
+active lease union, and current SIP-owner heartbeat/state. `/v1/market-data/status`
+reports each symbol's subscription, first/last event, last bar/quote, age and reason
+codes. The market API returns bounded normalized events and historical rows, not Alpaca
+credentials or a generic upstream proxy. Historical bar/quote responses must include a
+coverage object. When the cloud service recommends fallback because data is missing,
+gapped, delayed or stale, this repository fails closed instead of silently mixing an
+unapproved source.
+
+Every minute bar is retained; quote events are sampled to at most one per symbol per UTC
+second. The Paper API is restricted to Paper accounts and long-only contracts.
+Collaborator signal tokens cannot call any AI endpoint. Market, feature, Paper, and
+signal scopes cannot be exchanged.
 
 ## Fast-loop safety
 
@@ -58,6 +78,9 @@ The command persists verified responses to `runs/cloud-feature-cache.sqlite3`.
 Decision-time code reads `CloudFeatureCache.latest(...)`; it must never instantiate or
 call `CloudFeatureClient`. If a synchronized vector is absent, the feature is `N/A`.
 
-Realtime observation consumes cloud events into the existing local SIP store before
-running ORB logic. A cloud outage produces no event and no order; it never causes a
-fallback direct Alpaca connection.
+Realtime observation consumes cloud SSE events into the existing local SIP store before
+running ORB logic. Both the standalone collector and Paper session declare their own
+bounded lease first. The Paper session waits for usable cloud market health before
+starting its event loop. A cloud outage, stale symbol, invalid coverage contract or
+fallback recommendation produces no order; it never causes a fallback direct Alpaca
+connection.

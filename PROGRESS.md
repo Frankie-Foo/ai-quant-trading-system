@@ -1,5 +1,27 @@
 # Progress
 
+## Adaptive desktop decision client — 2026-07-28
+
+Status: implemented for local read-only operation; automatic orders remain disabled.
+
+- Added one deterministic adaptive-plan state machine for catalyst and pure-factor
+  routes. It separates 15-second fact polling from completed-bar confirmation, a
+  three-minute soft-revision cooldown, and a per-session revision cap while allowing
+  immediate hard/time-stop decisions.
+- Added risk/notional-bounded probe and add sizing, two distinct completed one-minute
+  confirmations, 1/5/15-minute technical confluence, SPY/sector state, consolidated-tape
+  order flow, frozen catalyst evidence, and broker-authoritative position reconciliation.
+- A position that disappears at the Broker closes the plan and cannot be revived from
+  stale local state. Add advice is not repeated until the Broker position changes.
+- Added WAL/FULL SQLite baselines, runtime state, deduplicated append-only events,
+  historical SIP warmup, resumable SIP ingestion, and a read-only localhost HTTP/SSE
+  interface. No POST/order route exists.
+- Added a Chinese React/Electron Windows client and a one-command PowerShell launcher.
+  The launcher owns and cleans up only the processes it starts; the client contains no
+  credential.
+- Main-repository acceptance: 290 tests passed, Ruff clean, and strict mypy success
+  across 149 source files. Vite production build and Electron syntax validation passed.
+
 ## M0 — environment and invariants
 
 Status: complete
@@ -463,3 +485,361 @@ Status: fixed and running locally; the continuous session is observation-only,
   JTAI, SMCI, XE, and OKLO. Missed historical entries were not chased or submitted.
 - Repository acceptance: 199 tests passed, Ruff clean, and strict mypy success across
   122 source files.
+
+## M17 observable cloud market-data consumer - 2026-07-23
+
+Status: implemented and verified; the AI repository remains fully separated from the
+cloud repository and still owns no Alpaca credential.
+
+- Replaced continuous REST event polling with resumable cloud SSE while retaining
+  cursor polling only for an explicitly old server that returns `404/405` for the stream.
+- Added strict health-contract parsing and a bounded startup wait. Delayed, stale,
+  unsubscribed, unavailable, malformed, or fallback-recommended symbols fail closed
+  before the Paper observation loop starts.
+- Required every historical bars/quotes response to carry per-symbol coverage. A cloud
+  gap/empty recommendation now raises a sanitized download failure instead of letting an
+  empty frame masquerade as usable input.
+- Added a bounded symbol lease to the standalone collector as well as the Paper session;
+  no AI process opens an Alpaca connection or receives an Alpaca Key.
+- Preserved the existing deterministic single-strategy kernel, local SIP store, Windows
+  observation tasks, write-disabled default, active kill switch, long-only contracts,
+  and Paper maturity gates.
+- No automatic Yahoo/community fallback was added: repository provenance policy requires
+  missing or degraded licensed data to remain explicit and quarantined.
+- Repository acceptance: 204 tests passed, Ruff clean, and strict mypy success across
+  171 source files.
+
+## M18 directional-volume and bearish-distribution hard gates - 2026-07-24
+
+Status: implemented and verified; unsigned high RVOL can no longer become a buy
+candidate without price confirmation, and prior-session distribution fails closed.
+
+- Added a point-in-time prior-session distribution veto: open-to-close return at most
+  -3%, volume at least 1.5 times the preceding 20-session average, and a close in the
+  bottom 30% of the range.
+- Added premarket OHLC, aggregate VWAP, return, close-location, and direction evidence.
+  Final survivors require RVOL strictly above 3, a positive premarket return, close
+  above premarket VWAP, close location at least 0.60, and premarket close strictly
+  above the prior daily close.
+- Upgraded daily precheck, premarket feature, and selection snapshots to v2. Historical
+  replay uses the same code path and thresholds; obsolete selection snapshots cannot
+  pass the execution loader.
+- Recomputed 2026-07-24 from accepted SIP evidence. DECK was rejected for prior-day
+  bearish distribution and a -2.0576% premarket gap; RHI, RNG, TOL, and ITRG failed
+  premarket price confirmation. The final locked pool contained zero survivors and no
+  order was submitted.
+- Evidence snapshots:
+  `kernel.universe.daily_precheck-20260724T124931Z-bd17e2d250be`,
+  `kernel.premarket.rvol_candidates-20260724T125001Z-f2bfa7fdd851`, and
+  `kernel.universe.selection_gates-20260724T125058Z-f948332cedca`.
+- Repository acceptance: 209 tests passed, Ruff clean, and strict mypy success across
+  171 source files.
+
+## M19 advisory multi-timeframe technical monitor - 2026-07-24
+
+Status: running locally every 15 minutes for RNG; it is read-only, advisory-only,
+and automatically stops after the regular session.
+
+- Added point-in-time 1/5/15-minute aggregation that excludes unfinished buckets.
+  Deterministic indicators include MACD, Bollinger bands, KDJ, session VWAP,
+  confirmed three-bar fractals, intraday Fibonacci levels, and an explicitly
+  labelled five-minute wave-structure proxy.
+- Added a strict advisory rule: a possible add requires fresh realtime SIP NBBO,
+  spread at most 0.30%, price above VWAP, aligned 15-minute and 5-minute trend,
+  a confirmed 1-minute trigger, and a green 1-minute bar at least 1.5 times its
+  prior-20-bar median volume. Protection levels take precedence over bullish
+  indicators, while every result carries `order_authorized=false`.
+- Preserved the execution downloader's fail-closed coverage rule. A separately
+  named monitoring-only reader may retain sparse/no-trade minutes, reports the
+  provider's gap evidence, and cannot be imported as an execution authorization.
+- Added a single-instance PowerShell supervisor. It verifies ownership and health
+  of the dedicated local cloud API, writes append-only JSONL evidence, aligns
+  checks to 15-minute Eastern-time boundaries, stops after 15:58 ET, and exits
+  after three consecutive failures.
+- Live acceptance at 2026-07-24 11:49 ET returned `HOLD` around a 48.455 midpoint
+  with `order_authorized=false`; the background error log was empty.
+- Repository acceptance: 214 tests passed, Ruff clean, and strict mypy success
+  across 174 source files.
+
+## M20 causal long-green expansion watchlist - 2026-07-24
+
+Status: implemented as an advisory confirmation layer; it does not replace the
+premarket selector or turn a completed long-green candle into a late entry.
+
+- Added a point-in-time long-green profile over completed regular-session bars:
+  session return at least 4%, body/range at least 0.60, close location at least
+  0.80, close above session VWAP, and volume confirmation. Volume can be confirmed
+  either by a green minute at least 1.5 times its preceding 20-minute median or by
+  premarket RVOL strictly above 3, which avoids comparing an already high-volume
+  open only against itself.
+- Added a 0-100 deterministic strength score and a locked-pool watchlist scanner.
+  The scanner preserves sparse-minute evidence, fails unavailable symbols closed,
+  excludes unfinished bars, and carries `automatic_order_authorized=false`.
+- Kept the three causal responsibilities separate: premarket selection identifies
+  potential, ORB-5 supplies an early entry trigger, and the completed long-green
+  profile confirms trend strength for monitoring and staged profit-taking.
+- Replay evidence for RNG: selection snapshot
+  `kernel.universe.selection_gates-20260724T130308Z-74bca7e19fcc` ranked RNG first
+  at 09:03 ET with RVOL 32.073337; the first ORB decision occurred at 09:36 ET
+  from the completed 09:35 bar above a 44.33 opening-range high. The full
+  long-green profile first qualified at 09:51 ET, so it is explicitly not treated
+  as the early entry event.
+- Live confirmation at 12:08 ET scored RNG 89.865687 and returned `HOLD` for the
+  remaining 20 shares with order authorization disabled.
+- Repository acceptance: 217 tests passed, Ruff clean, and strict mypy success
+  across 175 source files.
+
+## M21 cross-symbol structured earnings intensity - 2026-07-24
+
+Status: implemented without a symbol/company whitelist; the remembered object is
+the catalyst/price/volume pattern, not RNG.
+
+- Fixed a generic cleaning defect: short but machine-parseable earnings wires were
+  previously rejected by the 25-word news-noise rule. Structured actual-vs-estimate,
+  forward range-vs-consensus, and raised-guidance range headlines are now preserved;
+  unstructured short news remains excluded.
+- Added deterministic, unit-aware parsing for EPS and sales/revenue actual surprise,
+  forward EPS and revenue guidance versus consensus, and EPS and revenue guidance
+  raises. K/M/B/T suffixes are normalized before comparisons.
+- Added three evidence layers (actual results, forward guide, and guidance raise),
+  a bounded 0-100 earnings intensity score, and an explicit strength-confirmed flag.
+  The generic tests use an `Example` issuer rather than any production ticker.
+- Replayed the 2026-07-24 source evidence. RNG now has three eligible earnings events
+  instead of one: EPS surprise +5.1724%, revenue surprise +0.9963%, forward EPS and
+  revenue guide +2.0000%/+0.5724% versus consensus, and FY EPS/revenue guidance raises
+  +2.0284%/+0.3992%. The resulting intensity is 74.469452 with all three evidence
+  layers confirmed.
+- Accepted evidence:
+  `kernel.catalysts.prepared-20260724T161513Z-b37e0947d774` and
+  `kernel.catalysts.overnight_candidates-20260724T161513Z-b593bc51a244`, both on
+  version-2 schemas. A redundant final-gate rebuild was stopped after Massive's
+  free-float pagination stalled; the next normal selection run will consume the
+  accepted candidate snapshot.
+- Repository acceptance: 219 tests passed, Ruff clean, and strict mypy success
+  across 175 source files.
+
+## M22 independent factor selection and SIP order-flow arbitration - 2026-07-28
+
+Status: implemented and verified in shadow mode; no new path can submit an order.
+
+- Added an independent pure-factor candidate generator over the broad point-in-time
+  daily precheck universe. Its RVOL collection does not depend on catalyst membership,
+  and its transparent 0-100 score preserves each component, cutoff, reject reason,
+  rank, provenance, and parent snapshot.
+- Added end-to-end SIP trade support to the cloud service, local WebSocket parser,
+  durable event store, and historical client. Every trade print is retained with
+  nanosecond timestamps; trade events update the feature store but do not trigger a
+  strategy decision on every tick.
+- Added deterministic consolidated-tape order-flow features: Tick Rule buy/sell volume,
+  classified coverage, order imbalance, pressure ratio, cent-bucket VPOC, NBBO size
+  imbalance, microprice, spread, and a bounded confirmation score. Future observations
+  are mechanically excluded.
+- Added unified shadow arbitration over the union of catalyst and factor candidates.
+  Agreement receives a configured bonus; order flow may confirm or reduce an existing
+  score but cannot originate a candidate. Missing order flow is neutral and explicit.
+- Added a single shadow pipeline command, immutable raw/feature/ranking snapshots, and
+  an independently leased automatic premarket job. Completed stages are reused; a
+  shadow failure retries without invalidating primary catalyst selection. The Agent
+  gateway serves materialized order-flow facts and otherwise fails closed to `N/A`.
+- Main-repository acceptance: 255 tests passed, Ruff clean, and strict mypy success
+  across 190 source files. Cloud-repository acceptance: 32 tests passed, Ruff clean,
+  and strict mypy success across 29 source files.
+
+## M23 deterministic intraday selection postmortem - 2026-07-28
+
+Status: implemented and verified; suitable trade-memory ideas were adapted to the
+intraday system without importing the source project's long-horizon portfolio workflow.
+
+- Added `intraday_selection_postmortem.v1`, an immutable post-close opportunity record
+  that joins liquid top movers to the frozen selection cutoff. It records selection
+  status, close return, MFE/MAE, root cause, ticker-free pattern key, evidence, and an
+  explicitly false production-mutation flag.
+- Replaced hindsight storytelling with a fixed taxonomy: captured opportunity,
+  intentional gate rejection, detectable miss, after-cutoff catalyst, and incomplete
+  evidence. Missing news remains incomplete rather than being relabelled as a factor
+  failure.
+- Upgraded the idempotent postmarket pipeline to `postmarket_review.v7`. It now creates
+  the selection postmortem before structured PDCA and includes its dataset ID in the job
+  artifacts; no message is pushed by the scheduled research step.
+- Added the `intraday-selection-postmortem` skill and extended `postmarket-pdca`.
+  Agent access is allowlisted, snapshot-backed, ticker-anonymized, and able to read
+  bounded multi-session history. Agent output may only create evidence-bound sandbox
+  hypotheses; one-off movers, late catalysts, and incomplete evidence cannot become
+  lessons.
+- A real no-push replay for 2026-07-27 produced eight accepted opportunity rows:
+  three pre-cutoff news ingestion/classification reviews and five price/order-flow
+  factor reviews. All critical quality checks passed and every row retained
+  `production_change_allowed=false`. Accepted evidence:
+  `research.intraday_selection_postmortem-20260728T033817Z-1732804ea2fb`.
+- Repository acceptance: 261 tests passed, Ruff clean, strict mypy success across
+  138 source files, and the new skill passed `quick_validate.py`.
+
+## M24 bounded autonomous Paper client foundation - 2026-07-29
+
+Status: implemented and verified as a local-first Alpaca Paper foundation. It is not
+authorized for live trading and still requires multi-session Paper acceptance before
+any production-readiness claim.
+
+- Added a deterministic intraday policy for the independent catalyst and
+  factor/order-flow routes. It enforces the 07:00-09:25 ET premarket entry window,
+  the 09:25-09:31 no-entry lock, 09:35/10:00 confirmation exits, 12:00 entry stop,
+  13:00 flat rule, route-specific score/risk thresholds, and fail-closed 2.5R first
+  target plus 3R weighted reward requirements.
+- Added separate standard, high-right-tail, and A++ exit policies. Initial position
+  sizing is identical; only the retained tail changes from 20% to 25% or 30%.
+  Structural, anchored-VWAP, order-flow, giveback, hard-negative, and time exits are
+  deterministic.
+- Added the ten-second premarket limit-order lifecycle and a durable one-second
+  synthetic stop. Stop command intent is persisted before broker I/O, uses idempotent
+  client IDs, recovers after restart, reprices at bounded 0.25%/0.50%/1.00% buffers,
+  adjusts for partial fills, and fails closed on market-data or broker faults.
+- Added Paper-account exclusivity. Unknown/manual orders or positions cause all open
+  orders to be cancelled, all reconciled long positions to be flattened, and the day
+  to remain locked across restart. Extended-hours sells are quantity bounded and can
+  never open a short.
+- Upgraded the Electron client to six Chinese pages: today, opportunities, positions,
+  automatic review, Agent audit, and system. It has no manual order controls. Its only
+  mutation is a durable one-way global emergency stop; live mode remains explicitly
+  unavailable.
+- Added bidirectional decision-quality review with disciplined-win,
+  disciplined-loss, lucky-win, and avoidable-loss labels. Standard 20%, high 25%,
+  and A++ 30% tail outcomes are kept in separate research-only shadow ledgers and
+  cannot mutate production parameters.
+- Repository acceptance: 345 tests passed, Ruff clean, strict mypy success across
+  230 source files, and the Electron production build completed successfully.
+
+## M25 fail-closed autonomous Paper runtime - 2026-07-29
+
+Status: implemented and locally packaged; Alpaca Paper remains disarmed by default,
+the desktop client remains paused, and no live-trading route exists.
+
+- Added strict, atomic evidence contracts for catalyst, red-team, deterministic
+  supervisor, and Livermore push health. Direct Alpaca news and current SIP quotes
+  feed bounded fact packages; missing, malformed, stale, or unhealthy evidence
+  produces a fail-closed safety envelope.
+- Kept the deterministic kernel authoritative. Catalyst and red-team roles currently
+  use the configured DeepSeek V4-Pro JSON client; the supervisor is programmatic.
+  Cached classifications may be renewed only when role, model, and prompt hash are
+  unchanged. Deep-learning training remains deliberately deferred.
+- Completed restart-safe position sizing and lifecycle control. Target quantities use
+  the immutable plan reference price, standard/high/A++ tails retain 20%/25%/30%,
+  main and tail entries have separate protected order components, and main-target
+  realization survives restart.
+- Added the 09:30 ET handoff for premarket fills. A regular-hours protective stop is
+  attached idempotently before any upgrade. Tail management persists MFE, requires
+  uninterrupted weak-order-flow duration, and combines anchored VWAP, failed reclaim,
+  Chandelier, structure, and hard-breakdown evidence.
+- Closed the empty-position race in runtime failure handling: pending entry orders are
+  cancelled even when Broker position state has not yet appeared. A failed action
+  notification records a five-minute delivery latch and immediately invokes the same
+  fail-closed cancellation/exit path using only a quote no older than 30 seconds.
+- Centralized UTF-8 Chinese Livermore delivery with verified `sender_type=bot`,
+  restart-safe deduplication, and percentage-only return/protection reporting. Channel
+  discovery cannot overwrite a current actual-delivery failure; a later successful
+  delivery can prove recovery.
+- Added local Docker packaging for three isolated processes: SIP refresher, runtime
+  agents, and Paper executor. The default compose is read-only; Paper writes require
+  `BROKER_WRITE_ENABLED=true`, `TRADING_KILL_SWITCH=false`, and the separate
+  `--arm-paper` override. Containers are non-root, read-only, capability-free, and
+  share only the explicit config and durable `runs` mounts.
+- Repository acceptance: 429 tests passed in 64.07 seconds, Ruff clean, and strict
+  mypy success across 260 Python files. Both compose configurations passed quiet
+  validation, all three images built successfully, and the executor image passed a
+  container import smoke test. No trading service was started and no order was sent.
+
+## M26 cross-asset perpetual sentiment shadow - 2026-07-30
+
+Status: implemented and verified as a deterministic shadow factor. It has no scoring,
+guardrail, sizing, Paper, or live execution authority.
+
+- Added one deep deterministic interface around normalized `PerpObservation` values.
+  Two read-only public adapters currently satisfy the external seam: Hyperliquid
+  `metaAndAssetCtxs` (including explicit HIP-3 DEX selection) and Aevo
+  `markets`/`funding`. Neither adapter accepts trading credentials or exposes writes.
+- Added quality-gated 0-100/-100-0 component scoring for price trend, continuous
+  price/OI confirmation, funding crowding, signed flow, liquidations, and
+  Mark/Oracle basis. Missing venue fields remain unavailable; raw volume supplies only
+  liquidity evidence and never direction.
+- Added weighted-median cross-venue aggregation with explicit coverage, disagreement,
+  confidence, and market/sector/theme scope. Tiny price/OI polling changes scale toward
+  zero instead of being promoted to full-strength quadrant signals.
+- Added validated `config/cross_asset_sentiment.yaml`. It is permanently shadow-only
+  and currently maps only Hyperliquid/Aevo BTC and ETH into `global-risk`. HIP-3
+  equity, commodity, semiconductor, or private-market mappings require a separate
+  oracle/deployer/liquidity review before configuration.
+- Added immutable raw and target snapshots with UTC provenance, critical quality
+  checks, warning-only provider degradation, prior-snapshot parent lineage,
+  `production_eligible=false`, and `execution_eligible=false`. The existing premarket
+  shadow DAG runs this independent stage without adding a dependency to primary
+  selection or execution.
+- Three real public-API smoke runs returned four normalized observations with both
+  providers healthy. The final run used its prior raw snapshot, produced all four
+  configured sources, passed every critical check, submitted zero orders, and remained
+  non-executable. Accepted target evidence:
+  `kernel.cross_asset.sentiment_shadow-20260730T013857Z-bed96c605528`.
+- Repository acceptance: 441 tests passed in 31.30 seconds, Ruff clean, and strict
+  mypy success across 270 Python files.
+
+## M27 cross-asset evidence and PIT hardening - 2026-07-30
+
+Status: the ten code-audit findings are remediated; the module remains shadow-only.
+
+- Added live top-of-book collection from Hyperliquid `l2Book` and Aevo `orderbook`.
+  Added notional aggressor imbalance from Hyperliquid `recentTrades` and Aevo public
+  instrument trade history with a 60-second window and a three-trade minimum.
+- Preserved global liquidation amounts as explicitly unavailable. Neither configured
+  venue exposes a complete one-shot public liquidation window, so large trades and
+  price jumps are not relabeled as liquidations.
+- Removed caller-controlled observation timestamps from live adapters. Historical
+  `--asof` runs no longer call current-state endpoints. Previous observations must be
+  strictly causal and no more than 180 seconds old.
+- Selected prior raw snapshots by observation cutoff instead of file persistence time,
+  moved critical raw checks ahead of scoring, made nested score/provenance mappings
+  deeply immutable, and persisted current/prior component provenance.
+- Live cross-asset stages now refresh instead of reusing same-session evidence.
+  Historical reuse requires an exact data cutoff. Coverage is explicit and a target
+  below 35% coverage cannot emit risk-on or risk-off.
+- Two real public-API smoke runs returned four observations with both providers healthy.
+  Hyperliquid Bid/Ask and aggressor flow were populated; Aevo Bid/Ask were populated,
+  while its empty 60-second trade windows remained correctly unavailable. The second
+  accepted target `kernel.cross_asset.sentiment_shadow-20260730T034651Z-f77dc1098be6`
+  had all four sources, `coverage=0.72`, remained non-executable, and submitted zero
+  orders.
+- Repository acceptance: 447 tests passed, Ruff clean, and strict
+  mypy success across 270 Python files.
+
+## M28 portable perpetual risk positioning Skill - 2026-07-30
+
+Status: implemented, independently forward-tested, and installed locally as a
+read-only Codex Skill. It cannot select securities, authorize execution, or submit
+orders.
+
+- Added the portable `monitor-perp-risk-positioning` Python 3.11+ Skill with a
+  deterministic CLI, SQLite state, `latest.json`, versioned JSON Schemas, optional
+  encrypted local backup, generic JSONL/HTTP liquidation input, optional generic
+  webhook, Docker packaging, and Windows/macOS/Linux operating instructions.
+- Added public read-only Hyperliquid and Aevo adapters for BTC/ETH plus reviewed
+  Hyperliquid HIP-3 `xyz:CL` energy and `xyz:SMH` semiconductor representatives.
+  Bid/Ask, active signed order flow, funding, price/open-interest, basis, liquidity,
+  provenance, partial-provider isolation, and explicit missing evidence are retained.
+- Added global, energy, and semiconductor risk overlays with weighted-median
+  aggregation, disagreement/venue-conflict gates, asymmetric confirmation windows,
+  risk vetoes, long-only 0/0.5/1.0/1.2 position multipliers, and an inactive
+  volatility target pending a real VIX source.
+- A 1.2x boost requires at least 75% coverage, two venues, two independent windows,
+  no relevant conflict, and real liquidation coverage. With no configured liquidation
+  source, the boost is fail-closed. All snapshots and recommendations require
+  `production_eligible=false`, `execution_eligible=false`, and `orders_submitted=0`
+  as both runtime and JSON Schema constants.
+- Added benchmark/trade outcome separation, review reporting, threshold-only
+  challenger generation after at least 100 benchmark outcomes, exact config hashes,
+  and explicit human hash confirmation before an approved config can replace a file.
+- Two independent agent forward tests verified fresh installation, provider health,
+  non-persistent live smoke, persisted snapshot/status recovery, multi-window
+  hysteresis, recommendation propagation, and external schema safety. Their two
+  findings—missing confirmation-gate explanation and overly broad schema fields—were
+  fixed and reverified.
+- Skill acceptance: 26 tests passed, Ruff clean, strict mypy success across 16 source
+  files, Skill validator success, clean-venv package install and `pip check` success,
+  Docker non-root `doctor` success, and live public smoke with Hyperliquid 4/4 plus
+  Aevo 2/2 observations healthy. No notification was sent and no order path exists.

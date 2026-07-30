@@ -356,6 +356,7 @@ def main() -> None:
         pl.col("pass_gate")
         & (
             (pl.col("rvol") <= cfg.universe.min_rvol)
+            | ~pl.col("directional_volume_confirmed")
             | pl.col("earnings_day")
             | pl.col("current_halt")
             | pl.col("luld_risk")
@@ -401,7 +402,7 @@ def main() -> None:
         output,
         root=args.data_root,
         source="kernel.universe.selection_gates",
-        schema_version="selection_gates.v1",
+        schema_version="selection_gates.v2",
         checks=checks,
         parent_snapshot_ids=parent_ids,
     )

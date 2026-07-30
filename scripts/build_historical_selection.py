@@ -228,7 +228,7 @@ def main() -> None:
                     universe,
                     root=args.data_root,
                     source=DAILY_SOURCE,
-                    schema_version="universe_daily_precheck.v1",
+                    schema_version="universe_daily_precheck.v2",
                     checks=_daily_checks(universe, target),
                     parent_snapshot_ids=(
                         *(daily_ids[value] for value in prior_daily_dates),

@@ -1,0 +1,143 @@
+schema_version: perp_risk_config.v1
+
+collection:
+  interval_seconds: 60
+  flow_window_seconds: 60
+  minimum_flow_trades: 3
+  max_age_seconds: 90
+  max_previous_gap_seconds: 180
+
+http:
+  timeout_seconds: 20
+  max_attempts: 3
+  initial_backoff_seconds: 0.5
+
+policy:
+  component_weights:
+    price_trend: 0.20
+    price_oi: 0.25
+    funding: 0.15
+    signed_flow: 0.20
+    liquidation: 0.10
+    basis: 0.10
+  price_return_full_scale: 0.02
+  open_interest_change_full_scale: 0.02
+  basis_full_scale: 0.01
+  moderate_funding_abs: 0.0001
+  extreme_funding_abs: 0.001
+  max_abs_basis: 0.05
+  default_max_spread_bps: 150
+  minimum_component_weight: 0.35
+  minimum_target_coverage: 0.35
+  risk_on_threshold: 25
+  risk_off_threshold: -25
+  strong_risk_on_threshold: 60
+  strong_risk_off_threshold: -60
+  boost_minimum_coverage: 0.75
+  conflict_disagreement_threshold: 0.50
+  confirmation_windows: 2
+  unavailable_multiplier: 0.50
+  risk_off_multiplier: 0.50
+  neutral_multiplier: 1.00
+  boost_multiplier: 1.20
+  require_liquidation_for_boost: true
+  minimum_liquidation_coverage_for_boost: 0.50
+  require_two_venues_for_boost: true
+
+bindings:
+  - target_id: global-risk
+    scope: market
+    venue: hyperliquid
+    market: main
+    instrument: BTC
+    weight: 0.35
+    polarity: 1
+    min_notional_volume_24h: 10000000
+
+  - target_id: global-risk
+    scope: market
+    venue: hyperliquid
+    market: main
+    instrument: ETH
+    weight: 0.25
+    polarity: 1
+    min_notional_volume_24h: 10000000
+
+  - target_id: global-risk
+    scope: market
+    venue: aevo
+    market: mainnet
+    instrument: BTC-PERP
+    weight: 0.25
+    polarity: 1
+
+  - target_id: global-risk
+    scope: market
+    venue: aevo
+    market: mainnet
+    instrument: ETH-PERP
+    weight: 0.15
+    polarity: 1
+
+  - target_id: energy-risk
+    scope: sector
+    venue: hyperliquid
+    market: xyz
+    instrument: CL
+    weight: 1.0
+    polarity: 1
+    min_notional_volume_24h: 50000000
+    max_spread_bps: 10
+    boost_eligible: false
+
+  - target_id: semiconductor-risk
+    scope: sector
+    venue: hyperliquid
+    market: xyz
+    instrument: SMH
+    weight: 1.0
+    polarity: 1
+    min_notional_volume_24h: 1000000
+    max_spread_bps: 50
+    boost_eligible: false
+
+targets:
+  - target_id: global-risk
+    enabled: true
+  - target_id: energy-risk
+    enabled: true
+  - target_id: semiconductor-risk
+    enabled: true
+  - target_id: volatility-risk
+    enabled: false
+    unavailable_reason: no_active_vix_source
+
+session:
+  timezone: America/New_York
+  exchange_calendar: XNYS
+  actionable_start: "04:00"
+  actionable_end: regular_close
+
+storage:
+  database_path:
+  latest_json_path:
+  detail_retention_days: 180
+
+liquidation:
+  provider: none
+  jsonl_path:
+  http_url:
+  secret_header: x-api-key
+  secret_env: PERP_RISK_LIQUIDATION_SECRET
+  keyring_service: monitor-perp-risk-positioning
+  keyring_username: liquidation-provider
+
+notification:
+  enabled: false
+  url:
+  secret_header: x-webhook-secret
+  secret_env: PERP_RISK_WEBHOOK_SECRET
+  keyring_service: monitor-perp-risk-positioning
+  keyring_username: webhook
+  heartbeat_seconds: 3600
+  language: zh

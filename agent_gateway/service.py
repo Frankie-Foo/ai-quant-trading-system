@@ -14,6 +14,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TypeVar
 
+import polars as pl
+
 from agent_gateway.contracts import (
     AgentRole,
     AuditReport,
@@ -143,6 +145,7 @@ class AgentGatewayService:
         data: dict[str, object] | list[dict[str, object]],
         availability: Availability = Availability.AVAILABLE,
         provenance: str | None = None,
+        snapshot_ids: tuple[str, ...] | None = None,
     ) -> dict[str, object]:
         envelope = ToolEnvelope(
             tool=tool,
@@ -150,7 +153,13 @@ class AgentGatewayService:
             availability=availability,
             provenance=provenance
             or (loaded.manifest.source if loaded else f"agent_gateway.{tool}.v1"),
-            snapshot_ids=(loaded.manifest.dataset_id,) if loaded else (),
+            snapshot_ids=(
+                snapshot_ids
+                if snapshot_ids is not None
+                else (loaded.manifest.dataset_id,)
+                if loaded
+                else ()
+            ),
             data=data,
         )
         return envelope.model_dump(mode="json")
@@ -233,6 +242,22 @@ class AgentGatewayService:
         except LookupError:
             return None, [], Availability.UNAVAILABLE
         return loaded, self._snapshot_rows(loaded, limit=query.limit), Availability.AVAILABLE
+
+    def _snapshot_history_query(
+        self,
+        *,
+        source: str,
+        limit: int,
+    ) -> tuple[tuple[LoadedSnapshot, ...], list[dict[str, object]], Availability]:
+        loaded = self.snapshots.history_for_source(source, row_limit=limit)
+        if not loaded:
+            return (), [], Availability.UNAVAILABLE
+        rows = [
+            row
+            for snapshot in loaded
+            for row in self._snapshot_rows(snapshot, limit=limit)
+        ][:limit]
+        return loaded, rows, Availability.AVAILABLE
 
     def _ledger_query(
         self, *, entity: QueryEntity, trade_date: date | None, limit: int
@@ -476,12 +501,116 @@ class AgentGatewayService:
     def features_order_flow(
         self, *, agent_name: str, trade_date: date, symbol: str
     ) -> dict[str, object]:
-        return self._unavailable_feature(
+        request = {"trade_date": trade_date.isoformat(), "symbol": symbol}
+
+        def handler(_: AgentRole) -> dict[str, object]:
+            normalized = symbol.strip().upper()
+            selection_loaded, _selection_row = self.snapshots.selection_row(
+                trade_date, normalized
+            )
+            try:
+                loaded = self.snapshots.latest_for_source(
+                    "kernel.features.order_flow_shadow",
+                    trade_date=trade_date,
+                )
+            except LookupError:
+                loaded = None
+            rows = (
+                []
+                if loaded is None
+                else loaded.frame.filter(pl.col("symbol") == normalized).to_dicts()
+            )
+            if len(rows) != 1:
+                names = (
+                    "order_imbalance",
+                    "vpoc",
+                    "buy_sell_pressure_ratio",
+                    "quote_size_imbalance",
+                    "microprice",
+                    "spread_bps",
+                    "order_flow_confirmation_score",
+                )
+                unavailable_facts = [
+                    Fact(
+                        name=name,
+                        value=None,
+                        availability=Availability.UNAVAILABLE,
+                        provenance=(
+                            "agent_gateway.features_order_flow|"
+                            "shadow_snapshot_not_materialized"
+                        ),
+                        asof_utc=selection_loaded.manifest.asof_utc,
+                    ).model_dump(mode="json")
+                    for name in names
+                ]
+                return self._envelope(
+                    tool="features_order_flow",
+                    loaded=selection_loaded,
+                    data={"symbol": normalized, "facts": unavailable_facts},
+                    availability=Availability.UNAVAILABLE,
+                    provenance="agent_gateway.features_order_flow|explicit_degradation",
+                )
+
+            row = rows[0]
+            if loaded is None:
+                raise RuntimeError("order-flow snapshot resolution is inconsistent")
+            cutoff = row.get("data_cutoff_utc")
+            fact_asof = (
+                cutoff
+                if isinstance(cutoff, datetime)
+                else loaded.manifest.asof_utc
+            )
+            names = (
+                "order_imbalance",
+                "vpoc",
+                "buy_sell_pressure_ratio",
+                "quote_size_imbalance",
+                "microprice",
+                "spread_bps",
+                "order_flow_confirmation_score",
+            )
+            available_facts = [
+                self._fact(
+                    row,
+                    name=name,
+                    provenance_field="order_flow_provenance",
+                    fallback_provenance=(
+                        "agent_gateway.features_order_flow|metric_unavailable"
+                    ),
+                    asof_utc=fact_asof,
+                )
+                for name in names
+            ]
+            availability = (
+                Availability.AVAILABLE
+                if any(
+                    fact.availability is Availability.AVAILABLE
+                    for fact in available_facts
+                )
+                else Availability.UNAVAILABLE
+            )
+            return self._envelope(
+                tool="features_order_flow",
+                loaded=loaded,
+                data={
+                    "symbol": normalized,
+                    "source_availability": row.get("availability"),
+                    "facts": [
+                        fact.model_dump(mode="json") for fact in available_facts
+                    ],
+                },
+                availability=availability,
+                provenance=str(
+                    row.get("order_flow_provenance")
+                    or "agent_gateway.features_order_flow|unknown_provenance"
+                ),
+            )
+
+        return self._execute(
             tool="features_order_flow",
             agent_name=agent_name,
-            trade_date=trade_date,
-            symbol=symbol,
-            names=("order_imbalance", "vpoc", "buy_sell_pressure_ratio"),
+            request=request,
+            handler=handler,
         )
 
     def features_short_flow(
@@ -815,6 +944,7 @@ class AgentGatewayService:
     def postgres_query(self, *, agent_name: str, query: StoreQuery) -> dict[str, object]:
         def handler(actor: AgentRole) -> dict[str, object]:
             loaded: LoadedSnapshot | None = None
+            history_snapshots: tuple[LoadedSnapshot, ...] = ()
             availability = Availability.AVAILABLE
             if query.entity in STORE_ENTITIES:
                 rows = self.store.query(query)
@@ -822,6 +952,19 @@ class AgentGatewayService:
                 loaded, rows, availability = self._snapshot_query(
                     source="research.trading_episodes", query=query
                 )
+            elif query.entity is QueryEntity.INTRADAY_SELECTION_POSTMORTEMS:
+                if query.trade_date is None:
+                    history_snapshots, rows, availability = (
+                        self._snapshot_history_query(
+                            source="research.intraday_selection_postmortem",
+                            limit=query.limit,
+                        )
+                    )
+                else:
+                    loaded, rows, availability = self._snapshot_query(
+                        source="research.intraday_selection_postmortem",
+                        query=query,
+                    )
             elif query.entity is QueryEntity.UNIVERSE_SNAPSHOTS:
                 loaded, rows, availability = self._snapshot_query(
                     source="kernel.universe.selection_gates", query=query
@@ -848,8 +991,18 @@ class AgentGatewayService:
                 availability=availability,
                 provenance=(
                     "agent_gateway.store.parameterized_allowlist.v1"
-                    if loaded is None
+                    if loaded is None and not history_snapshots
                     else f"{loaded.manifest.dataset_id}|parameterized_snapshot_query"
+                    if loaded is not None
+                    else "research.intraday_selection_postmortem|history_snapshot_query.v1"
+                ),
+                snapshot_ids=(
+                    tuple(
+                        snapshot.manifest.dataset_id
+                        for snapshot in history_snapshots
+                    )
+                    if history_snapshots
+                    else None
                 ),
             )
 

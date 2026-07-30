@@ -14,9 +14,71 @@ from kernel.features.liquidity import (
 )
 from kernel.features.momentum import atr, beta, days_in_play
 from kernel.features.overnight_intraday import decompose
-from kernel.universe import REQUIRED_UNIVERSE_COLUMNS, _build_universe_from_daily
+from kernel.universe import (
+    REQUIRED_UNIVERSE_COLUMNS,
+    _build_universe_from_daily,
+    _load_accepted_common_stocks,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _write_common_stock_reference(
+    root: Path,
+    *,
+    snapshot_name: str,
+    asof_date: date,
+    symbols: list[str],
+) -> None:
+    path = root / "accepted" / snapshot_name
+    path.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "asof_date": [asof_date] * len(symbols),
+            "symbol": symbols,
+            "security_type": ["CS"] * len(symbols),
+            "active": [True] * len(symbols),
+        }
+    ).write_parquet(path / "data.parquet")
+
+
+def test_common_stock_loader_uses_latest_snapshot_without_cross_snapshot_duplicates(
+    tmp_path: Path,
+) -> None:
+    reference_date = date(2026, 7, 24)
+    _write_common_stock_reference(
+        tmp_path,
+        snapshot_name="massive.reference_tickers.cs-20260727T010000Z-old",
+        asof_date=reference_date,
+        symbols=["A", "B"],
+    )
+    _write_common_stock_reference(
+        tmp_path,
+        snapshot_name="massive.reference_tickers.cs-20260727T020000Z-new",
+        asof_date=reference_date,
+        symbols=["A", "B", "C"],
+    )
+
+    symbols, provenance = _load_accepted_common_stocks(
+        date(2026, 7, 27), tmp_path
+    )
+
+    assert symbols == {"A", "B", "C"}
+    assert provenance == "massive.reference_tickers.cs@2026-07-24"
+
+
+def test_common_stock_loader_rejects_duplicates_inside_selected_snapshot(
+    tmp_path: Path,
+) -> None:
+    _write_common_stock_reference(
+        tmp_path,
+        snapshot_name="massive.reference_tickers.cs-20260727T020000Z-duplicate",
+        asof_date=date(2026, 7, 24),
+        symbols=["A", "A"],
+    )
+
+    with pytest.raises(ValueError, match="duplicate symbols"):
+        _load_accepted_common_stocks(date(2026, 7, 27), tmp_path)
 
 
 def test_atr_is_zero_for_constant_prices() -> None:
@@ -226,4 +288,63 @@ def test_daily_universe_rejects_probable_ticker_identity_discontinuity() -> None
     row = result.filter(pl.col("symbol") == "REUSE").row(0, named=True)
     assert row["max_abs_return"] > 0.9
     assert "suspected_identity_discontinuity" in row["reject_reason"]
+    assert row["precheck_pass"] is False
+
+
+def test_daily_universe_rejects_prior_day_bearish_distribution() -> None:
+    frame, trade_date = _daily_fixture()
+    cfg = load_config(ROOT / "config.yaml")
+    previous_close = (
+        frame.filter(pl.col("symbol") == "FAST")
+        .sort("trade_date")
+        .get_column("close")[-2]
+    )
+    amended = frame.with_columns(
+        pl.when(
+            (pl.col("symbol") == "FAST")
+            & (pl.col("trade_date") == trade_date - timedelta(days=1))
+        )
+        .then(pl.lit(previous_close * 1.01))
+        .otherwise(pl.col("open"))
+        .alias("open"),
+        pl.when(
+            (pl.col("symbol") == "FAST")
+            & (pl.col("trade_date") == trade_date - timedelta(days=1))
+        )
+        .then(pl.lit(previous_close * 1.02))
+        .otherwise(pl.col("high"))
+        .alias("high"),
+        pl.when(
+            (pl.col("symbol") == "FAST")
+            & (pl.col("trade_date") == trade_date - timedelta(days=1))
+        )
+        .then(pl.lit(previous_close * 0.94))
+        .otherwise(pl.col("low"))
+        .alias("low"),
+        pl.when(
+            (pl.col("symbol") == "FAST")
+            & (pl.col("trade_date") == trade_date - timedelta(days=1))
+        )
+        .then(pl.lit(previous_close * 0.95))
+        .otherwise(pl.col("close"))
+        .alias("close"),
+        pl.when(
+            (pl.col("symbol") == "FAST")
+            & (pl.col("trade_date") == trade_date - timedelta(days=1))
+        )
+        .then(pl.lit(2_000_000.0))
+        .otherwise(pl.col("volume"))
+        .alias("volume"),
+    )
+    result = _build_universe_from_daily(
+        amended,
+        trade_date=trade_date,
+        cfg=cfg,
+        provenance="test.daily",
+    )
+    row = result.filter(pl.col("symbol") == "FAST").row(0, named=True)
+    assert row["daily_open_to_close_return"] < -0.03
+    assert row["daily_volume_ratio"] == pytest.approx(2.0)
+    assert row["daily_close_location"] < 0.30
+    assert "prior_day_bearish_distribution" in row["reject_reason"]
     assert row["precheck_pass"] is False

@@ -3,12 +3,14 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import httpx
 import polars as pl
 import pytest
 
 from data_plane.calendar import build_xnys_schedule
 from data_plane.daily import DAILY_COLUMNS, audit_daily_bars, canonicalize_daily_bars
 from data_plane.http import _safe_url
+from data_plane.providers import alpaca
 from data_plane.providers.alpaca import platform_access_from_env, stock_data_policy_from_env
 from data_plane.providers.massive import (
     _set_query_value,
@@ -137,6 +139,46 @@ def test_alpaca_stock_policy_rejects_unknown_feed(
     monkeypatch.setenv("CLOUD_MARKET_DATA_FEED", "iex")
     with pytest.raises(RuntimeError, match="CLOUD_MARKET_DATA_FEED"):
         stock_data_policy_from_env()
+
+
+def test_loopback_cloud_market_data_bypasses_environment_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CLOUD_PLATFORM_BASE_URL", "http://127.0.0.1:8765")
+    monkeypatch.setenv("CLOUD_MARKET_DATA_API_TOKEN", "test-token")
+    monkeypatch.setenv("CLOUD_MARKET_DATA_FEED", "sip")
+    captured: dict[str, object] = {}
+    real_client = httpx.Client
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "api_version": "v1",
+                "bars": [],
+                "coverage": {
+                    "status": "no_data",
+                    "fallback_recommended": False,
+                    "symbols": [{"symbol": "AAPL"}],
+                },
+            },
+        )
+
+    def client_factory(*, timeout: int, trust_env: bool) -> httpx.Client:
+        captured.update(timeout=timeout, trust_env=trust_env)
+        return real_client(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr("data_plane.providers.alpaca.httpx.Client", client_factory)
+    result = alpaca.fetch_bars(
+        ("AAPL",),
+        NOW,
+        NOW.replace(minute=31),
+        feed="sip",
+    )
+
+    assert result.is_empty()
+    assert captured == {"timeout": 60, "trust_env": False}
 
 
 def test_xnys_calendar_preserves_early_close_and_utc() -> None:

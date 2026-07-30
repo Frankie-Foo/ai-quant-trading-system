@@ -15,7 +15,7 @@ def _persist(root: Path, frame: pl.DataFrame) -> None:
         frame,
         root=root,
         source="kernel.universe.selection_gates",
-        schema_version="selection_gates.v1",
+        schema_version="selection_gates.v2",
         checks=(),
     )
 
@@ -30,6 +30,7 @@ def test_loads_only_passed_point_in_time_candidates(tmp_path: Path) -> None:
                 "selection_rank": [1, 2],
                 "pass_gate": [True, False],
                 "rvol": [4.0, 5.0],
+                "directional_volume_confirmed": [True, False],
                 "price": [225.0, 500.0],
                 "adv_usd": [1_000_000_000.0, 800_000_000.0],
                 "atr_pct": [0.03, 0.02],
@@ -55,6 +56,7 @@ def test_selection_loader_fails_closed_on_duplicate_or_invalid_rvol(tmp_path: Pa
                 "selection_rank": [1, 2],
                 "pass_gate": [True, True],
                 "rvol": [4.0, 3.0],
+                "directional_volume_confirmed": [True, True],
                 "price": [225.0, 225.0],
                 "adv_usd": [1_000_000_000.0, 1_000_000_000.0],
                 "atr_pct": [0.03, 0.03],
@@ -64,4 +66,29 @@ def test_selection_loader_fails_closed_on_duplicate_or_invalid_rvol(tmp_path: Pa
     )
 
     with pytest.raises(ValueError, match="duplicate|RVOL"):
+        load_locked_selection(tmp_path, date(2026, 7, 21), min_rvol=3.0)
+
+
+def test_selection_loader_rechecks_directional_volume_confirmation(
+    tmp_path: Path,
+) -> None:
+    _persist(
+        tmp_path,
+        pl.DataFrame(
+            {
+                "symbol": ["AAPL"],
+                "session_date": [date(2026, 7, 21)],
+                "selection_rank": [1],
+                "pass_gate": [True],
+                "rvol": [4.0],
+                "directional_volume_confirmed": [False],
+                "price": [225.0],
+                "adv_usd": [1_000_000_000.0],
+                "atr_pct": [0.03],
+                "tier": ["mega"],
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError, match="directional volume"):
         load_locked_selection(tmp_path, date(2026, 7, 21), min_rvol=3.0)

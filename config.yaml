@@ -10,7 +10,7 @@ tiers:
   small: {min_cap: 0, weight: 0.05}
 exits: {k_tp: 2.0, k_sl: 1.0, time_stop_et: "15:55"}
 participation_cap: 0.08
-universe: {min_price: 2.0, min_rvol: 3.0, min_beta: 1.5, min_atr_pct: 0.03, luld_low_float_shares: 20000000}
+universe: {min_price: 2.0, min_rvol: 3.0, min_premarket_return: 0.0, min_premarket_gap_return: 0.0, min_premarket_close_location: 0.6, min_beta: 1.5, min_atr_pct: 0.03, max_bearish_open_to_close_return: -0.03, min_distribution_volume_ratio: 1.5, max_distribution_close_location: 0.3, luld_low_float_shares: 20000000}
 costs:
   commission_per_share: 0.0035
   commission_min: 0.35
@@ -24,6 +24,25 @@ market_data:
   paper_start_lead_minutes: 10
   postmarket_data_grace_minutes: 20
   sip_event_stale_seconds: 45
+factor_selection:
+  schema_version: factor_selection.v1
+  min_score: 60.0
+  max_candidates: 50
+  rvol_full_score: 8.0
+  gap_full_score: 0.08
+  premarket_return_full_score: 0.08
+  vwap_extension_full_score: 0.03
+  beta_full_score: 3.0
+  atr_full_score: 0.08
+order_flow:
+  schema_version: order_flow.v1
+  window_minutes: 5
+shadow_arbitration:
+  schema_version: shadow_arbitration.v1
+  intersection_bonus: 5.0
+  order_flow_weight: 0.3
+  max_order_flow_adjustment: 15.0
+  max_candidates: 50
 guardrails:
   daily_loss_limit: 0.015
   lock_time_beijing: "08:00"
@@ -34,3 +53,4 @@ scheduler:
   premarket_max_attempts: 24
   postmarket_retry_minutes: 30
   postmarket_max_attempts: 5
+  multisignal_shadow_enabled: true

@@ -12,6 +12,7 @@ import polars as pl
 from dotenv import load_dotenv
 
 from data_plane.calendar import build_xnys_schedule
+from data_plane.candidate_pools import load_premarket_pool
 from data_plane.contracts import (
     DataQualityCheck,
     DatasetSnapshot,
@@ -29,6 +30,8 @@ NEW_YORK = ZoneInfo("America/New_York")
 HISTORY_SESSIONS = 20
 RAW_SOURCE = "alpaca.sip.premarket_1m"
 FEATURE_SOURCE = "kernel.premarket.rvol_candidates"
+FACTOR_FEATURE_SOURCE = "kernel.premarket.factor_rvol_candidates"
+SYMBOL_BATCH_SIZE = 100
 
 
 def _parse_date(value: str) -> date:
@@ -203,7 +206,16 @@ def _get_session(
         if cached is not None:
             return cached[0], cached[1], True
 
-    frame = fetch_bars(symbols, start_utc, end_utc, feed=feed)
+    batches = [
+        fetch_bars(
+            symbols[index : index + SYMBOL_BATCH_SIZE],
+            start_utc,
+            end_utc,
+            feed=feed,
+        )
+        for index in range(0, len(symbols), SYMBOL_BATCH_SIZE)
+    ]
+    frame = pl.concat(batches) if batches else pl.DataFrame()
     checks = _raw_checks(
         frame,
         symbols=symbols,
@@ -229,8 +241,12 @@ def _feature_checks(
     symbols: tuple[str, ...],
     trade_date: date,
     decision_asof_utc: datetime,
+    min_rvol: float,
+    min_premarket_return: float,
+    min_premarket_close_location: float,
+    feature_source: str = FEATURE_SOURCE,
 ) -> tuple[DataQualityCheck, ...]:
-    provenance = f"{FEATURE_SOURCE}@{decision_asof_utc.isoformat()}"
+    provenance = f"{feature_source}@{decision_asof_utc.isoformat()}"
     actual = set(frame.get_column("symbol").to_list())
     duplicate_count = frame.height - frame.get_column("symbol").n_unique()
     wrong_dates = frame.filter(pl.col("session_date") != trade_date).height
@@ -244,7 +260,19 @@ def _feature_checks(
         )
     ).height
     invalid_pass = frame.filter(
-        pl.col("rvol_pass") != (pl.col("rvol") > 3.0).fill_null(False)
+        pl.col("rvol_pass") != (pl.col("rvol") > min_rvol).fill_null(False)
+    ).height
+    expected_price_confirmation = (
+        (pl.col("premarket_return") > min_premarket_return)
+        & pl.col("premarket_above_vwap")
+        & (
+            pl.col("premarket_close_location")
+            >= min_premarket_close_location
+        )
+    ).fill_null(False)
+    invalid_price_confirmation = frame.filter(
+        pl.col("premarket_price_confirmation")
+        != expected_price_confirmation
     ).height
     return (
         _check(
@@ -292,7 +320,18 @@ def _feature_checks(
             QualitySeverity.CRITICAL,
             invalid_pass == 0,
             invalid_pass,
-            "rvol_pass iff RVOL > 3.0",
+            f"rvol_pass iff RVOL > {min_rvol}",
+            provenance,
+        ),
+        _check(
+            "premarket_price_confirmation",
+            QualitySeverity.CRITICAL,
+            invalid_price_confirmation == 0,
+            invalid_price_confirmation,
+            (
+                f"return > {min_premarket_return}, close > VWAP, and "
+                f"close location >= {min_premarket_close_location}"
+            ),
             provenance,
         ),
     )
@@ -311,6 +350,12 @@ def main() -> None:
     parser.add_argument("--trade-date", type=_parse_date, required=True)
     parser.add_argument("--decision-asof", type=_parse_utc)
     parser.add_argument("--data-root", type=Path, default=ROOT / "data")
+    parser.add_argument(
+        "--pool",
+        choices=("catalyst", "factor"),
+        default="catalyst",
+        help="catalyst keeps the legacy lock; factor scans every daily precheck survivor",
+    )
     parser.add_argument("--refresh", action="store_true")
     args = parser.parse_args()
 
@@ -332,7 +377,16 @@ def main() -> None:
     cutoff_et = cutoff_local.time().replace(tzinfo=None)
     premarket_window_utc(args.trade_date, cutoff_et)
 
-    candidates, locked_snapshot = _load_locked_candidates(args.data_root, args.trade_date)
+    candidate_pool = load_premarket_pool(
+        args.data_root,
+        args.trade_date,
+        pool=args.pool,
+    )
+    candidates = candidate_pool.frame
+    locked_snapshot = candidate_pool.snapshot
+    feature_source = (
+        FEATURE_SOURCE if args.pool == "catalyst" else FACTOR_FEATURE_SOURCE
+    )
     symbols = tuple(candidates.get_column("symbol").to_list())
     schedule = build_xnys_schedule(args.trade_date - timedelta(days=60), args.trade_date)
     session_dates = schedule.get_column("trade_date").tail(HISTORY_SESSIONS + 1).to_list()
@@ -387,6 +441,8 @@ def main() -> None:
         cutoff_et=cutoff_et,
         n=HISTORY_SESSIONS,
         min_rvol=cfg.universe.min_rvol,
+        min_premarket_return=cfg.universe.min_premarket_return,
+        min_premarket_close_location=cfg.universe.min_premarket_close_location,
         provenance=(
             f"alpaca.{policy.feed}.split_adjusted[{len(raw_snapshots)}sessions]"
             f"@{data_cutoff_utc.isoformat()}"
@@ -399,12 +455,26 @@ def main() -> None:
         pl.lit(policy.feed).alias("market_data_feed"),
         pl.lit(policy.is_realtime).alias("market_data_realtime"),
     )
-    output = candidates.join(features, on="symbol", how="left", validate="1:1")
+    overlapping_feature_columns = [
+        column
+        for column in features.columns
+        if column != "symbol" and column in candidates.columns
+    ]
+    output = candidates.drop(overlapping_feature_columns).join(
+        features,
+        on="symbol",
+        how="left",
+        validate="1:1",
+    )
     checks = _feature_checks(
         output,
         symbols=symbols,
         trade_date=args.trade_date,
         decision_asof_utc=decision_asof_utc,
+        min_rvol=cfg.universe.min_rvol,
+        min_premarket_return=cfg.universe.min_premarket_return,
+        min_premarket_close_location=cfg.universe.min_premarket_close_location,
+        feature_source=feature_source,
     )
     parent_ids = (locked_snapshot.dataset_id,) + tuple(
         snapshot.dataset_id for snapshot in raw_snapshots
@@ -412,8 +482,8 @@ def main() -> None:
     snapshot, path = persist_snapshot(
         output,
         root=args.data_root,
-        source=FEATURE_SOURCE,
-        schema_version="premarket_rvol_candidates.v1",
+        source=feature_source,
+        schema_version="premarket_rvol_candidates.v2",
         checks=checks,
         parent_snapshot_ids=parent_ids,
     )
@@ -421,6 +491,7 @@ def main() -> None:
     result = {
         "trade_date": args.trade_date.isoformat(),
         "status": "complete",
+        "candidate_pool": args.pool,
         "locked_symbols": len(symbols),
         "raw_sessions": len(raw_snapshots),
         "raw_rows": sum(frame.height for frame in frames),

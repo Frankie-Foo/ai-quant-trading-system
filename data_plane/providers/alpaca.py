@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
 import polars as pl
@@ -54,17 +54,18 @@ def platform_access_from_env() -> tuple[str, str]:
     return base_url, token
 
 
-def _remote_rows(
+def _remote_payload(
     endpoint: str,
     *,
     symbols: tuple[str, ...],
     start_utc: datetime,
     end_utc: datetime,
     client: httpx.Client | None,
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], dict[str, Any]]:
     base_url, token = platform_access_from_env()
     owns_client = client is None
-    http_client = client or httpx.Client(timeout=60)
+    loopback = base_url.startswith(("http://127.0.0.1", "http://localhost"))
+    http_client = client or httpx.Client(timeout=60, trust_env=not loopback)
     try:
         response = http_client.get(
             f"{base_url}/{PLATFORM_API_VERSION}/market-data/{endpoint}",
@@ -87,6 +88,48 @@ def _remote_rows(
     rows = payload.get(endpoint)
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise DownloadError("cloud market-data API rows are invalid")
+    coverage = payload.get("coverage")
+    if not isinstance(coverage, dict):
+        raise DownloadError("cloud market-data coverage contract is invalid")
+    coverage_status = coverage.get("status")
+    fallback_recommended = coverage.get("fallback_recommended")
+    symbol_coverage = coverage.get("symbols")
+    if (
+        not isinstance(coverage_status, str)
+        or not isinstance(fallback_recommended, bool)
+        or not isinstance(symbol_coverage, list)
+        or any(not isinstance(item, dict) for item in symbol_coverage)
+    ):
+        raise DownloadError("cloud market-data coverage contract is invalid")
+    returned_symbols = [
+        str(item.get("symbol", "")).strip().upper() for item in symbol_coverage
+    ]
+    requested_symbols = [symbol.strip().upper() for symbol in symbols]
+    if (
+        len(returned_symbols) != len(requested_symbols)
+        or set(returned_symbols) != set(requested_symbols)
+    ):
+        raise DownloadError("cloud market-data coverage contract is invalid")
+    return rows, coverage
+
+
+def _remote_rows(
+    endpoint: str,
+    *,
+    symbols: tuple[str, ...],
+    start_utc: datetime,
+    end_utc: datetime,
+    client: httpx.Client | None,
+) -> list[dict[str, object]]:
+    rows, coverage = _remote_payload(
+        endpoint,
+        symbols=symbols,
+        start_utc=start_utc,
+        end_utc=end_utc,
+        client=client,
+    )
+    if coverage["fallback_recommended"] is True:
+        raise DownloadError("cloud market-data coverage is not usable")
     return rows
 
 
@@ -120,6 +163,47 @@ def fetch_bars(
     )
 
 
+def fetch_sparse_bars_for_monitoring(
+    symbols: tuple[str, ...],
+    start_utc: datetime,
+    end_utc: datetime,
+    *,
+    feed: AlpacaStockFeed | None = None,
+    client: httpx.Client | None = None,
+) -> tuple[pl.DataFrame, dict[str, Any]]:
+    """Read observed minute bars for advisory charts while preserving gap evidence.
+
+    This function intentionally has a monitoring-specific name.  It must not be
+    used by execution or training paths because it permits upstream coverage to
+    report sparse/no-trade minutes.
+    """
+
+    selected_feed = feed or stock_data_policy_from_env().feed
+    if not symbols:
+        raise ValueError("at least one symbol is required")
+    rows, coverage = _remote_payload(
+        "bars",
+        symbols=symbols,
+        start_utc=start_utc,
+        end_utc=end_utc,
+        client=client,
+    )
+    if not rows:
+        raise DownloadError("cloud market-data API returned no observed bars")
+    status = coverage.get("status")
+    if status not in {"observed", "gaps_detected"}:
+        raise DownloadError("cloud market-data coverage is not observable")
+    for row in rows:
+        row["vwap"] = nullable_float(row.get("vwap"))
+        row["source"] = "cloud.alpaca.market_data"
+        row["feed"] = selected_feed
+        row["adjustment"] = "split_adjusted"
+    frame = canonicalize_bars(pl.DataFrame(rows)).filter(
+        (pl.col("ts_utc") >= start_utc) & (pl.col("ts_utc") < end_utc)
+    )
+    return frame, coverage
+
+
 def fetch_quotes(
     symbols: tuple[str, ...],
     start_utc: datetime,
@@ -149,6 +233,39 @@ def fetch_quotes(
 
     frame = pl.DataFrame(rows) if rows else _empty_quotes()
     return _canonicalize_quotes(frame).filter(
+        (pl.col("ts_utc") >= start_utc) & (pl.col("ts_utc") < end_utc)
+    )
+
+
+def fetch_trades(
+    symbols: tuple[str, ...],
+    start_utc: datetime,
+    end_utc: datetime,
+    *,
+    feed: AlpacaStockFeed | None = None,
+    client: httpx.Client | None = None,
+) -> pl.DataFrame:
+    """Fetch every historical SIP trade print for point-in-time order-flow research."""
+
+    selected_feed = feed or stock_data_policy_from_env().feed
+    if not symbols:
+        raise ValueError("at least one symbol is required")
+    if start_utc.tzinfo is None or end_utc.tzinfo is None or end_utc <= start_utc:
+        raise ValueError("a valid timezone-aware trade interval is required")
+    rows = _remote_rows(
+        "trades",
+        symbols=symbols,
+        start_utc=start_utc,
+        end_utc=end_utc,
+        client=client,
+    )
+    for row in rows:
+        row["price"] = nullable_float(row.get("price"))
+        row["size"] = nullable_float(row.get("size"))
+        row["source"] = "cloud.alpaca.market_data"
+        row["feed"] = selected_feed
+    frame = pl.DataFrame(rows) if rows else _empty_trades()
+    return _canonicalize_trades(frame).filter(
         (pl.col("ts_utc") >= start_utc) & (pl.col("ts_utc") < end_utc)
     )
 
@@ -191,6 +308,23 @@ def _empty_quotes() -> pl.DataFrame:
     )
 
 
+def _empty_trades() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "symbol": pl.String,
+            "ts_utc": pl.Datetime("ns", "UTC"),
+            "trade_id": pl.Int64,
+            "exchange": pl.String,
+            "price": pl.Float64,
+            "size": pl.Int64,
+            "conditions": pl.List(pl.String),
+            "tape": pl.String,
+            "source": pl.String,
+            "feed": pl.String,
+        }
+    )
+
+
 def _canonicalize_quotes(frame: pl.DataFrame) -> pl.DataFrame:
     columns = _empty_quotes().columns
     missing = set(columns) - set(frame.columns)
@@ -211,4 +345,32 @@ def _canonicalize_quotes(frame: pl.DataFrame) -> pl.DataFrame:
             pl.col("conditions").cast(pl.List(pl.String)),
         )
         .sort("symbol", "ts_utc")
+    )
+
+
+def _canonicalize_trades(frame: pl.DataFrame) -> pl.DataFrame:
+    columns = _empty_trades().columns
+    missing = set(columns) - set(frame.columns)
+    if missing:
+        raise ValueError(f"trades missing required columns: {sorted(missing)}")
+    timestamp = pl.col("ts_utc")
+    if frame.schema["ts_utc"] == pl.String:
+        timestamp = timestamp.str.to_datetime(
+            time_unit="ns",
+            time_zone="UTC",
+            strict=False,
+        )
+    return (
+        frame.select(columns)
+        .with_columns(
+            pl.col("symbol").cast(pl.String),
+            timestamp.cast(pl.Datetime("ns", "UTC")).alias("ts_utc"),
+            pl.col("trade_id").cast(pl.Int64),
+            pl.col("exchange").cast(pl.String),
+            pl.col("price").cast(pl.Float64),
+            pl.col("size").cast(pl.Int64),
+            pl.col("conditions").cast(pl.List(pl.String)),
+            pl.col("tape").cast(pl.String),
+        )
+        .sort("symbol", "ts_utc", "trade_id")
     )

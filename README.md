@@ -19,10 +19,48 @@ commit them to the repository.
 The frozen specification is supplemented by [architecture decisions](docs/ARCHITECTURE.md),
 which map data, model, strategy, trading, and application layers onto this repository.
 
+## 本地自主模拟盘
+
+三进程 Docker 运行方式现已覆盖 SIP 数据刷新、催化剂/红队/确定性监督器、
+安全信封、Alpaca Paper 执行和利弗莫尔中文通知。默认 compose 只有读取权限；
+Paper 写入必须同时通过环境授权、关闭 kill switch，并显式加载带
+`--arm-paper` 的覆盖文件。完整启动、紧急停止、状态保留和迁移说明见
+[本地自主模拟盘运行手册](docs/AUTONOMOUS_PAPER_LOCAL.md)。
+
 The cloud multi-strategy service is a separate repository and deployment. This
 repository consumes its versioned feature API only through the slow-loop synchronization
 adapter documented in [cloud feature interface](docs/CLOUD_FEATURE_INTERFACE.md). The
-realtime kernel reads the local point-in-time cache and never waits on remote HTTP.
+realtime kernel reads the local point-in-time cache and never waits on remote feature
+HTTP. Its separate market collector declares a bounded lease, verifies detailed market
+health, then consumes resumable cloud SSE into the existing local SIP store.
+
+## Windows adaptive decision client
+
+The desktop client is a read-only operating console over a deterministic adaptive-plan
+engine. It reconciles positions from the Broker, evaluates observed SIP quotes/trades
+and completed 1/5/15-minute bars every 15 seconds, and records only material state
+changes in an append-only SQLite event stream. Soft plan revisions have a three-minute
+cooldown and a per-session cap; hard stops and the UTC time stop remain immediate.
+Neither the client nor its HTTP interface contains an order route.
+
+Install the JavaScript dependencies once, copy the secret-free example plan, replace
+every placeholder with accepted point-in-time evidence, and start the complete local
+loop:
+
+```powershell
+Set-Location client
+npm install
+Set-Location ..
+Copy-Item config\adaptive_plans.example.json config\adaptive_plans.local.json
+.\scripts\start_adaptive_client.ps1 -Config config\adaptive_plans.local.json
+```
+
+The launcher registers immutable baselines, warms the local store with historical SIP
+observations, starts the licensed event collector and Broker-authoritative plan monitor,
+and opens the Electron client. Closing the client stops only the background processes
+owned by that launch. Full contracts, state transitions, safety boundaries, and VPS
+deployment topology are documented in
+[adaptive desktop client](docs/ADAPTIVE_DESKTOP_CLIENT.md).
 
 Real-data bootstrap and local credential setup are documented in
 [data access](docs/DATA_ACCESS.md). Community and undocumented feeds are automatically
@@ -68,15 +106,51 @@ The command is restart-safe: accepted per-session raw snapshots are reused. Befo
 the decision time it downloads history only and leaves the target feature unavailable;
 at or after the decision time it adds the target window allowed by the configured feed
 policy and persists the point-in-time result. Licensed `sip` uses a zero-minute delay;
-`delayed_sip` is an explicit 15-minute fallback. See the historical
+`delayed_sip` is an explicit 15-minute fallback. RVOL is deliberately unsigned, so it
+cannot pass the final gate by itself: the same snapshot must also show a positive
+04:00-to-cutoff return, a close above aggregate premarket VWAP, and a close in the top
+40% of the observed premarket range. The final gate additionally requires the
+premarket close to be strictly above the prior close. See the historical
 [premarket RVOL audit](docs/PREMARKET_RVOL_AUDIT_2026-07-20.md).
 
 Prefetch and apply the remaining L0 selection gates (point-in-time market cap,
-earnings day, current halt, and recent LULD/low-float risk) with:
+earnings day, current halt, recent LULD/low-float risk, and prior-session bearish
+distribution) with:
 
 ```powershell
 .\.venv\Scripts\python -m scripts.build_selection_gates --trade-date 2026-07-20
 ```
+
+The bearish-distribution veto rejects a prior session whose open-to-close return is
+at most -3%, volume is at least 1.5 times the preceding 20-session average, and close
+location is in the bottom 30% of the daily range. These thresholds are frozen and
+visible in `config.yaml`; both feature and final-selection snapshots use v2 schemas.
+
+Run the independent pure-factor selector, consolidated-tape order-flow confirmation,
+and unified research arbitration with:
+
+```powershell
+.\.venv\Scripts\python -m scripts.run_multisignal_shadow_pipeline `
+  --trade-date 2026-07-28 --asof-utc 2026-07-28T14:20:00Z
+```
+
+This pipeline first collects the shadow-only Hyperliquid/Aevo cross-asset risk target,
+then computes broad-universe premarket RVOL without consulting catalyst membership,
+scores the eligible daily pool, downloads every SIP trade and NBBO quote for the
+configured confirmation window, and ranks the union of catalyst and factor candidates.
+The perpetual module records live top-of-book, public aggressor-side trades, funding,
+price/OI confirmation, basis, explicit missing fields, cross-venue disagreement,
+coverage, and immutable current/prior provenance; it does not yet modify a candidate
+or market gate. Global liquidation windows remain unavailable until a dedicated
+stream/node provider is configured. Tick Rule order imbalance, buy/sell pressure, VPOC,
+quote-size imbalance, microprice, and spread are preserved with point-in-time lineage.
+Order flow can confirm or reduce a candidate's score but cannot create a candidate by
+itself. See [cross-asset sentiment](docs/CROSS_ASSET_SENTIMENT.md).
+Every new output is `production_eligible=false` and `execution_eligible=false`; the
+pipeline has no Broker or OMS command. The normal `schedule.premarket` tick runs this
+as a separately leased, restart-safe shadow job after primary selection. Completed
+daily stages are reused, but the live cross-asset stage is always refreshed. A shadow
+failure is logged and retried without invalidating the primary catalyst selection.
 
 Build a point-in-time, explicitly non-actionable ORB-5 research snapshot with:
 
@@ -116,7 +190,8 @@ out-of-sample calibration approves it.
 ## Automatic postmarket learning loop
 
 After a session is fully available, replay ORB-5, build a frozen Trading Episode, and
-run the read-only Research/Critic pair with:
+build an immutable top-mover selection postmortem before running the read-only
+Research/Critic pair with:
 
 ```powershell
 .\.venv\Scripts\python -m schedule.postmarket --trade-date 2026-07-20
@@ -128,6 +203,13 @@ affected trade outcomes remain explicitly censored. Net returns remain unavailab
 until quote-spread data exists, so the review cannot mistake missing costs for zero.
 Program diagnostics are always available. Research and Critic agents run automatically
 only after deterministic evidence gates pass; their failure cannot bypass those gates.
+The selection postmortem separates captured opportunities, intentional gate rejections,
+detectable misses, after-cutoff catalysts, and incomplete evidence. It stores close
+return and MFE/MAE path facts with provenance, keeps every row
+`production_change_allowed=false`, and exposes anonymized records to PDCA through the
+`intraday_selection_postmortems` allowlist. The repo-local
+`intraday-selection-postmortem` skill may group repeated ticker-free patterns and draft
+sandbox hypotheses; it cannot change a gate, submit an order, or approve production.
 
 Install the complete local Windows observation loop with:
 
@@ -175,8 +257,8 @@ and Paper API access without calling any order endpoint:
 
 The safe output must report an active, unblocked Paper account, authenticated cloud
 market events, and `orders_submitted: 0`. Alpaca WebSocket ownership lives only in the
-separate cloud-strategy-platform repository. This local collector consumes the scoped
-event API:
+separate cloud-strategy-platform repository. This local collector leases its symbols,
+waits for usable market health, then consumes the scoped SSE event API:
 
 ```powershell
 .\.venv\Scripts\python -m scripts.stream_alpaca_sip `
@@ -188,6 +270,11 @@ event API:
 It persists every received minute bar and latest NBBO quote for each symbol-second in a
 WAL/FULL SQLite ledger. API failure yields no event and therefore no decision; missing
 market data is never filled.
+
+Historical cloud bars and quotes must carry a valid per-symbol `coverage` contract.
+When the cloud reports regular-session gaps, an empty upstream response, stale realtime
+events, or `fallback_recommended=true`, the AI process stops that path. It does not
+silently switch to Yahoo/community data or reconnect to Alpaca with a hidden key.
 
 Broker writes remain fail-closed through three independent controls:
 

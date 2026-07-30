@@ -36,6 +36,8 @@ class PaperPosition(FrozenModel):
     qty: str
     side: str
     market_value: str
+    avg_entry_price: str | None = None
+    current_price: str | None = None
 
     @field_validator("symbol")
     @classmethod
@@ -68,7 +70,7 @@ class PaperOrderRequest(BaseModel):
     time_in_force: Literal["day"] = "day"
     extended_hours: Literal[False] = False
     limit_price: str | None = None
-    take_profit_price: str = Field(min_length=1)
+    take_profit_price: str | None = Field(default=None, min_length=1)
     stop_loss_price: str = Field(min_length=1)
 
     def broker_payload(self) -> dict[str, object]:
@@ -80,10 +82,15 @@ class PaperOrderRequest(BaseModel):
             "type": self.order_type,
             "time_in_force": self.time_in_force,
             "extended_hours": self.extended_hours,
-            "order_class": "bracket",
-            "take_profit": {"limit_price": self.take_profit_price},
+            "order_class": (
+                "bracket" if self.take_profit_price is not None else "oto"
+            ),
             "stop_loss": {"stop_price": self.stop_loss_price},
         }
+        if self.take_profit_price is not None:
+            payload["take_profit"] = {
+                "limit_price": self.take_profit_price
+            }
         if self.order_type == "limit":
             if self.limit_price is None:
                 raise ValueError("limit order requires limit_price")
@@ -115,6 +122,60 @@ class PaperCloseRequest(BaseModel):
             "type": self.order_type,
             "time_in_force": self.time_in_force,
             "extended_hours": self.extended_hours,
+        }
+
+
+class PaperStopRequest(BaseModel):
+    """Regular-hours protective stop that can only reduce a whole-share long."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    client_order_id: str = Field(min_length=1, max_length=128)
+    symbol: str = Field(min_length=1, max_length=16, pattern=r"^[A-Z][A-Z0-9.-]*$")
+    qty: int = Field(gt=0)
+    stop_price: str = Field(min_length=1)
+    side: Literal["sell"] = "sell"
+    order_type: Literal["stop"] = "stop"
+    time_in_force: Literal["day"] = "day"
+    extended_hours: Literal[False] = False
+
+    def broker_payload(self) -> dict[str, object]:
+        return {
+            "client_order_id": self.client_order_id,
+            "symbol": self.symbol,
+            "qty": str(self.qty),
+            "side": self.side,
+            "type": self.order_type,
+            "time_in_force": self.time_in_force,
+            "extended_hours": self.extended_hours,
+            "stop_price": self.stop_price,
+        }
+
+
+class PaperExtendedLimitRequest(BaseModel):
+    """Extended-hours limit order; sell quantity may only close a long position."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    client_order_id: str = Field(min_length=1, max_length=128)
+    symbol: str = Field(min_length=1, max_length=16, pattern=r"^[A-Z][A-Z0-9.-]*$")
+    qty: int = Field(gt=0)
+    side: Literal["buy", "sell"]
+    order_type: Literal["limit"] = "limit"
+    time_in_force: Literal["day"] = "day"
+    extended_hours: Literal[True] = True
+    limit_price: str = Field(min_length=1)
+
+    def broker_payload(self) -> dict[str, object]:
+        return {
+            "client_order_id": self.client_order_id,
+            "symbol": self.symbol,
+            "qty": str(self.qty),
+            "side": self.side,
+            "type": self.order_type,
+            "time_in_force": self.time_in_force,
+            "extended_hours": self.extended_hours,
+            "limit_price": self.limit_price,
         }
 
 
@@ -199,6 +260,37 @@ class CloudPaperBroker:
         )
         return BrokerOrder.model_validate(payload.get("order"))
 
+    def submit_stop_order_idempotent(
+        self,
+        request: PaperStopRequest,
+    ) -> BrokerOrder:
+        if not self.writes_enabled:
+            raise BrokerWritesDisabledError("paper broker writes are disabled")
+        payload = self._request(
+            "POST",
+            f"/{PLATFORM_API_VERSION}/paper/orders",
+            json_body={
+                "kind": "protective_stop",
+                "request": request.model_dump(mode="json"),
+            },
+        )
+        return BrokerOrder.model_validate(payload.get("order"))
+
+    def submit_extended_limit_idempotent(
+        self, request: PaperExtendedLimitRequest
+    ) -> BrokerOrder:
+        if not self.writes_enabled:
+            raise BrokerWritesDisabledError("paper broker writes are disabled")
+        payload = self._request(
+            "POST",
+            f"/{PLATFORM_API_VERSION}/paper/orders",
+            json_body={
+                "kind": "extended_limit",
+                "request": request.model_dump(mode="json"),
+            },
+        )
+        return BrokerOrder.model_validate(payload.get("order"))
+
     def _request(
         self,
         method: str,
@@ -221,4 +313,208 @@ class CloudPaperBroker:
             raise BrokerError(f"broker request failed: {type(exc).__name__}") from exc
         if not isinstance(payload, dict) or payload.get("api_version") != PLATFORM_API_VERSION:
             raise BrokerError("broker API response contract is invalid")
+        return payload
+
+
+class DirectAlpacaPaperBroker:
+    """Temporary direct adapter pinned to Alpaca's Paper-only trading host."""
+
+    PAPER_BASE_URL = "https://paper-api.alpaca.markets"
+
+    def __init__(
+        self,
+        *,
+        key_id: SecretStr,
+        secret_key: SecretStr,
+        writes_enabled: bool = False,
+        base_url: str = PAPER_BASE_URL,
+        client: httpx.Client | None = None,
+    ):
+        normalized = base_url.rstrip("/")
+        if normalized != self.PAPER_BASE_URL:
+            raise ValueError("direct Alpaca adapter must use the Paper host")
+        if not key_id.get_secret_value().strip():
+            raise ValueError("Alpaca Paper key ID is required")
+        if not secret_key.get_secret_value().strip():
+            raise ValueError("Alpaca Paper secret key is required")
+        self.base_url = normalized
+        self.writes_enabled = writes_enabled
+        self._headers = {
+            "APCA-API-KEY-ID": key_id.get_secret_value(),
+            "APCA-API-SECRET-KEY": secret_key.get_secret_value(),
+        }
+        self._client = client or httpx.Client(timeout=20.0)
+        self._owns_client = client is None
+
+    def close(self) -> None:
+        if self._owns_client:
+            self._client.close()
+
+    def get_account(self) -> PaperAccount:
+        payload = self._request_object("GET", "/v2/account")
+        return PaperAccount.model_validate(payload)
+
+    def list_positions(self) -> tuple[PaperPosition, ...]:
+        payload = self._request_list("GET", "/v2/positions")
+        return tuple(PaperPosition.model_validate(item) for item in payload)
+
+    def list_open_orders(self) -> tuple[BrokerOrder, ...]:
+        payload = self._request_list(
+            "GET",
+            "/v2/orders",
+            params={"status": "open", "limit": "500", "nested": "true"},
+        )
+        return tuple(BrokerOrder.model_validate(item) for item in payload)
+
+    def get_order_by_client_id(self, client_order_id: str) -> BrokerOrder | None:
+        response = self._request_raw(
+            "GET",
+            "/v2/orders:by_client_order_id",
+            params={"client_order_id": client_order_id},
+            allowed_statuses=frozenset({200, 404}),
+        )
+        if response.status_code == 404:
+            return None
+        return BrokerOrder.model_validate(self._response_object(response))
+
+    def cancel_order(self, order_id: str) -> bool:
+        self._require_writes_enabled()
+        response = self._request_raw(
+            "DELETE",
+            f"/v2/orders/{order_id}",
+            allowed_statuses=frozenset({204, 404, 422}),
+        )
+        return response.status_code == 204
+
+    def submit_order_idempotent(self, request: PaperOrderRequest) -> BrokerOrder:
+        return self._submit_idempotent(
+            client_order_id=request.client_order_id,
+            payload=request.broker_payload(),
+        )
+
+    def submit_close_order_idempotent(
+        self,
+        request: PaperCloseRequest,
+    ) -> BrokerOrder:
+        return self._submit_idempotent(
+            client_order_id=request.client_order_id,
+            payload=request.broker_payload(),
+        )
+
+    def submit_stop_order_idempotent(
+        self,
+        request: PaperStopRequest,
+    ) -> BrokerOrder:
+        return self._submit_idempotent(
+            client_order_id=request.client_order_id,
+            payload=request.broker_payload(),
+        )
+
+    def submit_extended_limit_idempotent(
+        self,
+        request: PaperExtendedLimitRequest,
+    ) -> BrokerOrder:
+        return self._submit_idempotent(
+            client_order_id=request.client_order_id,
+            payload=request.broker_payload(),
+        )
+
+    def _submit_idempotent(
+        self,
+        *,
+        client_order_id: str,
+        payload: dict[str, object],
+    ) -> BrokerOrder:
+        self._require_writes_enabled()
+        existing = self.get_order_by_client_id(client_order_id)
+        if existing is not None:
+            return existing
+        response = self._request_raw(
+            "POST",
+            "/v2/orders",
+            json_body=payload,
+            allowed_statuses=frozenset({200, 201, 422}),
+        )
+        if response.status_code == 422:
+            raced = self.get_order_by_client_id(client_order_id)
+            if raced is not None:
+                return raced
+            raise BrokerError("Alpaca Paper order was rejected")
+        return BrokerOrder.model_validate(self._response_object(response))
+
+    def _require_writes_enabled(self) -> None:
+        if not self.writes_enabled:
+            raise BrokerWritesDisabledError("paper broker writes are disabled")
+
+    def _request_object(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        response = self._request_raw(
+            method,
+            path,
+            params=params,
+            allowed_statuses=frozenset({200}),
+        )
+        return self._response_object(response)
+
+    def _request_list(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+    ) -> list[object]:
+        response = self._request_raw(
+            method,
+            path,
+            params=params,
+            allowed_statuses=frozenset({200}),
+        )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise BrokerError("Alpaca Paper response was not valid JSON") from exc
+        if not isinstance(payload, list):
+            raise BrokerError("Alpaca Paper response contract is invalid")
+        return payload
+
+    def _request_raw(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        json_body: dict[str, object] | None = None,
+        allowed_statuses: frozenset[int],
+    ) -> httpx.Response:
+        try:
+            response = self._client.request(
+                method,
+                f"{self.base_url}{path}",
+                headers=self._headers,
+                params=params,
+                json=json_body,
+            )
+        except (httpx.HTTPError, OSError) as exc:
+            raise BrokerError(
+                f"Alpaca Paper request failed: {type(exc).__name__}"
+            ) from exc
+        if response.status_code not in allowed_statuses:
+            raise BrokerError(
+                f"Alpaca Paper request failed with HTTP {response.status_code}"
+            )
+        return response
+
+    @staticmethod
+    def _response_object(response: httpx.Response) -> dict[str, object]:
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise BrokerError("Alpaca Paper response was not valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise BrokerError("Alpaca Paper response contract is invalid")
         return payload

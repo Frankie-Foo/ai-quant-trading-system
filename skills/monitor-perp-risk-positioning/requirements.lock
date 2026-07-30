@@ -1,0 +1,6 @@
+cryptography==45.0.5
+httpx==0.28.1
+keyring==25.6.0
+pandas-market-calendars==5.4.0
+pydantic==2.11.7
+PyYAML==6.0.2

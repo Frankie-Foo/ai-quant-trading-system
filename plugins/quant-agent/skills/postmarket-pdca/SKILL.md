@@ -57,6 +57,8 @@ in finding `metrics`. If any required ledger is `N/A`, do not claim compliance; 
 Act as `pdca` and query:
 
 - `trading_episodes` for frozen selection, signal, and outcome facts;
+- `intraday_selection_postmortems` for captured opportunities, missed detectable opportunities,
+  intentional rejections, after-cutoff catalysts, and incomplete evidence;
 - `agent_theses` for the pre-trade hypothesis;
 - `factor_snapshots` for drift evidence when available;
 - the newly written `audit_reports` only to keep execution issues separate.
@@ -64,7 +66,8 @@ Act as `pdca` and query:
 For each supported pattern, decide whether the original logic was supported, refuted, or noise.
 Keep this verdict separate from profit or loss. Group by factor profile such as sector heat,
 life-cycle state, elasticity, catalyst type, priced-in state, and direction logic. Do not group by
-instrument identity.
+instrument identity. Treat one missed mover as an observation rather than a lesson. Never label an
+after-cutoff catalyst or incomplete evidence as a factor failure.
 
 Write only these lesson categories with `lessons_write`:
 

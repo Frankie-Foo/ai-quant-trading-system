@@ -87,6 +87,50 @@ class SnapshotRepository:
         suffix = f" for {trade_date.isoformat()}" if trade_date else ""
         raise LookupError(f"no accepted {source} snapshot{suffix}")
 
+    def history_for_source(
+        self,
+        source: str,
+        *,
+        row_limit: int,
+    ) -> tuple[LoadedSnapshot, ...]:
+        """Load newest accepted single-session snapshots without duplicate sessions."""
+
+        loaded_snapshots = [
+            self._load(directory) for directory in self._directories(source)
+        ]
+        loaded_snapshots.sort(
+            key=lambda item: item.manifest.asof_utc,
+            reverse=True,
+        )
+        output: list[LoadedSnapshot] = []
+        seen_sessions: set[date] = set()
+        row_count = 0
+        for loaded in loaded_snapshots:
+            if loaded.manifest.source != source:
+                continue
+            date_column = next(
+                (
+                    column
+                    for column in ("session_date", "trade_date", "asof_date")
+                    if column in loaded.frame.columns
+                ),
+                None,
+            )
+            if date_column is None:
+                continue
+            session_values = loaded.frame.get_column(date_column).unique().to_list()
+            if len(session_values) != 1 or not isinstance(session_values[0], date):
+                continue
+            session_date = session_values[0]
+            if session_date in seen_sessions:
+                continue
+            seen_sessions.add(session_date)
+            output.append(loaded)
+            row_count += loaded.frame.height
+            if row_count >= row_limit:
+                break
+        return tuple(output)
+
     def selection_row(
         self, trade_date: date, symbol: str
     ) -> tuple[LoadedSnapshot, dict[str, object]]:

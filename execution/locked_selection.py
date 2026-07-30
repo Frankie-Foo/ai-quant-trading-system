@@ -71,6 +71,10 @@ def load_locked_selection(
     if not matches:
         raise FileNotFoundError(f"no accepted locked selection for {trade_date}")
     _, path, snapshot = max(matches, key=lambda item: item[0])
+    if snapshot.schema_version != "selection_gates.v2":
+        raise ValueError(
+            "locked selection uses an obsolete schema without directional volume"
+        )
     frame = pl.read_parquet(
         path,
         columns=[
@@ -79,6 +83,7 @@ def load_locked_selection(
             "selection_rank",
             "pass_gate",
             "rvol",
+            "directional_volume_confirmed",
             "price",
             "adv_usd",
             "atr_pct",
@@ -93,6 +98,10 @@ def load_locked_selection(
         raise ValueError("locked selection contains duplicate symbols")
     if survivors.filter(pl.col("rvol") <= min_rvol).height:
         raise ValueError("locked selection contains RVOL at or below the strict threshold")
+    if survivors.filter(~pl.col("directional_volume_confirmed")).height:
+        raise ValueError(
+            "locked selection contains a survivor without directional volume confirmation"
+        )
     candidates = tuple(
         LockedCandidate.model_validate(
             {

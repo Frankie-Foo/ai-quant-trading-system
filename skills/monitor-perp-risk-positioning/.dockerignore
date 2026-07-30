@@ -1,0 +1,13 @@
+.git
+.gitignore
+.venv*
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+agents
+references
+tests
+SKILL.md
+compose.yaml

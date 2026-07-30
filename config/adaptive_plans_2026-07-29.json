@@ -1,0 +1,75 @@
+{
+  "schema_version": "adaptive_plan_config.v1",
+  "poll_seconds": 15,
+  "plans": [
+    {
+      "baseline": {
+        "plan_id": "plan-20260729-MANH",
+        "symbol": "MANH",
+        "trade_date": "2026-07-29",
+        "mode": "catalyst",
+        "entry_window_end_utc": "2026-07-29T16:00:00+00:00",
+        "force_exit_utc": "2026-07-29T17:00:00+00:00",
+        "hard_stop": 188.75,
+        "max_risk_dollars": 300.0,
+        "max_notional": 20000.0,
+        "probe_fraction": 0.25,
+        "max_spread_ratio": 0.002,
+        "soft_cooldown_seconds": 180,
+        "max_soft_revisions": 3
+      },
+      "evidence": {
+        "benchmark_symbol": "QQQ",
+        "sector_symbol": "IGV",
+        "catalyst_score": 0.8688629909644635,
+        "provenance": "kernel.universe.selection_gates-20260729T132033Z-ada827e2ecdb:MANH|score=0.7*earnings_strength_confirmed+0.3*earnings_intensity_score/100|owner-approved-20260729-plan"
+      }
+    },
+    {
+      "baseline": {
+        "plan_id": "plan-20260729-STX",
+        "symbol": "STX",
+        "trade_date": "2026-07-29",
+        "mode": "catalyst",
+        "entry_window_end_utc": "2026-07-29T16:00:00+00:00",
+        "force_exit_utc": "2026-07-29T17:00:00+00:00",
+        "hard_stop": 786.4,
+        "max_risk_dollars": 300.0,
+        "max_notional": 20000.0,
+        "probe_fraction": 0.25,
+        "max_spread_ratio": 0.0015,
+        "soft_cooldown_seconds": 180,
+        "max_soft_revisions": 3
+      },
+      "evidence": {
+        "benchmark_symbol": "QQQ",
+        "sector_symbol": "SMH",
+        "catalyst_score": 0.8918751793400287,
+        "provenance": "kernel.universe.selection_gates-20260729T132033Z-ada827e2ecdb:STX|score=0.7*earnings_strength_confirmed+0.3*earnings_intensity_score/100|owner-approved-20260729-plan"
+      }
+    },
+    {
+      "baseline": {
+        "plan_id": "plan-20260729-EXLS",
+        "symbol": "EXLS",
+        "trade_date": "2026-07-29",
+        "mode": "catalyst",
+        "entry_window_end_utc": "2026-07-29T16:00:00+00:00",
+        "force_exit_utc": "2026-07-29T17:00:00+00:00",
+        "hard_stop": 30.98,
+        "max_risk_dollars": 300.0,
+        "max_notional": 10000.0,
+        "probe_fraction": 0.25,
+        "max_spread_ratio": 0.0025,
+        "soft_cooldown_seconds": 180,
+        "max_soft_revisions": 3
+      },
+      "evidence": {
+        "benchmark_symbol": "SPY",
+        "sector_symbol": "XLK",
+        "catalyst_score": 0.8835378896165966,
+        "provenance": "kernel.universe.selection_gates-20260729T132033Z-ada827e2ecdb:EXLS|score=0.7*earnings_strength_confirmed+0.3*earnings_intensity_score/100|owner-approved-20260729-plan"
+      }
+    }
+  ]
+}

@@ -35,8 +35,10 @@ Provider calls and every MCP tool request/result are retained in the audit fact 
 
 ## Deliberately unavailable today
 
-Order imbalance/VPOC, FINRA short-volume, and materialized factor-health snapshots do not
-yet have verified deterministic sources, so those tools return `N/A`. The current local
+Order imbalance/VPOC and related SIP features are now deterministic shadow snapshots.
+The order-flow Agent reads them when the target-date snapshot exists and degrades every
+metric to `N/A` when it does not. FINRA short-volume and materialized factor-health
+snapshots still lack verified sources, so those tools remain `N/A`. The current local
 environment also has no durable Paper order ledger or barrier-event table, so the real
 postmarket discipline report correctly records `incomplete_evidence`.
 
@@ -48,7 +50,7 @@ They must be supplied before execution-gap or cost-drift lessons can be consider
 - a PostgreSQL DSN for the production audit store, or acceptance of the SQLite fallback;
 - the deployed Paper order-ledger path and persisted barrier events;
 - a verified FINRA daily short-volume source if that role is to move beyond `N/A`;
-- an order-flow feed or an explicit decision to keep that role disabled;
+- deployment of the versioned cloud SIP trades route and a valid licensed SIP entitlement;
 - a stable private anonymization salt;
 - the already configured DeepSeek key in the server environment;
 - external alert acknowledgement, data-license evidence, credential rotation, and the

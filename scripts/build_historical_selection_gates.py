@@ -289,9 +289,20 @@ def main() -> None:
                 raise ValueError("PIT index previous_session is invalid")
 
             potential = (
-                rvol_frame.filter(
+                rvol_frame.join(
+                    daily.select("symbol", "price"),
+                    on="symbol",
+                    how="left",
+                    validate="1:1",
+                )
+                .filter(
                     (pl.col("availability") == "available")
                     & (pl.col("rvol") > cfg.universe.min_rvol)
+                    & pl.col("premarket_price_confirmation")
+                    & (
+                        (pl.col("premarket_close") / pl.col("price") - 1)
+                        > cfg.universe.min_premarket_gap_return
+                    )
                 )["symbol"]
                 .sort()
                 .to_list()
@@ -365,7 +376,7 @@ def main() -> None:
                 output,
                 root=args.data_root,
                 source=GATE_SOURCE,
-                schema_version="selection_gates.v1",
+                schema_version="selection_gates.v2",
                 checks=checks,
                 parent_snapshot_ids=(
                     candidate_snapshot.dataset_id,

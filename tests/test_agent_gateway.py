@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -40,6 +41,7 @@ from research.monthly_evolution_agents import (
 )
 from research.pdca_agents import LessonDraft, PostmarketLessonReview, materialize_lessons
 from scripts.run_monthly_evolution import _build_package
+from scripts.run_structured_pdca import _pdca_fact_package
 
 FUTURE_SESSION = date(2030, 7, 1)
 
@@ -165,6 +167,170 @@ def test_role_policy_and_unavailable_features_are_fail_closed(
     audits = gateway.store.query(StoreQuery(entity=QueryEntity.TOOL_AUDIT, limit=10))
     assert len(audits) == 2
     assert {row["success"] for row in audits} == {0, 1}
+
+
+def test_pdca_can_read_anonymized_intraday_selection_postmortem(
+    gateway: AgentGatewayService,
+    synthetic_project: Path,
+) -> None:
+    persist_snapshot(
+        pl.DataFrame(
+            {
+                "session_date": [FUTURE_SESSION],
+                "symbol": ["MISS"],
+                "opportunity_rank": [1],
+                "decision_outcome": ["missed_detectable_opportunity"],
+                "root_cause": ["factor_gap"],
+                "pattern_key": ["factor_gap:price_order_flow_or_sector"],
+                "research_action": ["test_price_order_flow_or_sector_factor_in_sandbox"],
+                "research_eligible": [True],
+                "production_change_allowed": [False],
+                "close_return": [0.08],
+                "provenance": ["synthetic.postmortem"],
+            }
+        ),
+        root=synthetic_project / "data",
+        source="research.intraday_selection_postmortem",
+        schema_version="intraday_selection_postmortem.v1",
+        checks=(),
+    )
+
+    result = gateway.postgres_query(
+        agent_name="pdca",
+        query=StoreQuery(
+            entity=QueryEntity.INTRADAY_SELECTION_POSTMORTEMS,
+            trade_date=FUTURE_SESSION,
+        ),
+    )
+
+    assert result["availability"] == "available"
+    assert result["snapshot_ids"]
+    rows = result["data"]
+    assert isinstance(rows, list)
+    assert len(rows) == 1
+    row = _object_dict(rows[0])
+    assert "symbol" not in row
+    assert str(row["case_id"]).startswith("case-")
+    assert row["root_cause"] == "factor_gap"
+    facts = row["facts"]
+    assert isinstance(facts, list)
+    fact_by_name = {
+        str(_object_dict(fact)["name"]): _object_dict(fact) for fact in facts
+    }
+    assert fact_by_name["production_change_allowed"]["value"] is False
+
+    prior_session = date(2030, 6, 28)
+    persist_snapshot(
+        pl.DataFrame(
+            {
+                "session_date": [prior_session],
+                "symbol": ["OTHER"],
+                "opportunity_rank": [1],
+                "decision_outcome": ["intentional_rejection"],
+                "root_cause": ["intentional_gate"],
+                "pattern_key": ["intentional_gate:rvol_below_or_equal_min"],
+                "research_action": ["counterfactual_test_without_mutating_hard_guardrail"],
+                "research_eligible": [True],
+                "production_change_allowed": [False],
+                "close_return": [0.06],
+                "provenance": ["synthetic.postmortem"],
+            }
+        ),
+        root=synthetic_project / "data",
+        source="research.intraday_selection_postmortem",
+        schema_version="intraday_selection_postmortem.v1",
+        checks=(),
+    )
+    history = gateway.postgres_query(
+        agent_name="pdca",
+        query=StoreQuery(
+            entity=QueryEntity.INTRADAY_SELECTION_POSTMORTEMS,
+            limit=200,
+        ),
+    )
+    history_rows = history["data"]
+    history_snapshot_ids = cast(list[object], history["snapshot_ids"])
+    assert isinstance(history_rows, list)
+    assert len(history_rows) == 2
+    assert len(history_snapshot_ids) == 2
+
+    persist_snapshot(
+        pl.DataFrame(
+            {
+                "session_date": [FUTURE_SESSION],
+                "symbol": ["ABCD"],
+                "signal_triggered": [True],
+                "outcome_label": ["tp"],
+                "gross_return": [0.03],
+                "episode_provenance": ["synthetic.episode"],
+            }
+        ),
+        root=synthetic_project / "data",
+        source="research.trading_episodes",
+        schema_version="trading_episode.v1",
+        checks=(),
+    )
+    fact_package, metric_index, snapshot_ids = _pdca_fact_package(
+        gateway,
+        FUTURE_SESSION,
+    )
+    package = json.loads(fact_package)
+
+    assert len(package["anonymous_cases"]) == 1
+    assert len(package["missed_opportunities"]) == 1
+    assert package["opportunity_availability"] == "available"
+    assert any(key.startswith("opportunity:case-") for key in metric_index)
+    assert len(snapshot_ids) == 2
+
+
+def test_order_flow_agent_reads_materialized_shadow_snapshot(
+    gateway: AgentGatewayService,
+    synthetic_project: Path,
+) -> None:
+    persist_snapshot(
+        pl.DataFrame(
+            {
+                "symbol": ["ABCD"],
+                "session_date": [FUTURE_SESSION],
+                "availability": ["available"],
+                "data_cutoff_utc": [
+                    datetime(2099, 1, 5, 14, 0, tzinfo=UTC)
+                ],
+                "order_imbalance": [0.4],
+                "vpoc": [12.34],
+                "buy_sell_pressure_ratio": [2.5],
+                "quote_size_imbalance": [0.2],
+                "microprice": [12.35],
+                "spread_bps": [4.0],
+                "order_flow_confirmation_score": [68.0],
+                "order_flow_provenance": ["test.sip|tick_rule.v1"],
+                "production_eligible": [False],
+            }
+        ).with_columns(
+            pl.col("data_cutoff_utc").cast(pl.Datetime("ns", "UTC"))
+        ),
+        root=synthetic_project / "data",
+        source="kernel.features.order_flow_shadow",
+        schema_version="order_flow_shadow.v1",
+        checks=(),
+    )
+
+    result = gateway.features_order_flow(
+        agent_name="order-flow",
+        trade_date=FUTURE_SESSION,
+        symbol="ABCD",
+    )
+
+    assert result["availability"] == "available"
+    assert result["snapshot_ids"]
+    facts = _object_dict(result["data"])["facts"]
+    assert isinstance(facts, list)
+    by_name = {
+        str(_object_dict(fact)["name"]): _object_dict(fact) for fact in facts
+    }
+    assert by_name["order_imbalance"]["value"] == 0.4
+    assert by_name["order_flow_confirmation_score"]["value"] == 68.0
+    assert all(fact["provenance"] == "test.sip|tick_rule.v1" for fact in by_name.values())
 
 
 def test_server_process_identity_binding_is_enforced(

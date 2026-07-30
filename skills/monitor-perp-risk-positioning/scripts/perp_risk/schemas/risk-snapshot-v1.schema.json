@@ -1,0 +1,485 @@
+{
+  "$defs": {
+    "ComponentEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "enum": [
+            "price_trend",
+            "price_oi",
+            "funding",
+            "signed_flow",
+            "liquidation",
+            "basis"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "weight": {
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Weight",
+          "type": "number"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": -100,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Score"
+        },
+        "provenance": {
+          "title": "Provenance",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "weight",
+        "provenance"
+      ],
+      "title": "ComponentEvidence",
+      "type": "object"
+    },
+    "ProviderStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "venue": {
+          "minLength": 1,
+          "title": "Venue",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "partial",
+            "unavailable"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "observation_count": {
+          "minimum": 0,
+          "title": "Observation Count",
+          "type": "integer"
+        },
+        "warnings": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "venue",
+        "status",
+        "observation_count"
+      ],
+      "title": "ProviderStatus",
+      "type": "object"
+    },
+    "Regime": {
+      "enum": [
+        "risk_on",
+        "neutral",
+        "risk_off",
+        "conflicted",
+        "unavailable"
+      ],
+      "title": "Regime",
+      "type": "string"
+    },
+    "Scope": {
+      "enum": [
+        "market",
+        "sector",
+        "custom"
+      ],
+      "title": "Scope",
+      "type": "string"
+    },
+    "SourceAssessment": {
+      "additionalProperties": false,
+      "properties": {
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        },
+        "target_id": {
+          "title": "Target Id",
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "venue": {
+          "title": "Venue",
+          "type": "string"
+        },
+        "market": {
+          "title": "Market",
+          "type": "string"
+        },
+        "instrument": {
+          "title": "Instrument",
+          "type": "string"
+        },
+        "availability": {
+          "enum": [
+            "available",
+            "missing_observation",
+            "quality_rejected",
+            "insufficient_evidence"
+          ],
+          "title": "Availability",
+          "type": "string"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": -100,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Score"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "price_oi_regime": {
+          "title": "Price Oi Regime",
+          "type": "string"
+        },
+        "components": {
+          "items": {
+            "$ref": "#/$defs/ComponentEvidence"
+          },
+          "title": "Components",
+          "type": "array"
+        },
+        "quality_reasons": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Quality Reasons",
+          "type": "array"
+        },
+        "evidence_warnings": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Warnings",
+          "type": "array"
+        },
+        "observed_at_utc": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observed At Utc"
+        },
+        "previous_observed_at_utc": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Previous Observed At Utc"
+        },
+        "provenance": {
+          "title": "Provenance",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "target_id",
+        "scope",
+        "venue",
+        "market",
+        "instrument",
+        "availability",
+        "confidence",
+        "price_oi_regime",
+        "components",
+        "provenance"
+      ],
+      "title": "SourceAssessment",
+      "type": "object"
+    },
+    "TargetAssessment": {
+      "additionalProperties": false,
+      "properties": {
+        "target_id": {
+          "title": "Target Id",
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "regime": {
+          "$ref": "#/$defs/Regime"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": -100,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Score"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "coverage": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Coverage",
+          "type": "number"
+        },
+        "liquidation_coverage": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Liquidation Coverage",
+          "type": "number"
+        },
+        "disagreement": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Disagreement"
+        },
+        "available_sources": {
+          "minimum": 0,
+          "title": "Available Sources",
+          "type": "integer"
+        },
+        "configured_sources": {
+          "minimum": 0,
+          "title": "Configured Sources",
+          "type": "integer"
+        },
+        "available_venues": {
+          "minimum": 0,
+          "title": "Available Venues",
+          "type": "integer"
+        },
+        "venue_conflict": {
+          "default": false,
+          "title": "Venue Conflict",
+          "type": "boolean"
+        },
+        "boost_eligible": {
+          "default": false,
+          "title": "Boost Eligible",
+          "type": "boolean"
+        },
+        "candidate_multiplier": {
+          "maximum": 1.2,
+          "minimum": 0,
+          "title": "Candidate Multiplier",
+          "type": "number"
+        },
+        "effective_multiplier": {
+          "maximum": 1.2,
+          "minimum": 0,
+          "title": "Effective Multiplier",
+          "type": "number"
+        },
+        "pending_windows": {
+          "minimum": 0,
+          "title": "Pending Windows",
+          "type": "integer"
+        },
+        "confirmation_windows": {
+          "exclusiveMinimum": 0,
+          "title": "Confirmation Windows",
+          "type": "integer"
+        },
+        "reasons": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Reasons",
+          "type": "array"
+        },
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/SourceAssessment"
+          },
+          "title": "Sources",
+          "type": "array"
+        },
+        "asof_utc": {
+          "format": "date-time",
+          "title": "Asof Utc",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_id",
+        "scope",
+        "regime",
+        "confidence",
+        "coverage",
+        "liquidation_coverage",
+        "available_sources",
+        "configured_sources",
+        "available_venues",
+        "candidate_multiplier",
+        "effective_multiplier",
+        "pending_windows",
+        "confirmation_windows",
+        "sources",
+        "asof_utc"
+      ],
+      "title": "TargetAssessment",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "perp_risk_snapshot.v1",
+      "default": "perp_risk_snapshot.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "skill_version": {
+      "title": "Skill Version",
+      "type": "string"
+    },
+    "snapshot_id": {
+      "title": "Snapshot Id",
+      "type": "string"
+    },
+    "asof_utc": {
+      "format": "date-time",
+      "title": "Asof Utc",
+      "type": "string"
+    },
+    "data_cutoff_utc": {
+      "format": "date-time",
+      "title": "Data Cutoff Utc",
+      "type": "string"
+    },
+    "config_hash": {
+      "title": "Config Hash",
+      "type": "string"
+    },
+    "actionable": {
+      "title": "Actionable",
+      "type": "boolean"
+    },
+    "session_state": {
+      "enum": [
+        "actionable",
+        "research_only",
+        "market_closed"
+      ],
+      "title": "Session State",
+      "type": "string"
+    },
+    "provider_status": {
+      "items": {
+        "$ref": "#/$defs/ProviderStatus"
+      },
+      "title": "Provider Status",
+      "type": "array"
+    },
+    "targets": {
+      "items": {
+        "$ref": "#/$defs/TargetAssessment"
+      },
+      "title": "Targets",
+      "type": "array"
+    },
+    "warnings": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    },
+    "production_eligible": {
+      "const": false,
+      "title": "Production Eligible",
+      "type": "boolean"
+    },
+    "execution_eligible": {
+      "const": false,
+      "title": "Execution Eligible",
+      "type": "boolean"
+    },
+    "orders_submitted": {
+      "const": 0,
+      "title": "Orders Submitted",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "skill_version",
+    "snapshot_id",
+    "asof_utc",
+    "data_cutoff_utc",
+    "config_hash",
+    "actionable",
+    "session_state",
+    "provider_status",
+    "targets",
+    "production_eligible",
+    "execution_eligible",
+    "orders_submitted"
+  ],
+  "title": "RiskSnapshot",
+  "type": "object"
+}

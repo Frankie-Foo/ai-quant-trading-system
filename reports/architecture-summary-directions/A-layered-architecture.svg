@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">方向 A：量化系统分层架构</title>
+  <desc id="desc">从数据证据层到交易执行层、确定性策略内核、研究进化慢环和人机协作应用层的五层架构图。</desc>
+  <!--
+    假设：
+    - 用于管理层汇报，优先回答“系统由什么组成、每层负责什么”。
+    - 只画仓库已实现或明确存在的边界；云端多策略平台标为外部依赖。
+    - 多 Agent 是慢环研究角色，不是第二套交易引擎。
+  -->
+  <defs>
+    <style>
+      .bg { fill:#f3f0e7; }
+      .ink { fill:#17342e; }
+      .muted { fill:#60736e; }
+      .micro { font:700 12px "Cascadia Code","Microsoft YaHei UI",monospace; letter-spacing:2px; }
+      .title { font:700 50px "Noto Serif SC","Microsoft YaHei UI",serif; letter-spacing:-2px; }
+      .subtitle { font:400 18px "Microsoft YaHei UI",sans-serif; }
+      .layer-name { font:700 23px "Noto Serif SC","Microsoft YaHei UI",serif; }
+      .node-title { font:700 16px "Microsoft YaHei UI",sans-serif; }
+      .node-copy { font:400 12px "Microsoft YaHei UI",sans-serif; }
+      .tag { font:700 11px "Cascadia Code","Microsoft YaHei UI",monospace; }
+      .line { stroke:#759088; stroke-width:1; }
+      .arrow { stroke:#d95037; stroke-width:2; fill:none; marker-end:url(#arrow); }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#d95037"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1600" height="900"/>
+  <path d="M0 0H1600V900H0Z" fill="url(#grid)" opacity=".35"/>
+  <defs>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M24 0H0V24" fill="none" stroke="#789087" stroke-width=".45"/>
+    </pattern>
+  </defs>
+
+  <text x="56" y="53" class="micro" fill="#d95037">DIRECTION A / LAYERED SYSTEM MAP</text>
+  <text x="56" y="112" class="title ink">AI 量化投资系统 · 五层架构</text>
+  <text x="56" y="145" class="subtitle muted">一个确定性交易内核，外加受治理的多 Agent 研究慢环；所有能力共用可审计证据链。</text>
+
+  <!-- outer operation rail -->
+  <rect x="1334" y="188" width="210" height="623" fill="#13201d"/>
+  <text x="1360" y="224" class="micro" fill="#e25b3f">CROSS-CUTTING</text>
+  <text x="1360" y="260" class="layer-name" fill="#f6f2e8">生产治理</text>
+  <line x1="1360" y1="282" x2="1518" y2="282" stroke="#52625e"/>
+  <text x="1360" y="317" class="node-title" fill="#f6f2e8">可观测性</text>
+  <text x="1360" y="340" class="node-copy" fill="#aeb9b5">trace / latency / reject reason</text>
+  <text x="1360" y="382" class="node-title" fill="#f6f2e8">安全演练</text>
+  <text x="1360" y="405" class="node-copy" fill="#aeb9b5">kill switch / restore drill</text>
+  <text x="1360" y="447" class="node-title" fill="#f6f2e8">备份恢复</text>
+  <text x="1360" y="470" class="node-copy" fill="#aeb9b5">SQLite + immutable snapshots</text>
+  <text x="1360" y="512" class="node-title" fill="#f6f2e8">成熟度闸门</text>
+  <text x="1360" y="535" class="node-copy" fill="#aeb9b5">research → paper → live</text>
+  <rect x="1360" y="574" width="158" height="74" fill="#d95037"/>
+  <text x="1377" y="603" class="tag" fill="#13201d">CURRENT STATE</text>
+  <text x="1377" y="631" class="node-title" fill="#13201d">RESEARCH-ONLY</text>
+  <text x="1360" y="690" class="node-copy" fill="#aeb9b5">Broker writes = false</text>
+  <text x="1360" y="714" class="node-copy" fill="#aeb9b5">Kill switch = true</text>
+  <text x="1360" y="738" class="node-copy" fill="#aeb9b5">Long-only invariant</text>
+
+  <!-- layer 5 -->
+  <g>
+    <rect x="56" y="188" width="1248" height="102" fill="#fffdf6" stroke="#607e76"/>
+    <rect x="56" y="188" width="190" height="102" fill="#d95037"/>
+    <text x="75" y="222" class="tag" fill="#18231f">L5 / APPLICATION</text>
+    <text x="75" y="258" class="layer-name" fill="#18231f">人机协作层</text>
+    <text x="274" y="224" class="node-title ink">Agent Gateway</text>
+    <text x="274" y="248" class="node-copy muted">MCP 最小权限工具、Fact 来源、审计日志</text>
+    <text x="550" y="224" class="node-title ink">8 个角色边界</text>
+    <text x="550" y="248" class="node-copy muted">Commander / Risk / Factor / Order Flow</text>
+    <text x="550" y="269" class="node-copy muted">Short Risk / Sentiment / Discipline / PDCA</text>
+    <text x="1018" y="224" class="node-title ink">调度与插件</text>
+    <text x="1018" y="248" class="node-copy muted">Windows / systemd / cron · one-shot jobs</text>
+    <text x="274" y="273" class="tag" fill="#d95037">只写研究产物，不写 Broker</text>
+  </g>
+
+  <!-- layer 4 -->
+  <g>
+    <rect x="56" y="304" width="1248" height="112" fill="#e9ded2" stroke="#607e76"/>
+    <rect x="56" y="304" width="190" height="112" fill="#233f38"/>
+    <text x="75" y="338" class="tag" fill="#f4efe5">L4 / SLOW LOOP</text>
+    <text x="75" y="374" class="layer-name" fill="#f4efe5">研究进化层</text>
+    <text x="274" y="340" class="node-title ink">Program Review</text>
+    <text x="274" y="365" class="node-copy muted">先由程序核对样本、成本、缺口和标签</text>
+    <text x="526" y="340" class="node-title ink">Research + Critic</text>
+    <text x="526" y="365" class="node-copy muted">提出可证伪假设，并专门反驳泄漏与过拟合</text>
+    <text x="824" y="340" class="node-title ink">PDCA / Lessons</text>
+    <text x="824" y="365" class="node-copy muted">匿名经验、纪律报告、研究草案</text>
+    <text x="1057" y="340" class="node-title ink">Purged OOS Sandbox</text>
+    <text x="1057" y="365" class="node-copy muted">Champion / Challenger · 第五折留出</text>
+    <text x="274" y="396" class="tag" fill="#a93c28">production_eligible = false · 人工审批不可绕过</text>
+  </g>
+
+  <!-- layer 3 -->
+  <g>
+    <rect x="56" y="430" width="1248" height="132" fill="#dfe9e4" stroke="#607e76"/>
+    <rect x="56" y="430" width="190" height="132" fill="#2b6b5b"/>
+    <text x="75" y="464" class="tag" fill="#f4efe5">L3 / FAST LOOP</text>
+    <text x="75" y="500" class="layer-name" fill="#f4efe5">确定性内核</text>
+    <text x="274" y="468" class="node-title ink">催化剂解析</text>
+    <text x="274" y="492" class="node-copy muted">Actual / Forward / Raise</text>
+    <text x="466" y="468" class="node-title ink">PIT 选股硬闸</text>
+    <text x="466" y="492" class="node-copy muted">RVOL + 方向 + 市值 + 停牌 + LULD</text>
+    <text x="734" y="468" class="node-title ink">开盘与技术确认</text>
+    <text x="734" y="492" class="node-copy muted">ORB-5 entry · long-green hold · 1/5/15m</text>
+    <text x="1030" y="468" class="node-title ink">仓位与退出</text>
+    <text x="1030" y="492" class="node-copy muted">账户感知 sizing · stop / target / time stop</text>
+    <path d="M277 526H1217" class="arrow"/>
+    <text x="274" y="548" class="tag" fill="#2b6b5b">同一 point-in-time 函数用于离线与在线 · 决策时不等待远程 LLM</text>
+  </g>
+
+  <!-- layer 2 -->
+  <g>
+    <rect x="56" y="576" width="1248" height="110" fill="#fffdf6" stroke="#607e76"/>
+    <rect x="56" y="576" width="190" height="110" fill="#c89b38"/>
+    <text x="75" y="610" class="tag" fill="#1a2a25">L2 / TRADING</text>
+    <text x="75" y="646" class="layer-name" fill="#1a2a25">交易执行层</text>
+    <text x="274" y="612" class="node-title ink">Long-only TradePlan</text>
+    <text x="274" y="637" class="node-copy muted">不可变 selection/event ID · 非空止损/止盈/时限</text>
+    <text x="600" y="612" class="node-title ink">P0 → P1 → P2 Guardrails</text>
+    <text x="600" y="637" class="node-copy muted">硬闸优先，模型分数不可覆盖</text>
+    <text x="929" y="612" class="node-title ink">OMS / Reconcile / Recovery</text>
+    <text x="929" y="637" class="node-copy muted">幂等 client_order_id · 重启不重复下单</text>
+    <text x="274" y="668" class="tag" fill="#a4690d">三重写保护：无 Alpaca Key + write=false + kill switch=true</text>
+  </g>
+
+  <!-- layer 1 -->
+  <g>
+    <rect x="56" y="700" width="1248" height="111" fill="#d7dfdc" stroke="#607e76"/>
+    <rect x="56" y="700" width="190" height="111" fill="#18332d"/>
+    <text x="75" y="734" class="tag" fill="#f4efe5">L1 / EVIDENCE</text>
+    <text x="75" y="770" class="layer-name" fill="#f4efe5">数据证据层</text>
+    <text x="274" y="736" class="node-title ink">外部来源</text>
+    <text x="274" y="760" class="node-copy muted">云端 SIP/SSE · Massive · SEC · Nasdaq · News</text>
+    <text x="572" y="736" class="node-title ink">不可变快照</text>
+    <text x="572" y="760" class="node-copy muted">hash · schema · UTC asof · parents · provenance</text>
+    <text x="884" y="736" class="node-title ink">质量与隔离</text>
+    <text x="884" y="760" class="node-copy muted">四道检查 · critical fail quarantine</text>
+    <text x="1108" y="736" class="node-title ink">本地缓存</text>
+    <text x="1108" y="760" class="node-copy muted">PIT features · SIP store · SQLite WAL</text>
+    <text x="274" y="792" class="tag" fill="#2b6b5b">缺失/停牌分钟不填充 · 云端故障降级为 N/A，不切换社区数据</text>
+  </g>
+
+  <text x="56" y="855" class="node-copy muted">汇报结论：模块化单体优先；快环确定性、慢环可质疑、执行可追溯、生产晋级必须有人类授权。</text>
+  <text x="1544" y="855" text-anchor="end" class="micro" fill="#d95037">RESEARCH-ONLY / LONG-ONLY</text>
+</svg>

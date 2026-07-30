@@ -219,6 +219,7 @@ def _prepared_checks(
         pl.col("eligible")
         & (pl.col("event_type") == "news")
         & (pl.col("word_count") < 25)
+        & ~pl.col("earnings_structured")
     ).height
     duplicate_eligible = frame.filter(pl.col("eligible")).select(
         pl.col("content_fingerprint").is_duplicated().sum()
@@ -238,7 +239,7 @@ def _prepared_checks(
             QualitySeverity.CRITICAL,
             invalid_broad + invalid_short == 0,
             invalid_broad + invalid_short,
-            "0 eligible broad or short news items",
+            "0 eligible broad or unstructured short news items",
             provenance,
         ),
         _check(
@@ -458,7 +459,7 @@ def main() -> None:
         prepared,
         root=args.data_root,
         source="kernel.catalysts.prepared",
-        schema_version="prepared_catalysts.v1",
+        schema_version="prepared_catalysts.v2",
         checks=prepared_checks,
         parent_snapshot_ids=(
             alpaca_snapshot.dataset_id,
@@ -490,7 +491,7 @@ def main() -> None:
         candidates,
         root=args.data_root,
         source=candidate_source,
-        schema_version="overnight_catalyst_candidates.v1",
+        schema_version="overnight_catalyst_candidates.v2",
         checks=candidate_checks,
         parent_snapshot_ids=tuple(candidate_parents),
     )

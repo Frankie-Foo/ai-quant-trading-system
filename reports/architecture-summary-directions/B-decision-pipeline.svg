@@ -1,0 +1,153 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">方向 B：从数据到进化的决策流水线</title>
+  <desc id="desc">展示盘前、盘中、盘后和研究晋级的端到端因果流程，以及每一步的安全闸门。</desc>
+  <!-- 假设：用于讲“系统每天如何运转”，流程优先于组件归属。 -->
+  <defs>
+    <style>
+      .bg { fill:#111715; }
+      .ink { fill:#f5f1e8; }
+      .muted { fill:#9ba9a4; }
+      .micro { font:700 12px "Cascadia Code","Microsoft YaHei UI",monospace; letter-spacing:2px; }
+      .title { font:700 52px "Bahnschrift","Microsoft YaHei UI",sans-serif; letter-spacing:-2px; }
+      .subtitle { font:400 18px "Microsoft YaHei UI",sans-serif; }
+      .phase { font:700 13px "Cascadia Code","Microsoft YaHei UI",monospace; letter-spacing:1px; }
+      .node-title { font:700 17px "Microsoft YaHei UI",sans-serif; }
+      .node-copy { font:400 12px "Microsoft YaHei UI",sans-serif; }
+      .tag { font:700 10px "Cascadia Code","Microsoft YaHei UI",monospace; }
+      .arrow { stroke:#ef633e; stroke-width:2.5; fill:none; marker-end:url(#arrow); }
+      .line { stroke:#53625d; stroke-width:1; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#ef633e"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="1600" height="900"/>
+  <circle cx="1240" cy="100" r="280" fill="#6e2a1c" opacity=".16"/>
+
+  <text x="54" y="54" class="micro" fill="#ef633e">DIRECTION B / CAUSAL OPERATING FLOW</text>
+  <text x="54" y="114" class="title ink">从数据，到交易，再到下一轮验证</text>
+  <text x="54" y="148" class="subtitle muted">一天的四个阶段，十一道不可跳过的证据节点；Agent 只出现在收盘后的慢环。</text>
+
+  <!-- phase labels -->
+  <rect x="54" y="188" width="360" height="38" fill="#264d43"/>
+  <text x="72" y="213" class="phase ink">01 / 盘前选择 PREMARKET</text>
+  <rect x="428" y="188" width="530" height="38" fill="#2f6e5d"/>
+  <text x="446" y="213" class="phase ink">02 / 盘中决策 INTRADAY</text>
+  <rect x="972" y="188" width="574" height="38" fill="#963d2b"/>
+  <text x="990" y="213" class="phase ink">03–04 / 盘后复盘与研究晋级</text>
+
+  <!-- main pipeline -->
+  <g>
+    <rect x="54" y="255" width="148" height="180" fill="#18231f" stroke="#53625d"/>
+    <text x="72" y="286" class="tag" fill="#7fb3a4">EVIDENCE</text>
+    <text x="72" y="323" class="node-title ink">数据接入</text>
+    <text x="72" y="350" class="node-copy muted">Cloud SIP/SSE</text>
+    <text x="72" y="372" class="node-copy muted">Massive / SEC</text>
+    <text x="72" y="394" class="node-copy muted">News / Reference</text>
+    <text x="72" y="420" class="tag" fill="#ef633e">NO KEY IN AI</text>
+
+    <path d="M202 345H232" class="arrow"/>
+    <rect x="232" y="255" width="148" height="180" fill="#18231f" stroke="#53625d"/>
+    <text x="250" y="286" class="tag" fill="#7fb3a4">SNAPSHOT</text>
+    <text x="250" y="323" class="node-title ink">证据固化</text>
+    <text x="250" y="350" class="node-copy muted">UTC asof</text>
+    <text x="250" y="372" class="node-copy muted">hash + lineage</text>
+    <text x="250" y="394" class="node-copy muted">quality / quarantine</text>
+    <text x="250" y="420" class="tag" fill="#ef633e">FAIL CLOSED</text>
+
+    <path d="M380 345H410" class="arrow"/>
+    <rect x="410" y="255" width="168" height="180" fill="#1a2925" stroke="#53625d"/>
+    <text x="428" y="286" class="tag" fill="#7fb3a4">SELECT</text>
+    <text x="428" y="323" class="node-title ink">盘前锁定池</text>
+    <text x="428" y="350" class="node-copy muted">催化剂强度</text>
+    <text x="428" y="372" class="node-copy muted">RVOL + 方向</text>
+    <text x="428" y="394" class="node-copy muted">市值 / 停牌 / LULD</text>
+    <text x="428" y="420" class="tag" fill="#ef633e">RANK + PROVENANCE</text>
+
+    <path d="M578 345H608" class="arrow"/>
+    <rect x="608" y="255" width="150" height="180" fill="#20342f" stroke="#53625d"/>
+    <text x="626" y="286" class="tag" fill="#7fb3a4">TRIGGER</text>
+    <text x="626" y="323" class="node-title ink">ORB-5</text>
+    <text x="626" y="350" class="node-copy muted">完成 K 线</text>
+    <text x="626" y="372" class="node-copy muted">突破开盘区间</text>
+    <text x="626" y="394" class="node-copy muted">不读未来 fill bar</text>
+    <text x="626" y="420" class="tag" fill="#ef633e">CAUSAL INTENT</text>
+
+    <path d="M758 345H788" class="arrow"/>
+    <rect x="788" y="255" width="170" height="180" fill="#20342f" stroke="#53625d"/>
+    <text x="806" y="286" class="tag" fill="#7fb3a4">PLAN</text>
+    <text x="806" y="323" class="node-title ink">仓位与退出</text>
+    <text x="806" y="350" class="node-copy muted">NBBO / spread</text>
+    <text x="806" y="372" class="node-copy muted">账户感知 sizing</text>
+    <text x="806" y="394" class="node-copy muted">stop / target / time</text>
+    <text x="806" y="420" class="tag" fill="#ef633e">LONG-ONLY</text>
+
+    <path d="M958 345H988" class="arrow"/>
+    <rect x="988" y="255" width="170" height="180" fill="#2a2920" stroke="#826c42"/>
+    <text x="1006" y="286" class="tag" fill="#d6ad58">GUARD</text>
+    <text x="1006" y="323" class="node-title ink">P0 → P1 → P2</text>
+    <text x="1006" y="350" class="node-copy muted">硬闸优先</text>
+    <text x="1006" y="372" class="node-copy muted">write flag</text>
+    <text x="1006" y="394" class="node-copy muted">kill switch</text>
+    <text x="1006" y="420" class="tag" fill="#ef633e">ZERO BYPASS</text>
+
+    <path d="M1158 345H1188" class="arrow"/>
+    <rect x="1188" y="255" width="168" height="180" fill="#23201e" stroke="#8e5c4b"/>
+    <text x="1206" y="286" class="tag" fill="#ef633e">OMS</text>
+    <text x="1206" y="323" class="node-title ink">影子计划 / Paper</text>
+    <text x="1206" y="350" class="node-copy muted">idempotent order ID</text>
+    <text x="1206" y="372" class="node-copy muted">state transitions</text>
+    <text x="1206" y="394" class="node-copy muted">reconcile / recovery</text>
+    <text x="1206" y="420" class="tag" fill="#ef633e">CURRENT: NO WRITE</text>
+
+    <path d="M1356 345H1386" class="arrow"/>
+    <rect x="1386" y="255" width="160" height="180" fill="#2d1e19" stroke="#8e5c4b"/>
+    <text x="1404" y="286" class="tag" fill="#ef633e">EPISODE</text>
+    <text x="1404" y="323" class="node-title ink">交易剧集</text>
+    <text x="1404" y="350" class="node-copy muted">selection → signal</text>
+    <text x="1404" y="372" class="node-copy muted">cost / MAE / MFE</text>
+    <text x="1404" y="394" class="node-copy muted">censored paths</text>
+    <text x="1404" y="420" class="tag" fill="#ef633e">FROZEN FACTS</text>
+  </g>
+
+  <!-- postmarket descent -->
+  <path d="M1466 435V486H1180" class="arrow"/>
+  <rect x="1010" y="486" width="366" height="118" fill="#2a1d19" stroke="#9a4632"/>
+  <text x="1030" y="516" class="tag" fill="#ef633e">PROGRAM FIRST</text>
+  <text x="1030" y="548" class="node-title ink">确定性 Program Review</text>
+  <text x="1030" y="574" class="node-copy muted">样本数 · 缺失路径 · 成本覆盖 · 标签可用性 · 允许实验</text>
+
+  <path d="M1010 545H967" class="arrow"/>
+  <rect x="635" y="486" width="302" height="118" fill="#36221d" stroke="#9a4632"/>
+  <text x="655" y="516" class="tag" fill="#ef633e">AGENT PAIR</text>
+  <text x="655" y="548" class="node-title ink">Research 提案 + Critic 反驳</text>
+  <text x="655" y="574" class="node-copy muted">独立上下文 · 可证伪假设 · 泄漏/过拟合/因果/成本审查</text>
+
+  <path d="M635 545H592" class="arrow"/>
+  <rect x="262" y="486" width="300" height="118" fill="#28382f" stroke="#62786f"/>
+  <text x="282" y="516" class="tag" fill="#8eb4a7">SANDBOX</text>
+  <text x="282" y="548" class="node-title ink">Purged OOS / Champion–Challenger</text>
+  <text x="282" y="574" class="node-copy muted">4 折发现 + 第 5 折留出 · 净成本 · 稳定性 · 保留基线</text>
+
+  <path d="M262 545H219" class="arrow"/>
+  <rect x="54" y="486" width="135" height="118" fill="#4a241c" stroke="#ef633e"/>
+  <text x="72" y="516" class="tag" fill="#ef633e">GATE</text>
+  <text x="72" y="548" class="node-title ink">人工批准</text>
+  <text x="72" y="574" class="node-copy muted">永不自动晋级</text>
+
+  <!-- safety rails -->
+  <rect x="54" y="652" width="1492" height="138" fill="#171f1c" stroke="#53625d"/>
+  <text x="76" y="685" class="micro" fill="#d6ad58">FOUR NON-NEGOTIABLE RAILS</text>
+  <line x1="76" y1="706" x2="1520" y2="706" class="line"/>
+  <text x="76" y="744" class="node-title ink">① 点时数据</text>
+  <text x="76" y="770" class="node-copy muted">所有数字带 asof 与 provenance</text>
+  <text x="420" y="744" class="node-title ink">② 确定性快环</text>
+  <text x="420" y="770" class="node-copy muted">实时决策不调用 LLM、不等待远程特征</text>
+  <text x="810" y="744" class="node-title ink">③ 最小权限</text>
+  <text x="810" y="770" class="node-copy muted">Agent 无 Broker Key、无配置修改权</text>
+  <text x="1165" y="744" class="node-title ink">④ 可恢复执行</text>
+  <text x="1165" y="770" class="node-copy muted">OMS 幂等、恢复不重复下单</text>
+
+  <text x="54" y="850" class="node-copy muted">适合汇报：系统每天如何运行、每个决策为什么可追溯，以及 Agent 为什么不会越权交易。</text>
+  <text x="1546" y="850" text-anchor="end" class="micro" fill="#ef633e">DATA → DECISION → EVIDENCE → LEARNING</text>
+</svg>

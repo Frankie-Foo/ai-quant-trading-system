@@ -1,0 +1,18 @@
+services:
+  paper-executor:
+    command:
+      - --config
+      - /app/config/autonomous_paper.local.json
+      - --broker-mode
+      - direct
+      - --state-db
+      - /app/runs/autonomous-paper.sqlite3
+      - --sip-db
+      - /app/runs/autonomous-sip.sqlite3
+      - --notification-db
+      - /app/runs/autonomous-notifications.sqlite3
+      - --push-health
+      - /app/runs/runtime-agents/push-health.json
+      - --lock-file
+      - /app/runs/autonomous-paper.lock
+      - --arm-paper

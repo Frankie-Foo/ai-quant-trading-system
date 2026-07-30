@@ -10,17 +10,27 @@ from data_plane.quality import canonicalize_bars
 from kernel.features.momentum import premarket_window_utc, rvol
 
 
-def _bar(symbol: str, ts_utc: datetime, volume: int) -> dict[str, object]:
+def _bar(
+    symbol: str,
+    ts_utc: datetime,
+    volume: int,
+    *,
+    open_: float = 10.0,
+    high: float = 10.0,
+    low: float = 10.0,
+    close: float = 10.0,
+    vwap: float = 10.0,
+) -> dict[str, object]:
     return {
         "symbol": symbol,
         "ts_utc": ts_utc,
-        "open": 10.0,
-        "high": 10.0,
-        "low": 10.0,
-        "close": 10.0,
+        "open": open_,
+        "high": high,
+        "low": low,
+        "close": close,
         "volume": volume,
         "trade_count": 1,
-        "vwap": 10.0,
+        "vwap": vwap,
         "source": "test.fixture",
         "feed": "sip",
         "adjustment": "split_adjusted",
@@ -188,3 +198,85 @@ def test_rvol_only_outputs_explicit_locked_symbols() -> None:
         provenance="test.alpaca",
     )
     assert result.get_column("symbol").to_list() == ["FAST"]
+
+
+@pytest.mark.parametrize(
+    ("target_bars", "expected_confirmation"),
+    [
+        (
+            [
+                {
+                    "open_": 10.0,
+                    "high": 10.1,
+                    "low": 9.6,
+                    "close": 9.7,
+                    "vwap": 9.8,
+                },
+                {
+                    "open_": 9.7,
+                    "high": 9.8,
+                    "low": 9.5,
+                    "close": 9.6,
+                    "vwap": 9.65,
+                },
+            ],
+            False,
+        ),
+        (
+            [
+                {
+                    "open_": 10.0,
+                    "high": 10.3,
+                    "low": 9.9,
+                    "close": 10.2,
+                    "vwap": 10.1,
+                },
+                {
+                    "open_": 10.2,
+                    "high": 10.6,
+                    "low": 10.15,
+                    "close": 10.5,
+                    "vwap": 10.35,
+                },
+            ],
+            True,
+        ),
+    ],
+)
+def test_high_rvol_requires_premarket_price_confirmation(
+    target_bars: list[dict[str, float]],
+    expected_confirmation: bool,
+) -> None:
+    bars, schedule, target_date, dates = _fixture()
+    target_start, _ = premarket_window_utc(target_date, time(7, 45))
+    history_only = bars.filter(
+        pl.col("ts_utc").dt.convert_time_zone("America/New_York").dt.date()
+        != target_date
+    )
+    directional = canonicalize_bars(
+        pl.DataFrame(
+            [
+                _bar(
+                    "FAST",
+                    target_start + timedelta(minutes=index + 1),
+                    200,
+                    **values,
+                )
+                for index, values in enumerate(target_bars)
+            ]
+        )
+    )
+    result = rvol(
+        pl.concat([history_only, directional]),
+        schedule=schedule,
+        target_date=target_date,
+        symbols=("FAST",),
+        complete_session_dates=dates,
+        cutoff_et=time(7, 45),
+        n=20,
+        provenance="test.alpaca",
+    )
+    row = result.row(0, named=True)
+    assert row["rvol"] == pytest.approx(4.0)
+    assert row["rvol_pass"] is True
+    assert row["premarket_price_confirmation"] is expected_confirmation
