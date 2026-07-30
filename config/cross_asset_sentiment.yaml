@@ -1,0 +1,51 @@
+schema_version: cross_asset_sentiment.v1
+shadow_only: true
+collection_interval_seconds: 60
+history_snapshot_limit: 120
+
+policy:
+  max_age_seconds: 90
+  max_spread_bps: 150
+  max_abs_basis: 0.05
+  price_return_full_scale: 0.02
+  open_interest_change_full_scale: 0.02
+  basis_full_scale: 0.01
+  moderate_funding_abs: 0.0001
+  extreme_funding_abs: 0.001
+  minimum_component_weight: 0.35
+  risk_on_threshold: 25
+  risk_off_threshold: -25
+
+# These are 24-hour risk-appetite proxies, not stock-selection candidates.
+# HIP-3 equity/commodity mappings can be added only after their oracle, deployer,
+# liquidity floor, and instrument identity have been explicitly reviewed.
+bindings:
+  - target_id: global-risk
+    scope: market
+    venue: hyperliquid
+    market: main
+    instrument: BTC
+    weight: 0.35
+    min_notional_volume_24h: 10000000
+
+  - target_id: global-risk
+    scope: market
+    venue: hyperliquid
+    market: main
+    instrument: ETH
+    weight: 0.25
+    min_notional_volume_24h: 10000000
+
+  - target_id: global-risk
+    scope: market
+    venue: aevo
+    market: mainnet
+    instrument: BTC-PERP
+    weight: 0.25
+
+  - target_id: global-risk
+    scope: market
+    venue: aevo
+    market: mainnet
+    instrument: ETH-PERP
+    weight: 0.15

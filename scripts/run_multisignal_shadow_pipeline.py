@@ -14,6 +14,7 @@ from data_plane.snapshot_queries import load_latest_session_snapshot
 
 ROOT = Path(__file__).resolve().parents[1]
 STAGE_SOURCES = {
+    "cross_asset_sentiment": "kernel.cross_asset.sentiment_shadow",
     "factor_rvol": "kernel.premarket.factor_rvol_candidates",
     "factor_candidates": "kernel.selection.factor_candidates_shadow",
     "order_flow": "kernel.features.order_flow_shadow",
@@ -53,9 +54,18 @@ def shadow_pipeline_commands(
         str(data_root),
     ]
     order_flow = ["-m", "scripts.build_order_flow_snapshot", *common]
+    cross_asset = [
+        "-m",
+        "scripts.build_cross_asset_sentiment_snapshot",
+        *common,
+    ]
     if asof_utc is not None:
+        cross_asset.extend(
+            ["--asof-utc", asof_utc.astimezone(UTC).isoformat()]
+        )
         order_flow.extend(["--asof-utc", asof_utc.astimezone(UTC).isoformat()])
     return (
+        ("cross_asset_sentiment", cross_asset),
         (
             "factor_rvol",
             [

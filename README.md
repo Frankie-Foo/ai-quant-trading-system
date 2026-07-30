@@ -134,12 +134,16 @@ and unified research arbitration with:
   --trade-date 2026-07-28 --asof-utc 2026-07-28T14:20:00Z
 ```
 
-This pipeline first computes broad-universe premarket RVOL without consulting catalyst
-membership, then scores the eligible daily pool, downloads every SIP trade and NBBO
-quote for the configured confirmation window, and ranks the union of catalyst and
-factor candidates. Tick Rule order imbalance, buy/sell pressure, VPOC, quote-size
-imbalance, microprice, and spread are preserved with point-in-time lineage. Order flow
-can confirm or reduce a candidate's score but cannot create a candidate by itself.
+This pipeline first collects the shadow-only Hyperliquid/Aevo cross-asset risk target,
+then computes broad-universe premarket RVOL without consulting catalyst membership,
+scores the eligible daily pool, downloads every SIP trade and NBBO quote for the
+configured confirmation window, and ranks the union of catalyst and factor candidates.
+The perpetual module records funding, price/OI confirmation, basis, explicit missing
+fields, cross-venue disagreement, and immutable provenance; it does not yet modify a
+candidate or market gate. Tick Rule order imbalance, buy/sell pressure, VPOC,
+quote-size imbalance, microprice, and spread are preserved with point-in-time lineage.
+Order flow can confirm or reduce a candidate's score but cannot create a candidate by
+itself. See [cross-asset sentiment](docs/CROSS_ASSET_SENTIMENT.md).
 Every new output is `production_eligible=false` and `execution_eligible=false`; the
 pipeline has no Broker or OMS command. The normal `schedule.premarket` tick runs this
 as a separately leased, restart-safe shadow job after primary selection. Completed

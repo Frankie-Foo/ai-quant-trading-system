@@ -746,3 +746,36 @@ the desktop client remains paused, and no live-trading route exists.
   mypy success across 260 Python files. Both compose configurations passed quiet
   validation, all three images built successfully, and the executor image passed a
   container import smoke test. No trading service was started and no order was sent.
+
+## M26 cross-asset perpetual sentiment shadow - 2026-07-30
+
+Status: implemented and verified as a deterministic shadow factor. It has no scoring,
+guardrail, sizing, Paper, or live execution authority.
+
+- Added one deep deterministic interface around normalized `PerpObservation` values.
+  Two read-only public adapters currently satisfy the external seam: Hyperliquid
+  `metaAndAssetCtxs` (including explicit HIP-3 DEX selection) and Aevo
+  `markets`/`funding`. Neither adapter accepts trading credentials or exposes writes.
+- Added quality-gated 0-100/-100-0 component scoring for price trend, continuous
+  price/OI confirmation, funding crowding, signed flow, liquidations, and
+  Mark/Oracle basis. Missing venue fields remain unavailable; raw volume supplies only
+  liquidity evidence and never direction.
+- Added weighted-median cross-venue aggregation with explicit coverage, disagreement,
+  confidence, and market/sector/theme scope. Tiny price/OI polling changes scale toward
+  zero instead of being promoted to full-strength quadrant signals.
+- Added validated `config/cross_asset_sentiment.yaml`. It is permanently shadow-only
+  and currently maps only Hyperliquid/Aevo BTC and ETH into `global-risk`. HIP-3
+  equity, commodity, semiconductor, or private-market mappings require a separate
+  oracle/deployer/liquidity review before configuration.
+- Added immutable raw and target snapshots with UTC provenance, critical quality
+  checks, warning-only provider degradation, prior-snapshot parent lineage,
+  `production_eligible=false`, and `execution_eligible=false`. The existing premarket
+  shadow DAG runs this independent stage without adding a dependency to primary
+  selection or execution.
+- Three real public-API smoke runs returned four normalized observations with both
+  providers healthy. The final run used its prior raw snapshot, produced all four
+  configured sources, passed every critical check, submitted zero orders, and remained
+  non-executable. Accepted target evidence:
+  `kernel.cross_asset.sentiment_shadow-20260730T013857Z-bed96c605528`.
+- Repository acceptance: 441 tests passed in 31.30 seconds, Ruff clean, and strict
+  mypy success across 270 Python files.

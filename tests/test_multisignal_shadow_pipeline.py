@@ -14,6 +14,7 @@ def test_shadow_pipeline_orders_dependencies_and_never_calls_execution() -> None
     )
 
     assert [stage for stage, _ in commands] == [
+        "cross_asset_sentiment",
         "factor_rvol",
         "factor_candidates",
         "order_flow",
@@ -21,6 +22,7 @@ def test_shadow_pipeline_orders_dependencies_and_never_calls_execution() -> None
     ]
     flattened = " ".join(argument for _, command in commands for argument in command)
     assert "--pool factor" in flattened
+    assert "scripts.build_cross_asset_sentiment_snapshot" in flattened
     assert "scripts.build_order_flow_snapshot" in flattened
     assert "scripts.build_unified_shadow_selection" in flattened
     assert "order" not in {

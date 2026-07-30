@@ -116,6 +116,24 @@ an existing candidate within a configured bound; absent order flow is neutral an
 explicitly unavailable. The factor, order-flow, and unified snapshots are shadow-only,
 and the orchestration script has no execution dependency.
 
+### 3d. Cross-asset perpetual sentiment
+
+The shadow DAG also reads public Hyperliquid and Aevo perpetual contexts through two
+read-only adapters at one normalization seam. `kernel.cross_asset_sentiment` receives
+only immutable `PerpObservation` values and has no HTTP, LLM, Broker, or OMS dependency.
+It quality-gates freshness, liquidity, oracle basis, and spread before combining price,
+open-interest confirmation, funding crowding, signed flow, liquidations, and basis.
+
+Raw volume never supplies direction. Price/open-interest quadrants are scaled by the
+continuous magnitude of both changes so tiny polling noise cannot become a full-strength
+regime signal. Cross-venue disagreement reduces confidence. Missing venue fields remain
+unavailable, and provider failure degrades only this shadow stage.
+
+The default configuration maps only BTC and ETH to a global risk-appetite target. HIP-3
+equity, commodity, and private-market mappings require explicit oracle/deployer/liquidity
+review before configuration. Both raw and aggregate snapshots are immutable and
+`production_eligible=false`; no live or Paper decision consumes them.
+
 ### 4. OMS/EMS separation and an explicit order state machine
 
 `TradePlan` expresses intent. The OMS owns order identity, lifecycle, fills, and
