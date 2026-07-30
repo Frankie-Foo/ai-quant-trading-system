@@ -138,17 +138,19 @@ This pipeline first collects the shadow-only Hyperliquid/Aevo cross-asset risk t
 then computes broad-universe premarket RVOL without consulting catalyst membership,
 scores the eligible daily pool, downloads every SIP trade and NBBO quote for the
 configured confirmation window, and ranks the union of catalyst and factor candidates.
-The perpetual module records funding, price/OI confirmation, basis, explicit missing
-fields, cross-venue disagreement, and immutable provenance; it does not yet modify a
-candidate or market gate. Tick Rule order imbalance, buy/sell pressure, VPOC,
+The perpetual module records live top-of-book, public aggressor-side trades, funding,
+price/OI confirmation, basis, explicit missing fields, cross-venue disagreement,
+coverage, and immutable current/prior provenance; it does not yet modify a candidate
+or market gate. Global liquidation windows remain unavailable until a dedicated
+stream/node provider is configured. Tick Rule order imbalance, buy/sell pressure, VPOC,
 quote-size imbalance, microprice, and spread are preserved with point-in-time lineage.
 Order flow can confirm or reduce a candidate's score but cannot create a candidate by
 itself. See [cross-asset sentiment](docs/CROSS_ASSET_SENTIMENT.md).
 Every new output is `production_eligible=false` and `execution_eligible=false`; the
 pipeline has no Broker or OMS command. The normal `schedule.premarket` tick runs this
 as a separately leased, restart-safe shadow job after primary selection. Completed
-stages are reused, and a shadow failure is logged and retried without invalidating the
-primary catalyst selection.
+daily stages are reused, but the live cross-asset stage is always refreshed. A shadow
+failure is logged and retried without invalidating the primary catalyst selection.
 
 Build a point-in-time, explicitly non-actionable ORB-5 research snapshot with:
 

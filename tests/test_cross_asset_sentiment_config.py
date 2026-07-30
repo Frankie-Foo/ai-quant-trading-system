@@ -27,6 +27,9 @@ def test_repository_cross_asset_config_is_shadow_only_and_multi_venue() -> None:
         "global-risk"
     }
     assert config.collection_interval_seconds == 60
+    assert config.history_snapshot_limit == 120
+    assert config.policy.max_previous_gap_seconds == 180
+    assert config.policy.minimum_target_coverage == 0.35
 
 
 def test_cross_asset_config_cannot_enable_production() -> None:

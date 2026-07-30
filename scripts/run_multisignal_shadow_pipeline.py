@@ -10,6 +10,8 @@ import sys
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import polars as pl
+
 from data_plane.snapshot_queries import load_latest_session_snapshot
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -94,6 +96,24 @@ def _dataset_ids(stdout: str) -> tuple[str, ...]:
     )
 
 
+def stage_snapshot_reusable(
+    stage: str,
+    frame: pl.DataFrame,
+    *,
+    requested_asof_utc: datetime | None,
+) -> bool:
+    """Prevent volatile live evidence from being reused across decision times."""
+
+    if stage != "cross_asset_sentiment":
+        return True
+    if requested_asof_utc is None:
+        return False
+    if frame.is_empty() or "data_cutoff_utc" not in frame.columns:
+        return False
+    cutoffs = frame.get_column("data_cutoff_utc").drop_nulls().unique().to_list()
+    return len(cutoffs) == 1 and cutoffs[0] == requested_asof_utc
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trade-date", type=_parse_date, required=True)
@@ -108,14 +128,21 @@ def main() -> None:
         asof_utc=args.asof_utc,
     ):
         try:
-            _frame, existing = load_latest_session_snapshot(
+            frame, existing = load_latest_session_snapshot(
                 args.data_root,
                 source=STAGE_SOURCES[stage],
                 session_date=args.trade_date,
             )
         except FileNotFoundError:
             existing = None
-        if existing is not None:
+        if (
+            existing is not None
+            and stage_snapshot_reusable(
+                stage,
+                frame,
+                requested_asof_utc=args.asof_utc,
+            )
+        ):
             stages.append(
                 {
                     "stage": stage,

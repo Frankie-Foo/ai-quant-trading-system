@@ -3,7 +3,12 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from scripts.run_multisignal_shadow_pipeline import shadow_pipeline_commands
+import polars as pl
+
+from scripts.run_multisignal_shadow_pipeline import (
+    shadow_pipeline_commands,
+    stage_snapshot_reusable,
+)
 
 
 def test_shadow_pipeline_orders_dependencies_and_never_calls_execution() -> None:
@@ -28,3 +33,31 @@ def test_shadow_pipeline_orders_dependencies_and_never_calls_execution() -> None
     assert "order" not in {
         argument.lower() for _, command in commands for argument in command
     }
+
+
+def test_live_cross_asset_stage_is_never_reused_and_historical_requires_exact_cutoff() -> None:
+    cutoff = datetime(2026, 7, 28, 14, 20, tzinfo=UTC)
+    frame = pl.DataFrame({"data_cutoff_utc": [cutoff]}).with_columns(
+        pl.col("data_cutoff_utc").cast(pl.Datetime("us", "UTC"))
+    )
+
+    assert not stage_snapshot_reusable(
+        "cross_asset_sentiment",
+        frame,
+        requested_asof_utc=None,
+    )
+    assert stage_snapshot_reusable(
+        "cross_asset_sentiment",
+        frame,
+        requested_asof_utc=cutoff,
+    )
+    assert not stage_snapshot_reusable(
+        "cross_asset_sentiment",
+        frame,
+        requested_asof_utc=datetime(2026, 7, 28, 14, 21, tzinfo=UTC),
+    )
+    assert stage_snapshot_reusable(
+        "factor_candidates",
+        frame,
+        requested_asof_utc=None,
+    )

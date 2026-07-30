@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from kernel.cross_asset_sentiment import (
     CrossAssetSentimentEngine,
     CrossAssetSentimentPolicy,
@@ -53,7 +55,13 @@ def test_fresh_long_building_scores_above_short_covering() -> None:
         policy=CrossAssetSentimentPolicy(),
         bindings=(binding,),
     )
-    previous = (_observation(price=100.0, open_interest=1_000),)
+    previous = (
+        _observation(
+            price=100.0,
+            open_interest=1_000,
+            observed_at_utc=ASOF - timedelta(minutes=1),
+        ),
+    )
 
     fresh_longs = engine.evaluate(
         observations=(_observation(price=102.0, open_interest=1_100),),
@@ -129,7 +137,13 @@ def test_raw_volume_does_not_supply_trade_direction() -> None:
             "short_liquidation_usd": None,
         }
     )
-    previous = (_observation(price=100, open_interest=1_000),)
+    previous = (
+        _observation(
+            price=100,
+            open_interest=1_000,
+            observed_at_utc=ASOF - timedelta(minutes=1),
+        ),
+    )
 
     low_volume = engine.evaluate(
         observations=(
@@ -181,13 +195,20 @@ def test_cross_venue_disagreement_reduces_confidence() -> None:
         policy=CrossAssetSentimentPolicy(),
         bindings=bindings,
     )
-    prior_hyperliquid = _observation(price=100, open_interest=1_000)
+    prior_hyperliquid = _observation(
+        price=100,
+        open_interest=1_000,
+        observed_at_utc=ASOF - timedelta(minutes=1),
+    )
     prior_aevo = prior_hyperliquid.model_copy(
         update={
             "venue": "aevo",
             "market": "mainnet",
             "instrument": "btc-perp",
-            "provenance": f"aevo.public@{ASOF.isoformat()}",
+            "provenance": (
+                f"aevo.public@"
+                f"{(ASOF - timedelta(minutes=1)).isoformat()}"
+            ),
         }
     )
     bullish_hyperliquid = _observation(price=102, open_interest=1_100)
@@ -196,6 +217,8 @@ def test_cross_venue_disagreement_reduces_confidence() -> None:
             "mark_price": 102,
             "oracle_price": 101.9,
             "open_interest": 1_100,
+            "observed_at_utc": ASOF,
+            "provenance": f"aevo.public@{ASOF.isoformat()}",
         }
     )
     bearish_aevo = bullish_aevo.model_copy(
@@ -243,7 +266,13 @@ def test_small_price_and_open_interest_changes_cannot_flip_risk_regime() -> None
         policy=CrossAssetSentimentPolicy(),
         bindings=(binding,),
     )
-    previous = (_observation(price=100, open_interest=1_000),)
+    previous = (
+        _observation(
+            price=100,
+            open_interest=1_000,
+            observed_at_utc=ASOF - timedelta(minutes=1),
+        ),
+    )
     current = _observation(price=99.92, open_interest=1_002).model_copy(
         update={
             "funding_rate": 0.0000125,
@@ -262,3 +291,84 @@ def test_small_price_and_open_interest_changes_cannot_flip_risk_regime() -> None
     assert result.target_assessments[0].regime == "neutral"
     assert result.target_assessments[0].score is not None
     assert result.target_assessments[0].score > -25
+
+
+def test_non_causal_or_stale_previous_observation_cannot_feed_returns() -> None:
+    binding = ProxyBinding(
+        target_id="global-risk",
+        scope=SentimentScope.MARKET,
+        venue="hyperliquid",
+        market="main",
+        instrument="BTC",
+        weight=1.0,
+    )
+    engine = CrossAssetSentimentEngine(
+        policy=CrossAssetSentimentPolicy(max_previous_gap_seconds=120),
+        bindings=(binding,),
+    )
+    current = _observation(price=101, open_interest=1_100)
+    future_previous = _observation(
+        price=90,
+        open_interest=900,
+        observed_at_utc=ASOF + timedelta(days=1),
+    )
+    stale_previous = _observation(
+        price=90,
+        open_interest=900,
+        observed_at_utc=ASOF - timedelta(minutes=10),
+    )
+
+    future_result = engine.evaluate(
+        observations=(current,),
+        previous_observations=(future_previous,),
+        asof_utc=ASOF + timedelta(seconds=1),
+    )
+    stale_result = engine.evaluate(
+        observations=(current,),
+        previous_observations=(stale_previous,),
+        asof_utc=ASOF + timedelta(seconds=1),
+    )
+
+    future = future_result.instrument_assessments[0]
+    stale = stale_result.instrument_assessments[0]
+    assert future.open_interest_change is None
+    assert stale.open_interest_change is None
+    assert future.evidence_warnings == ("non_causal_previous_observation",)
+    assert stale.evidence_warnings == ("stale_previous_observation",)
+    assert future.previous_observed_at_utc is None
+    assert stale.previous_observed_at_utc is None
+
+
+def test_score_maps_are_deeply_immutable_and_target_exposes_coverage() -> None:
+    binding = ProxyBinding(
+        target_id="global-risk",
+        scope=SentimentScope.MARKET,
+        venue="hyperliquid",
+        market="main",
+        instrument="BTC",
+        weight=1.0,
+    )
+    result = CrossAssetSentimentEngine(
+        policy=CrossAssetSentimentPolicy(),
+        bindings=(binding,),
+    ).evaluate(
+        observations=(_observation(price=101, open_interest=1_100),),
+        previous_observations=(
+            _observation(
+                price=100,
+                open_interest=1_000,
+                observed_at_utc=ASOF - timedelta(minutes=1),
+            ),
+        ),
+        asof_utc=ASOF + timedelta(seconds=1),
+    )
+    instrument = result.instrument_assessments[0]
+    target = result.target_assessments[0]
+
+    with pytest.raises(TypeError):
+        instrument.component_scores["price_trend"] = 99  # type: ignore[index]
+    with pytest.raises(TypeError):
+        target.source_scores["hyperliquid:main:btc"] = 99  # type: ignore[index]
+    assert target.coverage == pytest.approx(instrument.confidence)
+    assert instrument.previous_provenance is not None
+    assert "previous" in instrument.component_provenance["price_trend"]

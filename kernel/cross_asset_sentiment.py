@@ -8,10 +8,19 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from enum import StrEnum
+from types import MappingProxyType
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 
 class FrozenModel(BaseModel):
@@ -52,6 +61,7 @@ class PerpObservation(FrozenModel):
         le=1,
         allow_inf_nan=False,
     )
+    aggressor_trade_count: int | None = Field(default=None, ge=0)
     long_liquidation_usd: float | None = Field(
         default=None,
         ge=0,
@@ -62,6 +72,7 @@ class PerpObservation(FrozenModel):
         ge=0,
         allow_inf_nan=False,
     )
+    liquidation_event_count: int | None = Field(default=None, ge=0)
     active: bool
     provenance: str = Field(min_length=1)
 
@@ -92,6 +103,20 @@ class PerpObservation(FrozenModel):
         ):
             raise ValueError(
                 "long and short liquidation amounts must be jointly available"
+            )
+        if (
+            self.aggressor_imbalance is None
+            and self.aggressor_trade_count not in {None, 0}
+        ):
+            raise ValueError(
+                "aggressor_trade_count requires aggressor_imbalance"
+            )
+        if (
+            self.long_liquidation_usd is None
+            and self.liquidation_event_count not in {None, 0}
+        ):
+            raise ValueError(
+                "liquidation_event_count requires liquidation amounts"
             )
         return self
 
@@ -127,6 +152,7 @@ class ProxyBinding(FrozenModel):
 
 class CrossAssetSentimentPolicy(FrozenModel):
     max_age_seconds: float = Field(default=90, gt=0, le=900)
+    max_previous_gap_seconds: float = Field(default=180, gt=0, le=86_400)
     max_spread_bps: float = Field(default=150, gt=0, le=5_000)
     max_abs_basis: float = Field(default=0.05, gt=0, lt=1)
     price_return_full_scale: float = Field(default=0.02, gt=0, lt=1)
@@ -135,6 +161,7 @@ class CrossAssetSentimentPolicy(FrozenModel):
     moderate_funding_abs: float = Field(default=0.0001, gt=0, lt=1)
     extreme_funding_abs: float = Field(default=0.001, gt=0, lt=1)
     minimum_component_weight: float = Field(default=0.35, gt=0, le=1)
+    minimum_target_coverage: float = Field(default=0.35, gt=0, le=1)
     risk_on_threshold: float = Field(default=25, gt=0, le=100)
     risk_off_threshold: float = Field(default=-25, ge=-100, lt=0)
 
@@ -159,11 +186,35 @@ class InstrumentSentimentAssessment(FrozenModel):
     price_return: float | None = None
     open_interest_change: float | None = None
     price_oi_regime: str
-    component_scores: dict[str, float | None]
+    component_scores: Mapping[str, float | None]
+    component_provenance: Mapping[str, str] = Field(default_factory=dict)
     quality_reasons: tuple[str, ...]
+    evidence_warnings: tuple[str, ...] = ()
     observed_at_utc: datetime | None
     provenance: str
+    previous_observed_at_utc: datetime | None = None
+    previous_provenance: str | None = None
     production_eligible: bool = False
+
+    @field_validator("component_scores", mode="after")
+    @classmethod
+    def freeze_component_scores(
+        cls,
+        value: Mapping[str, float | None],
+    ) -> Mapping[str, float | None]:
+        return MappingProxyType(dict(value))
+
+    @field_validator("component_provenance", mode="after")
+    @classmethod
+    def freeze_component_provenance(
+        cls,
+        value: Mapping[str, str],
+    ) -> Mapping[str, str]:
+        return MappingProxyType(dict(value))
+
+    @field_serializer("component_scores", "component_provenance")
+    def serialize_mappings(self, value: Mapping[str, object]) -> dict[str, object]:
+        return dict(value)
 
     @field_validator("production_eligible")
     @classmethod
@@ -179,12 +230,34 @@ class TargetSentimentAssessment(FrozenModel):
     regime: SentimentRegime
     score: float | None = Field(default=None, ge=-100, le=100)
     confidence: float = Field(ge=0, le=1)
+    coverage: float = Field(default=0, ge=0, le=1)
     available_sources: int = Field(ge=0)
     configured_sources: int = Field(gt=0)
     disagreement: float | None = Field(default=None, ge=0, le=1)
-    source_scores: dict[str, float | None]
+    source_scores: Mapping[str, float | None]
+    source_provenance: Mapping[str, str] = Field(default_factory=dict)
     asof_utc: datetime
     production_eligible: bool = False
+
+    @field_validator("source_scores", mode="after")
+    @classmethod
+    def freeze_source_scores(
+        cls,
+        value: Mapping[str, float | None],
+    ) -> Mapping[str, float | None]:
+        return MappingProxyType(dict(value))
+
+    @field_validator("source_provenance", mode="after")
+    @classmethod
+    def freeze_source_provenance(
+        cls,
+        value: Mapping[str, str],
+    ) -> Mapping[str, str]:
+        return MappingProxyType(dict(value))
+
+    @field_serializer("source_scores", "source_provenance")
+    def serialize_mappings(self, value: Mapping[str, object]) -> dict[str, object]:
+        return dict(value)
 
     @field_validator("production_eligible")
     @classmethod
@@ -294,6 +367,7 @@ class CrossAssetSentimentEngine:
                 confidence=0,
                 price_oi_regime="unavailable",
                 component_scores={name: None for name in _COMPONENT_WEIGHTS},
+                component_provenance={},
                 quality_reasons=("missing_observation",),
                 observed_at_utc=None,
                 provenance="N/A",
@@ -314,15 +388,23 @@ class CrossAssetSentimentEngine:
                 confidence=0,
                 price_oi_regime="unavailable",
                 component_scores={name: None for name in _COMPONENT_WEIGHTS},
+                component_provenance={
+                    name: f"current:{current.provenance}"
+                    for name in _COMPONENT_WEIGHTS
+                },
                 quality_reasons=quality_reasons,
                 observed_at_utc=current.observed_at_utc,
                 provenance=current.provenance,
             )
 
+        usable_previous, evidence_warnings = self._causal_previous(
+            current,
+            previous,
+        )
         reference_price = (
-            previous.mark_price
-            if previous is not None
-            else current.reference_price
+            usable_previous.mark_price
+            if usable_previous is not None
+            else None
         )
         price_return = (
             None
@@ -331,11 +413,11 @@ class CrossAssetSentimentEngine:
         )
         oi_change = (
             None
-            if previous is None
-            or previous.open_interest is None
+            if usable_previous is None
+            or usable_previous.open_interest is None
             or current.open_interest is None
-            or previous.open_interest <= 0
-            else current.open_interest / previous.open_interest - 1
+            or usable_previous.open_interest <= 0
+            else current.open_interest / usable_previous.open_interest - 1
         )
         price_oi_regime, price_oi_score = _price_oi(
             price_return,
@@ -372,6 +454,29 @@ class CrossAssetSentimentEngine:
             ),
             "basis": _scaled_score(basis, self.policy.basis_full_scale),
         }
+        current_source = f"current:{current.provenance}"
+        prior_source = (
+            None
+            if usable_previous is None
+            else f"previous:{usable_previous.provenance}"
+        )
+        price_source = (
+            f"{current_source}|{prior_source}"
+            if prior_source is not None
+            else f"{current_source}|previous:unavailable"
+        )
+        component_provenance = {
+            "price_trend": price_source,
+            "price_oi": (
+                f"{current_source}|{prior_source}"
+                if prior_source is not None
+                else f"{current_source}|previous:unavailable"
+            ),
+            "funding": current_source,
+            "signed_flow": current_source,
+            "liquidation": current_source,
+            "basis": current_source,
+        }
         available_weight = sum(
             _COMPONENT_WEIGHTS[name]
             for name, value in components.items()
@@ -400,10 +505,36 @@ class CrossAssetSentimentEngine:
             open_interest_change=oi_change,
             price_oi_regime=price_oi_regime,
             component_scores=components,
+            component_provenance=component_provenance,
             quality_reasons=(),
+            evidence_warnings=evidence_warnings,
             observed_at_utc=current.observed_at_utc,
             provenance=current.provenance,
+            previous_observed_at_utc=(
+                None
+                if usable_previous is None
+                else usable_previous.observed_at_utc
+            ),
+            previous_provenance=(
+                None if usable_previous is None else usable_previous.provenance
+            ),
         )
+
+    def _causal_previous(
+        self,
+        current: PerpObservation,
+        previous: PerpObservation | None,
+    ) -> tuple[PerpObservation | None, tuple[str, ...]]:
+        if previous is None:
+            return None, ()
+        if previous.observed_at_utc >= current.observed_at_utc:
+            return None, ("non_causal_previous_observation",)
+        gap = (
+            current.observed_at_utc - previous.observed_at_utc
+        ).total_seconds()
+        if gap > self.policy.max_previous_gap_seconds:
+            return None, ("stale_previous_observation",)
+        return previous, ()
 
     def _quality_reasons(
         self,
@@ -487,6 +618,10 @@ class CrossAssetSentimentEngine:
                 _source_name(binding): item.score
                 for binding, item in pairs
             }
+            source_provenance = {
+                _source_name(binding): _assessment_provenance(item)
+                for binding, item in pairs
+            }
             if not available:
                 results.append(
                     TargetSentimentAssessment(
@@ -494,9 +629,11 @@ class CrossAssetSentimentEngine:
                         scope=pairs[0][0].scope,
                         regime=SentimentRegime.UNAVAILABLE,
                         confidence=0,
+                        coverage=0,
                         available_sources=0,
                         configured_sources=len(pairs),
                         source_scores=source_scores,
+                        source_provenance=source_provenance,
                         asof_utc=asof_utc,
                     )
                 )
@@ -528,13 +665,19 @@ class CrossAssetSentimentEngine:
                 TargetSentimentAssessment(
                     target_id=target_id,
                     scope=pairs[0][0].scope,
-                    regime=_regime(score, self.policy),
+                    regime=(
+                        _regime(score, self.policy)
+                        if coverage >= self.policy.minimum_target_coverage
+                        else SentimentRegime.UNAVAILABLE
+                    ),
                     score=score,
                     confidence=confidence,
+                    coverage=min(max(coverage, 0.0), 1.0),
                     available_sources=len(available),
                     configured_sources=len(pairs),
                     disagreement=min(max(disagreement, 0.0), 1.0),
                     source_scores=source_scores,
+                    source_provenance=source_provenance,
                     asof_utc=asof_utc,
                 )
             )
@@ -654,3 +797,9 @@ def _regime(
 
 def _source_name(binding: ProxyBinding) -> str:
     return f"{binding.venue}:{binding.market}:{binding.instrument}"
+
+
+def _assessment_provenance(item: InstrumentSentimentAssessment) -> str:
+    if item.previous_provenance is None:
+        return item.provenance
+    return f"{item.provenance}|previous:{item.previous_provenance}"

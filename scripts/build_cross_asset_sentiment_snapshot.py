@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -49,8 +50,10 @@ _RAW_SCHEMA: dict[str, Any] = {
     "bid_price": pl.Float64,
     "ask_price": pl.Float64,
     "aggressor_imbalance": pl.Float64,
+    "aggressor_trade_count": pl.Int64,
     "long_liquidation_usd": pl.Float64,
     "short_liquidation_usd": pl.Float64,
+    "liquidation_event_count": pl.Int64,
     "active": pl.Boolean,
     "provenance": pl.String,
 }
@@ -71,8 +74,6 @@ class PerpObservationClient(Protocol):
     def fetch(
         self,
         instruments: tuple[PerpInstrumentRequest, ...],
-        *,
-        observed_at_utc: datetime,
     ) -> tuple[PerpObservation, ...]: ...
 
     def close(self) -> None: ...
@@ -92,12 +93,6 @@ def build_cross_asset_sentiment_snapshots(
 ) -> CrossAssetSnapshotArtifacts:
     """Evaluate once and persist raw evidence plus one target-level snapshot."""
 
-    engine = CrossAssetSentimentEngine(policy=policy, bindings=bindings)
-    result = engine.evaluate(
-        observations=observations,
-        previous_observations=previous_observations,
-        asof_utc=asof_utc,
-    )
     raw_frame = _raw_frame(observations)
     raw_provenance = f"{RAW_SOURCE}@{asof_utc.isoformat()}"
     duplicate_count = raw_frame.height - raw_frame.select(
@@ -137,6 +132,12 @@ def build_cross_asset_sentiment_snapshots(
     )
     raw_snapshot.assert_usable()
 
+    engine = CrossAssetSentimentEngine(policy=policy, bindings=bindings)
+    result = engine.evaluate(
+        observations=observations,
+        previous_observations=previous_observations,
+        asof_utc=asof_utc,
+    )
     sentiment_frame = _sentiment_frame(
         result,
         trade_date=trade_date,
@@ -211,15 +212,18 @@ def build_cross_asset_sentiment_snapshots(
 def collect_perp_observations(
     config: CrossAssetSentimentConfig,
     *,
-    observed_at_utc: datetime,
     clients: dict[str, PerpObservationClient] | None = None,
 ) -> tuple[tuple[PerpObservation, ...], dict[str, str]]:
     """Collect all configured venues and degrade failures to explicit status."""
 
     owned = clients is None
     active_clients = clients or {
-        "hyperliquid": HyperliquidPerpClient(),
-        "aevo": AevoPerpClient(),
+        "hyperliquid": HyperliquidPerpClient(
+            flow_window_seconds=config.collection_interval_seconds,
+        ),
+        "aevo": AevoPerpClient(
+            flow_window_seconds=config.collection_interval_seconds,
+        ),
     }
     observations: list[PerpObservation] = []
     statuses: dict[str, str] = {}
@@ -243,12 +247,7 @@ def collect_perp_observations(
                 )
             )
             try:
-                observations.extend(
-                    client.fetch(
-                        requests,
-                        observed_at_utc=observed_at_utc,
-                    )
-                )
+                observations.extend(client.fetch(requests))
                 statuses[venue] = "ok"
             except (PerpProviderError, OSError, ValueError) as exc:
                 statuses[venue] = f"error:{type(exc).__name__}"
@@ -262,33 +261,94 @@ def collect_perp_observations(
     )
 
 
+def collect_observations_for_run(
+    config: CrossAssetSentimentConfig,
+    *,
+    requested_asof_utc: datetime | None,
+    clients: dict[str, PerpObservationClient] | None = None,
+    clock: Callable[[], datetime] | None = None,
+) -> tuple[
+    tuple[PerpObservation, ...],
+    dict[str, str],
+    datetime,
+    str,
+]:
+    """Separate live collection from honest historical unavailability."""
+
+    if requested_asof_utc is not None:
+        return (
+            (),
+            {
+                venue: "unavailable:historical_live_collection_forbidden"
+                for venue in sorted(
+                    {binding.venue for binding in config.bindings}
+                )
+            },
+            requested_asof_utc,
+            "historical_unavailable",
+        )
+    observations, provider_status = collect_perp_observations(
+        config,
+        clients=clients,
+    )
+    now_utc = (clock or (lambda: datetime.now(UTC)))()
+    if now_utc.tzinfo is None or now_utc.utcoffset() != timedelta(0):
+        raise ValueError("collection clock must return timezone-aware UTC")
+    observation_cutoff = max(
+        (item.observed_at_utc for item in observations),
+        default=now_utc,
+    )
+    return (
+        observations,
+        provider_status,
+        max(now_utc, observation_cutoff),
+        "live",
+    )
+
+
 def load_previous_observations(
     data_root: Path,
     *,
     before_utc: datetime,
+    history_snapshot_limit: int = 120,
 ) -> tuple[tuple[PerpObservation, ...], DatasetSnapshot | None]:
     """Load the latest prior usable raw observation snapshot."""
 
-    candidates: list[tuple[datetime, Path, DatasetSnapshot]] = []
-    for path in (data_root / "accepted").glob(
-        f"{RAW_SOURCE}-*/data.parquet"
-    ):
+    candidates: list[
+        tuple[datetime, Path, DatasetSnapshot, tuple[PerpObservation, ...]]
+    ] = []
+    paths = sorted(
+        (data_root / "accepted").glob(f"{RAW_SOURCE}-*/data.parquet"),
+        key=lambda item: item.parent.name,
+        reverse=True,
+    )[:history_snapshot_limit]
+    for path in paths:
         manifest_path = path.parent / "manifest.json"
         try:
             snapshot = DatasetSnapshot.model_validate_json(
                 manifest_path.read_text(encoding="utf-8")
             ).assert_usable()
+            frame = pl.read_parquet(path)
+            observations = tuple(
+                PerpObservation.model_validate(row)
+                for row in frame.iter_rows(named=True)
+            )
         except (OSError, ValueError):
             continue
-        if snapshot.asof_utc < before_utc:
-            candidates.append((snapshot.asof_utc, path, snapshot))
+        if not observations:
+            continue
+        observation_cutoff = max(
+            item.observed_at_utc for item in observations
+        )
+        if all(item.observed_at_utc < before_utc for item in observations):
+            candidates.append(
+                (observation_cutoff, path, snapshot, observations)
+            )
     if not candidates:
         return (), None
-    _, path, snapshot = max(candidates, key=lambda item: item[0])
-    frame = pl.read_parquet(path)
-    observations = tuple(
-        PerpObservation.model_validate(row)
-        for row in frame.iter_rows(named=True)
+    _, _path, snapshot, observations = max(
+        candidates,
+        key=lambda item: item[0],
     )
     return observations, snapshot
 
@@ -322,11 +382,17 @@ def _sentiment_frame(
                 "regime": target.regime.value,
                 "score": target.score,
                 "confidence": target.confidence,
+                "coverage": target.coverage,
                 "available_sources": target.available_sources,
                 "configured_sources": target.configured_sources,
                 "disagreement": target.disagreement,
                 "source_scores_json": json.dumps(
-                    target.source_scores,
+                    dict(target.source_scores),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                "source_provenance_json": json.dumps(
+                    dict(target.source_provenance),
                     ensure_ascii=False,
                     sort_keys=True,
                 ),
@@ -402,20 +468,23 @@ def main() -> None:
     parser.add_argument("--data-root", type=Path, default=ROOT / "data")
     args = parser.parse_args()
 
-    asof_utc = args.asof_utc or datetime.now(UTC)
+    config = load_cross_asset_sentiment_config(args.config)
+    requested_asof_utc = args.asof_utc
+    observations, provider_status, asof_utc, collection_mode = (
+        collect_observations_for_run(
+            config,
+            requested_asof_utc=requested_asof_utc,
+        )
+    )
     if (
         asof_utc.tzinfo is None
         or asof_utc.utcoffset() != timedelta(0)
     ):
         raise ValueError("asof must be timezone-aware UTC")
-    config = load_cross_asset_sentiment_config(args.config)
-    observations, provider_status = collect_perp_observations(
-        config,
-        observed_at_utc=asof_utc,
-    )
     previous, previous_snapshot = load_previous_observations(
         args.data_root,
         before_utc=asof_utc,
+        history_snapshot_limit=config.history_snapshot_limit,
     )
     artifacts = build_cross_asset_sentiment_snapshots(
         observations=observations,
@@ -439,6 +508,7 @@ def main() -> None:
                 "status": "shadow_complete",
                 "trade_date": args.trade_date.isoformat(),
                 "asof_utc": asof_utc.isoformat(),
+                "collection_mode": collection_mode,
                 "provider_status": provider_status,
                 "observations": len(observations),
                 "targets": len(artifacts.result.target_assessments),

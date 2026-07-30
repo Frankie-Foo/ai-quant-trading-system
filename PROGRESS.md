@@ -779,3 +779,67 @@ guardrail, sizing, Paper, or live execution authority.
   `kernel.cross_asset.sentiment_shadow-20260730T013857Z-bed96c605528`.
 - Repository acceptance: 441 tests passed in 31.30 seconds, Ruff clean, and strict
   mypy success across 270 Python files.
+
+## M27 cross-asset evidence and PIT hardening - 2026-07-30
+
+Status: the ten code-audit findings are remediated; the module remains shadow-only.
+
+- Added live top-of-book collection from Hyperliquid `l2Book` and Aevo `orderbook`.
+  Added notional aggressor imbalance from Hyperliquid `recentTrades` and Aevo public
+  instrument trade history with a 60-second window and a three-trade minimum.
+- Preserved global liquidation amounts as explicitly unavailable. Neither configured
+  venue exposes a complete one-shot public liquidation window, so large trades and
+  price jumps are not relabeled as liquidations.
+- Removed caller-controlled observation timestamps from live adapters. Historical
+  `--asof` runs no longer call current-state endpoints. Previous observations must be
+  strictly causal and no more than 180 seconds old.
+- Selected prior raw snapshots by observation cutoff instead of file persistence time,
+  moved critical raw checks ahead of scoring, made nested score/provenance mappings
+  deeply immutable, and persisted current/prior component provenance.
+- Live cross-asset stages now refresh instead of reusing same-session evidence.
+  Historical reuse requires an exact data cutoff. Coverage is explicit and a target
+  below 35% coverage cannot emit risk-on or risk-off.
+- Two real public-API smoke runs returned four observations with both providers healthy.
+  Hyperliquid Bid/Ask and aggressor flow were populated; Aevo Bid/Ask were populated,
+  while its empty 60-second trade windows remained correctly unavailable. The second
+  accepted target `kernel.cross_asset.sentiment_shadow-20260730T034651Z-f77dc1098be6`
+  had all four sources, `coverage=0.72`, remained non-executable, and submitted zero
+  orders.
+- Repository acceptance: 447 tests passed, Ruff clean, and strict
+  mypy success across 270 Python files.
+
+## M28 portable perpetual risk positioning Skill - 2026-07-30
+
+Status: implemented, independently forward-tested, and installed locally as a
+read-only Codex Skill. It cannot select securities, authorize execution, or submit
+orders.
+
+- Added the portable `monitor-perp-risk-positioning` Python 3.11+ Skill with a
+  deterministic CLI, SQLite state, `latest.json`, versioned JSON Schemas, optional
+  encrypted local backup, generic JSONL/HTTP liquidation input, optional generic
+  webhook, Docker packaging, and Windows/macOS/Linux operating instructions.
+- Added public read-only Hyperliquid and Aevo adapters for BTC/ETH plus reviewed
+  Hyperliquid HIP-3 `xyz:CL` energy and `xyz:SMH` semiconductor representatives.
+  Bid/Ask, active signed order flow, funding, price/open-interest, basis, liquidity,
+  provenance, partial-provider isolation, and explicit missing evidence are retained.
+- Added global, energy, and semiconductor risk overlays with weighted-median
+  aggregation, disagreement/venue-conflict gates, asymmetric confirmation windows,
+  risk vetoes, long-only 0/0.5/1.0/1.2 position multipliers, and an inactive
+  volatility target pending a real VIX source.
+- A 1.2x boost requires at least 75% coverage, two venues, two independent windows,
+  no relevant conflict, and real liquidation coverage. With no configured liquidation
+  source, the boost is fail-closed. All snapshots and recommendations require
+  `production_eligible=false`, `execution_eligible=false`, and `orders_submitted=0`
+  as both runtime and JSON Schema constants.
+- Added benchmark/trade outcome separation, review reporting, threshold-only
+  challenger generation after at least 100 benchmark outcomes, exact config hashes,
+  and explicit human hash confirmation before an approved config can replace a file.
+- Two independent agent forward tests verified fresh installation, provider health,
+  non-persistent live smoke, persisted snapshot/status recovery, multi-window
+  hysteresis, recommendation propagation, and external schema safety. Their two
+  findings—missing confirmation-gate explanation and overly broad schema fields—were
+  fixed and reverified.
+- Skill acceptance: 26 tests passed, Ruff clean, strict mypy success across 16 source
+  files, Skill validator success, clean-venv package install and `pip check` success,
+  Docker non-root `doctor` success, and live public smoke with Hyperliquid 4/4 plus
+  Aevo 2/2 observations healthy. No notification was sent and no order path exists.
