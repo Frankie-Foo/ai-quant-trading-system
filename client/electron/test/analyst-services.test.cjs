@@ -548,3 +548,52 @@ test('AI evidence is minimized and carries an immutable reference', () => {
     reviewStale: true,
   })
 })
+
+test('macOS settings keep secrets in memory when Keychain is unavailable', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'analyst-settings-macos-'))
+  const settingsPath = path.join(root, 'settings.json')
+  const store = createSecureSettingsStore({
+    filePath: settingsPath,
+    platform: 'darwin',
+    safeStorage: {
+      isEncryptionAvailable: () => false,
+      encryptString: () => {
+        throw new Error('Keychain unavailable')
+      },
+      decryptString: () => {
+        throw new Error('Keychain unavailable')
+      },
+    },
+  })
+
+  store.saveConnectionSecrets({
+    openRouterApiKey: 'openrouter-memory-key',
+    massiveApiKey: 'massive-memory-key',
+    marketDataKey: 'market-memory-key',
+    marketDataSecret: 'market-memory-secret-value',
+    secUserAgent: 'Research User research@example.com',
+  })
+  store.saveModels(MODELS)
+
+  assert.deepEqual(store.loadSecrets(), {
+    openRouterApiKey: 'openrouter-memory-key',
+    massiveApiKey: 'massive-memory-key',
+    marketDataKey: 'market-memory-key',
+    marketDataSecret: 'market-memory-secret-value',
+    secUserAgent: 'Research User research@example.com',
+  })
+  const publicSettings = store.loadPublic()
+  assert.equal(publicSettings.configured, true)
+  assert.equal(publicSettings.secretPersistence, 'memory_only')
+
+  const persisted = fs.readFileSync(settingsPath, 'utf8')
+  assert.equal(persisted.includes('openrouter-memory-key'), false)
+  assert.equal(persisted.includes('market-memory-secret-value'), false)
+
+  const restarted = createSecureSettingsStore({
+    filePath: settingsPath,
+    platform: 'darwin',
+    safeStorage: fakeSafeStorage(),
+  })
+  assert.equal(restarted.loadPublic().configured, false)
+})

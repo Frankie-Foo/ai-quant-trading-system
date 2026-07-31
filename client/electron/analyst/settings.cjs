@@ -34,13 +34,48 @@ function emptySettings() {
   }
 }
 
-function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
+function createSecureSettingsStore({
+  filePath,
+  safeStorage,
+  fsImpl = fs,
+  platform = process.platform,
+}) {
   if (!filePath || !safeStorage) {
     throw new Error('安全设置存储缺少必要依赖')
   }
 
+  let volatileSecrets = null
+
+  function encryptionAvailable() {
+    try {
+      return safeStorage.isEncryptionAvailable() === true
+    } catch {
+      return false
+    }
+  }
+
+  function hasCompleteSecrets(values) {
+    return Boolean(
+      values?.openRouterApiKey
+      && values?.massiveApiKey
+      && values?.marketDataKey
+      && values?.marketDataSecret
+      && values?.secUserAgent
+    )
+  }
+
+  function emptySecrets() {
+    return {
+      openRouterApiKey: '',
+      massiveApiKey: '',
+      marketDataKey: '',
+      marketDataSecret: '',
+      secUserAgent: '',
+    }
+  }
+
   function assertEncryption() {
-    if (!safeStorage.isEncryptionAvailable()) {
+    if (!encryptionAvailable()) {
       throw new Error('系统安全存储不可用；不会以明文保存 API Key')
     }
   }
@@ -122,21 +157,46 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
       if (secUserAgent.length < 8 || !secUserAgent.includes('@')) {
         throw new Error('SEC 联系信息必须包含联系邮箱')
       }
-      const current = read()
-      write({
-        ...current,
-        encryptedOpenRouterApiKey: encrypt(openRouterApiKey),
-        encryptedMassiveApiKey: encrypt(massiveApiKey),
-        encryptedMarketDataKey: encrypt(marketDataKey),
-        encryptedMarketDataSecret: encrypt(marketDataSecret),
-        encryptedSecUserAgent: encrypt(secUserAgent),
-      })
+      const nextSecrets = {
+        openRouterApiKey,
+        massiveApiKey,
+        marketDataKey,
+        marketDataSecret,
+        secUserAgent,
+      }
+      if (platform === 'darwin' && !encryptionAvailable()) {
+        volatileSecrets = nextSecrets
+        return
+      }
+      let encrypted
+      try {
+        encrypted = {
+          encryptedOpenRouterApiKey: encrypt(openRouterApiKey),
+          encryptedMassiveApiKey: encrypt(massiveApiKey),
+          encryptedMarketDataKey: encrypt(marketDataKey),
+          encryptedMarketDataSecret: encrypt(marketDataSecret),
+          encryptedSecUserAgent: encrypt(secUserAgent),
+        }
+      } catch (error) {
+        if (platform !== 'darwin') throw error
+        volatileSecrets = nextSecrets
+        return
+      }
+      write({ ...read(), ...encrypted })
+      volatileSecrets = null
     },
 
     saveOpenRouterKey(value) {
       const openRouterApiKey = String(value || '').trim()
       if (openRouterApiKey.length < 8) {
         throw new Error('OpenRouter API Key 无效')
+      }
+      if (platform === 'darwin' && !encryptionAvailable()) {
+        volatileSecrets = {
+          ...(volatileSecrets || emptySecrets()),
+          openRouterApiKey,
+        }
+        return
       }
       const current = read()
       write({
@@ -147,13 +207,15 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
 
     saveModels(models) {
       const current = read()
-      if (
-        !current.encryptedOpenRouterApiKey
-        || !current.encryptedMassiveApiKey
-        || !current.encryptedMarketDataKey
-        || !current.encryptedMarketDataSecret
-        || !current.encryptedSecUserAgent
-      ) {
+      const persistentReady = Boolean(
+        encryptionAvailable()
+        && current.encryptedOpenRouterApiKey
+        && current.encryptedMassiveApiKey
+        && current.encryptedMarketDataKey
+        && current.encryptedMarketDataSecret
+        && current.encryptedSecUserAgent
+      )
+      if (!persistentReady && !hasCompleteSecrets(volatileSecrets)) {
         throw new Error('请先完成模型与行情连接配置')
       }
       write({ ...current, models: normalizeModels(models) })
@@ -167,29 +229,54 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
       } catch {
         models = {}
       }
+      const persistentReady = Boolean(
+        encryptionAvailable()
+        && current.encryptedOpenRouterApiKey
+        && current.encryptedMassiveApiKey
+        && current.encryptedMarketDataKey
+        && current.encryptedMarketDataSecret
+        && current.encryptedSecUserAgent
+      )
+      const volatileReady = hasCompleteSecrets(volatileSecrets)
       return {
         schemaVersion: SETTINGS_SCHEMA,
         configured: Boolean(
-          current.encryptedOpenRouterApiKey
-          && current.encryptedMassiveApiKey
-          && current.encryptedMarketDataKey
-          && current.encryptedMarketDataSecret
-          && current.encryptedSecUserAgent
-          && MODEL_KEYS.every((key) => models[key]),
+          (persistentReady || volatileReady)
+          && MODEL_KEYS.every((key) => models[key])
         ),
-        openRouterKeyConfigured: Boolean(current.encryptedOpenRouterApiKey),
-        massiveConfigured: Boolean(current.encryptedMassiveApiKey),
-        secConfigured: Boolean(current.encryptedSecUserAgent),
+        openRouterKeyConfigured: Boolean(
+          volatileSecrets?.openRouterApiKey
+          || (encryptionAvailable() && current.encryptedOpenRouterApiKey)
+        ),
+        massiveConfigured: Boolean(
+          volatileSecrets?.massiveApiKey
+          || (encryptionAvailable() && current.encryptedMassiveApiKey)
+        ),
+        secConfigured: Boolean(
+          volatileSecrets?.secUserAgent
+          || (encryptionAvailable() && current.encryptedSecUserAgent)
+        ),
         marketDataConfigured: Boolean(
-          current.encryptedMarketDataKey
-          && current.encryptedMarketDataSecret,
+          (volatileSecrets?.marketDataKey && volatileSecrets?.marketDataSecret)
+          || (
+            encryptionAvailable()
+            && current.encryptedMarketDataKey
+            && current.encryptedMarketDataSecret
+          )
         ),
         marketDataProvider: 'standalone_massive_alpaca',
+        secretPersistence: volatileSecrets
+          ? 'memory_only'
+          : persistentReady ? 'os_encrypted' : 'unconfigured',
         models,
       }
     },
 
     loadSecrets() {
+      if (volatileSecrets) return { ...volatileSecrets }
+      if (platform === 'darwin' && !encryptionAvailable()) {
+        return emptySecrets()
+      }
       const current = read()
       return {
         openRouterApiKey: decrypt(current.encryptedOpenRouterApiKey),
@@ -201,6 +288,7 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
     },
 
     clear() {
+      volatileSecrets = null
       try {
         fsImpl.unlinkSync(filePath)
       } catch (error) {
