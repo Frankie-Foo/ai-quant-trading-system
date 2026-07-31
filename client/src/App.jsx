@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   AlertTriangle,
@@ -22,6 +22,7 @@ import {
   Target,
   Waves,
 } from 'lucide-react'
+import { booleanLabel, evaluationPresentation } from './client-state'
 
 const PAGES = [
   { id: 'today', label: '今日', icon: LayoutDashboard },
@@ -46,12 +47,12 @@ const STATE_LABELS = {
 
 const ACTION_LABELS = {
   no_action: '无新动作',
-  arm_entry: '等待第二次确认',
-  enter_probe: '可以买入侦察仓',
-  allow_add: '允许加仓',
-  reduce: '触发减仓',
+  arm_entry: '第二次确认条件待满足（仅研究）',
+  enter_probe: '侦察仓条件满足（仅研究）',
+  allow_add: '加仓条件满足（仅研究）',
+  reduce: '减仓风险条件触发（仅研究）',
   tighten_stop: '保护位上移',
-  exit_now: '立即退出',
+  exit_now: '退出风险条件触发（仅研究）',
   abandon: '放弃买入',
 }
 
@@ -208,7 +209,8 @@ function PlanCard({ plan, selected, onSelect }) {
   const baseline = plan.baseline
   const runtime = plan.runtime
   const evaluation = plan.latest_evaluation || plan.latest_decision
-  const action = evaluation?.action || 'no_action'
+  const presentation = evaluationPresentation(evaluation)
+  const action = presentation.action
   const danger = ['exit_required', 'reduce_required', 'abandoned'].includes(runtime.state)
   return (
     <button
@@ -239,6 +241,7 @@ function Detail({ plan }) {
   const baseline = plan.baseline
   const runtime = plan.runtime
   const evaluation = plan.latest_evaluation || plan.latest_decision
+  const presentation = evaluationPresentation(evaluation)
   const facts = evaluation?.facts || {}
   const hasEvaluation = Boolean(evaluation?.facts)
   const reasons = evaluation?.reasons || []
@@ -253,14 +256,14 @@ function Detail({ plan }) {
           <span className="eyebrow">ADAPTIVE PLAN · {baseline.mode?.toUpperCase()}</span>
           <h2>{plan.symbol} · {STATE_LABELS[runtime.state] || runtime.state}</h2>
           <p>
-            {ACTION_LABELS[evaluation?.action || 'no_action']}
-            {evaluation?.suggested_shares ? ` · 风险约束建议 ${evaluation.suggested_shares} 股` : ''}
+            {ACTION_LABELS[presentation.action]}
+            {presentation.suggestedShares ? ` · 风险约束研究值 ${presentation.suggestedShares} 股` : ''}
           </p>
         </div>
         <div className="hero-price">
           <small>实时中间价</small>
           <strong>{number(facts.last_price)}</strong>
-          <span className={priceVsVwap >= 0 ? 'positive' : 'negative'}>
+          <span className={priceVsVwap == null ? '' : priceVsVwap >= 0 ? 'positive' : 'negative'}>
             VWAP {percent(priceVsVwap)}
           </span>
         </div>
@@ -279,12 +282,12 @@ function Detail({ plan }) {
           <span className="timestamp">完整分钟线 {localTime(facts.completed_one_minute_bar_utc)}</span>
         </header>
         <div className="factor-grid">
-          <Factor label="1 分钟触发" passed={hasEvaluation && facts.one_minute_trigger} value={!hasEvaluation ? 'N/A' : facts.one_minute_trigger ? '已确认' : '等待'} />
-          <Factor label="5 分钟结构" passed={hasEvaluation && facts.five_minute_confirmed} value={!hasEvaluation ? 'N/A' : facts.five_minute_confirmed ? '向上' : '未确认'} />
-          <Factor label="15 分钟趋势" passed={hasEvaluation && facts.fifteen_minute_confirmed} value={!hasEvaluation ? 'N/A' : facts.fifteen_minute_confirmed ? '向上' : '未确认'} />
-          <Factor label="市场环境" passed={hasEvaluation && !facts.market_risk_off} value={!hasEvaluation ? 'N/A' : facts.market_risk_off ? 'Risk-off' : '允许做多'} />
-          <Factor label="基准 VWAP" passed={hasEvaluation && facts.benchmark_above_vwap} value={!hasEvaluation ? 'N/A' : facts.benchmark_above_vwap ? '上方' : '下方'} />
-          <Factor label="行业 VWAP" passed={hasEvaluation && facts.sector_above_vwap} value={!hasEvaluation ? 'N/A' : facts.sector_above_vwap ? '上方' : '下方'} />
+          <Factor label="1 分钟触发" passed={facts.one_minute_trigger === true} value={booleanLabel(facts.one_minute_trigger, '已确认', '未确认')} />
+          <Factor label="5 分钟结构" passed={facts.five_minute_confirmed === true} value={booleanLabel(facts.five_minute_confirmed, '向上', '未确认')} />
+          <Factor label="15 分钟趋势" passed={facts.fifteen_minute_confirmed === true} value={booleanLabel(facts.fifteen_minute_confirmed, '向上', '未确认')} />
+          <Factor label="市场环境" passed={presentation.complete && facts.market_risk_off === false} value={presentation.marketEnvironment} />
+          <Factor label="基准 VWAP" passed={facts.benchmark_above_vwap === true} value={booleanLabel(facts.benchmark_above_vwap, '上方', '下方')} />
+          <Factor label="行业 VWAP" passed={facts.sector_above_vwap === true} value={booleanLabel(facts.sector_above_vwap, '上方', '下方')} />
         </div>
         <div className="explain-grid">
           <div>
@@ -293,7 +296,7 @@ function Detail({ plan }) {
           </div>
           <div>
             <h4>当前阻断</h4>
-            {!hasEvaluation ? <p className="muted">等待首个实时评估，当前不能视为条件通过。</p> : blockers.length ? blockers.map((item) => <p key={item} className="blocker">• {BLOCKER_LABELS[item] || item}</p>) : <p className="positive">全部必要条件通过</p>}
+            {!hasEvaluation ? <p className="muted">等待首个实时评估，当前不能视为条件通过。</p> : !presentation.complete ? <p className="blocker">• 关键事实不完整，禁止解释为入场许可</p> : blockers.length ? blockers.map((item) => <p key={item} className="blocker">• {BLOCKER_LABELS[item] || item}</p>) : <p className="positive">全部必要条件通过</p>}
           </div>
         </div>
       </section>
@@ -344,11 +347,15 @@ function CandidateTable({ candidates, compact = false }) {
           </span>
           <span>{number(candidate.rvol, 1)}×</span>
           <span>
-            {candidate.earnings_strength_confirmed ? '强确认' : `${candidate.earnings_evidence_layers ?? 0} 层`}
+            {candidate.earnings_strength_confirmed == null
+              ? 'N/A'
+              : candidate.earnings_strength_confirmed
+                ? '强确认'
+                : `${candidate.earnings_evidence_layers ?? 0} 层`}
             <small> 强度 {number(candidate.earnings_intensity_score, 0)}</small>
           </span>
           <span>
-            {candidate.premarket_above_vwap ? 'VWAP 上方' : 'VWAP 下方'}
+            {booleanLabel(candidate.premarket_above_vwap, 'VWAP 上方', 'VWAP 下方')}
             <small> 收盘位 {percent(candidate.premarket_close_location, 0)}</small>
           </span>
         </div>
@@ -435,7 +442,7 @@ function PositionsPage({ plans }) {
   const active = plans.filter((plan) => ['holding', 'add_allowed', 'reduce_required', 'exit_required'].includes(plan.runtime.state))
   return (
     <div className="page-stack">
-      <PageHeader eyebrow="PAPER POSITION CONTROL" title="模拟盘持仓与保护" detail="客户端不提供手工买卖；止损、减仓、尾仓和 13:00 ET 清仓由确定性执行层管理。" />
+      <PageHeader eyebrow="STRATEGY STATE MIRROR" title="策略状态与风险镜像" detail="仅展示确定性策略状态；除非券商回报明确确认，否则不代表真实持仓、成交或保护单。" />
       <section className="panel table-panel">
         <div className="table-row table-head"><span>标的</span><span>状态</span><span>保护位</span><span>尾仓规则</span><span>更新时间</span></div>
         {active.length ? active.map((plan) => (
@@ -446,7 +453,7 @@ function PositionsPage({ plans }) {
             <span>标准 20% · 强右尾 25% · A++ 30%</span>
             <span>{localTime(plan.updated_at_utc)}</span>
           </div>
-        )) : <p className="table-empty">当前无模拟盘持仓。系统不会为了保持活跃而强制交易。</p>}
+        )) : <p className="table-empty">当前没有经券商证据确认的持仓状态。系统不会为了保持活跃而强制交易。</p>}
       </section>
     </div>
   )
@@ -579,39 +586,70 @@ export default function App() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [stopping, setStopping] = useState(false)
+  const refreshSequence = useRef(0)
 
   const refresh = useCallback(async () => {
+    const requestId = refreshSequence.current + 1
+    refreshSequence.current = requestId
+    const fetchJson = async (url, failureMessage) => {
+      const response = await fetch(url, { cache: 'no-store' })
+      if (!response.ok) throw new Error(failureMessage)
+      return response.json()
+    }
     try {
-      const [dashboardResponse, healthResponse, deskResponse] = await Promise.all([
-        fetch('/v1/dashboard', { cache: 'no-store' }),
-        fetch('/v1/health', { cache: 'no-store' }),
-        fetch('/v1/desk', { cache: 'no-store' }),
+      const [dashboardResult, healthResult, deskResult] = await Promise.allSettled([
+        fetchJson('/v1/dashboard', '决策状态接口不可用'),
+        fetchJson('/v1/health', '安全状态接口不可用'),
+        fetchJson('/v1/desk', '研究证据接口不可用'),
       ])
-      if (!dashboardResponse.ok || !healthResponse.ok || !deskResponse.ok) throw new Error('状态接口不可用')
-      const [nextDashboard, nextHealth, nextDesk] = await Promise.all([
-        dashboardResponse.json(),
-        healthResponse.json(),
-        deskResponse.json(),
-      ])
-      const after = Math.max(0, Number(nextDashboard.latest_sequence || 0) - 50)
-      const eventsResponse = await fetch(
-        `/v1/events?after=${after}&limit=50`,
-        { cache: 'no-store' },
-      )
-      if (!eventsResponse.ok) throw new Error('事件接口不可用')
-      const nextEvents = await eventsResponse.json()
-      setDashboard(nextDashboard)
-      setHealth(nextHealth)
-      setDesk(nextDesk)
-      setEvents(nextEvents.events || [])
-      setSelectedId((current) => current || nextDashboard.plans?.[0]?.plan_id || null)
-      setError('')
+      if (requestId !== refreshSequence.current) return null
+
+      const failures = []
+      let nextDashboard = null
+      if (dashboardResult.status === 'fulfilled') {
+        nextDashboard = dashboardResult.value
+        setDashboard(nextDashboard)
+        const nextPlans = nextDashboard.plans || []
+        setSelectedId((current) => (
+          nextPlans.some((item) => item.plan_id === current)
+            ? current
+            : nextPlans[0]?.plan_id || null
+        ))
+      } else {
+        failures.push(dashboardResult.reason?.message || '决策状态接口不可用')
+      }
+      if (healthResult.status === 'fulfilled') {
+        setHealth(healthResult.value)
+      } else {
+        failures.push(healthResult.reason?.message || '安全状态接口不可用')
+      }
+      if (deskResult.status === 'fulfilled') {
+        setDesk(deskResult.value)
+      } else {
+        failures.push(deskResult.reason?.message || '研究证据接口不可用')
+      }
+
+      setError(failures.join('；'))
+      if (nextDashboard) {
+        const after = Math.max(
+          0,
+          Number(nextDashboard.latest_sequence || 0) - 50,
+        )
+        try {
+          const nextEvents = await fetchJson(
+            `/v1/events?after=${after}&limit=50`,
+            '事件接口不可用',
+          )
+          if (requestId === refreshSequence.current) {
+            setEvents(nextEvents.events || [])
+          }
+        } catch {
+          // Event history is auxiliary; keep the last known log without hiding core state.
+        }
+      }
       return nextDashboard
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : '无法连接本地决策引擎')
-      return null
     } finally {
-      setLoading(false)
+      if (requestId === refreshSequence.current) setLoading(false)
     }
   }, [])
 
@@ -620,7 +658,10 @@ export default function App() {
     if (!window.confirm('确认触发全局急停？触发后本日不可在客户端恢复。')) return
     setStopping(true)
     try {
-      const response = await fetch('/v1/emergency-stop', { method: 'POST' })
+      const response = await fetch('/v1/emergency-stop', {
+        method: 'POST',
+        headers: { 'X-Adaptive-Client-Action': 'emergency-stop-v1' },
+      })
       if (!response.ok) throw new Error('急停接口不可用')
       await refresh()
     } catch (caught) {
@@ -700,7 +741,7 @@ export default function App() {
 
       <section className="safety-banner">
         <ShieldCheck size={18} />
-        <div><strong>研究只读控制台</strong><span>展示不可变选股、动态预案与复盘证据；Paper 写入和实盘均未获得批准。</span></div>
+        <div><strong>研究只读控制台</strong><span>展示不可变选股、动态预案与复盘证据；任何条件仅供研究，不构成手工买卖指令。</span></div>
         <span className="readonly">RESEARCH ONLY</span>
       </section>
 
@@ -747,7 +788,7 @@ export default function App() {
       <footer>
         <span><Database size={13} /> SQLite 可恢复状态与追加式事件记录</span>
         <span><Clock3 size={13} /> 15 秒感知 · 完整 K 线/风险事件驱动决策</span>
-        <span>客户端下单：禁止 · Paper：未批准 · Live：未实现</span>
+        <span>客户端下单：禁止 · 策略状态不等于券商持仓 · Paper：未批准 · Live：未实现</span>
       </footer>
     </main>
   )

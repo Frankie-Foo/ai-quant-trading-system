@@ -106,6 +106,16 @@ function createLocalRuntimeClient({
     },
 
     runDue: () => request('/v1/run-due', { method: 'POST' }),
+    workflowStatus: () => request('/v1/workflows'),
+    startWorkflow: (action, tradeDate) => request(
+      `/v1/workflows/${encodeURIComponent(action)}?trade_date=${encodeURIComponent(tradeDate)}`,
+      { method: 'POST' },
+    ),
+    startMonitor: (tradeDate) => request(
+      `/v1/monitor/start?trade_date=${encodeURIComponent(tradeDate)}`,
+      { method: 'POST' },
+    ),
+    stopMonitor: () => request('/v1/monitor/stop', { method: 'POST' }),
   }
 }
 
@@ -114,12 +124,18 @@ function runtimeLaunch({
   projectRoot,
   token,
   marketData = {},
+  platform = process.platform,
   resourcesPath = process.resourcesPath,
 }) {
   const userData = app.getPath('userData')
   const marketDataKey = String(marketData.key || '').trim()
   const marketDataSecret = String(marketData.secret || '').trim()
-  const marketDataConfigured = Boolean(marketDataKey && marketDataSecret)
+  const massiveApiKey = String(marketData.massiveApiKey || '').trim()
+  const secUserAgent = String(marketData.secUserAgent || '').trim()
+  const realtimeConfigured = Boolean(marketDataKey && marketDataSecret)
+  const standaloneConfigured = Boolean(
+    realtimeConfigured && massiveApiKey && secUserAgent,
+  )
   const sharedArgs = [
     '--host',
     '127.0.0.1',
@@ -130,21 +146,39 @@ function runtimeLaunch({
     '--runs-root',
     path.join(userData, 'research-runs'),
     '--provider-id',
-    marketDataConfigured ? 'alpaca_proxy' : 'unconfigured',
+    standaloneConfigured
+      ? 'standalone'
+      : realtimeConfigured ? 'alpaca_proxy' : 'unconfigured',
   ]
-  const marketDataEnv = marketDataConfigured
+  if (['win32', 'darwin'].includes(platform) && resourcesPath) {
+    sharedArgs.push(
+      '--bootstrap-archive',
+      path.join(resourcesPath, 'bootstrap', 'research-bootstrap.zip'),
+    )
+  }
+  const marketDataEnv = realtimeConfigured
     ? {
         ALPACA_PROXY_KEY: marketDataKey,
         ALPACA_PROXY_SECRET: marketDataSecret,
+        ...(standaloneConfigured
+          ? {
+              MASSIVE_API_KEY: massiveApiKey,
+              SEC_USER_AGENT: secUserAgent,
+              DESKTOP_MARKET_DATA_PROVIDER: 'alpaca_proxy_rest',
+            }
+          : {}),
       }
     : {}
   if (app.isPackaged) {
     if (!resourcesPath) throw new Error('打包运行时目录不可用')
+    const runtimeBinary = platform === 'win32'
+      ? 'windows-research-runtime.exe'
+      : 'macos-research-runtime'
     return {
       command: path.join(
         resourcesPath,
         'runtime',
-        'macos-research-runtime',
+        runtimeBinary,
       ),
       args: sharedArgs,
       cwd: userData,

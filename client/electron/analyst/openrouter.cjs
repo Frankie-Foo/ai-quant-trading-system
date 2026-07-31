@@ -2,6 +2,15 @@ const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
 const APP_REFERER = 'https://local.quant-research.app'
 const APP_TITLE = 'AI Quant Research Desk'
 
+class OpenRouterRequestError extends Error {
+  constructor(code, status) {
+    super(`OpenRouter 请求失败：${code}`)
+    this.name = 'OpenRouterRequestError'
+    this.code = code
+    this.status = status
+  }
+}
+
 function authorizationHeaders(apiKey) {
   const key = String(apiKey || '').trim()
   if (key.length < 8) throw new Error('OpenRouter API Key 未配置')
@@ -23,7 +32,7 @@ async function parseResponse(response) {
   if (!response.ok) {
     const typed = payload?.error?.metadata?.error_type
     const code = typed || `http_${response.status}`
-    throw new Error(`OpenRouter 请求失败：${code}`)
+    throw new OpenRouterRequestError(code, response.status)
   }
   return payload
 }
@@ -62,7 +71,14 @@ function createOpenRouterClient({
         }))
     },
 
-    async complete({ apiKey, model, messages, maxTokens = 900, temperature = 0.2 }) {
+    async complete({
+      apiKey,
+      model,
+      fallbackModels = [],
+      messages,
+      maxTokens = 900,
+      temperature = 0.2,
+    }) {
       const modelId = String(model || '').trim()
       if (!modelId) throw new Error('尚未选择 OpenRouter 模型')
       if (!Array.isArray(messages) || !messages.length) {
@@ -78,33 +94,57 @@ function createOpenRouterClient({
         }
         return { role, content }
       })
-      const response = await fetchImpl(`${normalizedBase}/chat/completions`, {
-        method: 'POST',
-        headers: authorizationHeaders(apiKey),
-        body: JSON.stringify({
-          model: modelId,
-          messages: normalizedMessages,
-          max_tokens: maxTokens,
-          temperature,
-          stream: false,
-        }),
-        signal: AbortSignal.timeout(timeoutMs),
-      })
-      const payload = await parseResponse(response)
-      const content = payload?.choices?.[0]?.message?.content
-      if (typeof content !== 'string' || !content.trim()) {
-        throw new Error('OpenRouter 没有返回可用文本')
+      const candidateModels = [...new Set([
+        modelId,
+        ...fallbackModels.map((value) => String(value || '').trim()).filter(Boolean),
+      ])]
+      for (const candidateModel of candidateModels) {
+        try {
+          const response = await fetchImpl(`${normalizedBase}/chat/completions`, {
+            method: 'POST',
+            headers: authorizationHeaders(apiKey),
+            body: JSON.stringify({
+              model: candidateModel,
+              messages: normalizedMessages,
+              max_tokens: maxTokens,
+              temperature,
+              stream: false,
+            }),
+            signal: AbortSignal.timeout(timeoutMs),
+          })
+          const payload = await parseResponse(response)
+          const message = payload?.choices?.[0]?.message
+          const content = typeof message?.content === 'string'
+            && message.content.trim()
+            ? message.content
+            : message?.reasoning
+          if (typeof content !== 'string' || !content.trim()) {
+            throw new Error('OpenRouter 没有返回可用文本')
+          }
+          const usage = payload.usage || {}
+          const finishReason = payload?.choices?.[0]?.finish_reason || null
+          return {
+            content: content.trim(),
+            model: typeof payload.model === 'string'
+              ? payload.model
+              : candidateModel,
+            fallbackFrom: candidateModel === modelId ? null : modelId,
+            finishReason,
+            truncated: finishReason === 'length',
+            usage: {
+              promptTokens: Number(usage.prompt_tokens || 0),
+              completionTokens: Number(usage.completion_tokens || 0),
+              totalTokens: Number(usage.total_tokens || 0),
+            },
+          }
+        } catch (error) {
+          const canFallback = error instanceof OpenRouterRequestError
+            && error.status === 404
+            && candidateModel !== candidateModels.at(-1)
+          if (!canFallback) throw error
+        }
       }
-      const usage = payload.usage || {}
-      return {
-        content: content.trim(),
-        model: typeof payload.model === 'string' ? payload.model : modelId,
-        usage: {
-          promptTokens: Number(usage.prompt_tokens || 0),
-          completionTokens: Number(usage.completion_tokens || 0),
-          totalTokens: Number(usage.total_tokens || 0),
-        },
-      }
+      throw new Error('OpenRouter 没有可用模型路由')
     },
   }
 }

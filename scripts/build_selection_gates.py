@@ -289,6 +289,15 @@ def main() -> None:
             symbols,
             previous_session,
             pace_seconds=args.massive_pace_seconds,
+            on_symbol=lambda index, total: print(
+                json.dumps(
+                    {
+                        "progress": f"{index}/{total}",
+                        "stage": "ticker_details",
+                    }
+                ),
+                flush=True,
+            ),
         )
         market_snapshot = _store_reference(
             market,

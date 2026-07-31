@@ -17,6 +17,7 @@ const {
   agentMessages,
   assistantMessages,
   compactDeskEvidence,
+  evidenceReference,
 } = require('../analyst/prompts.cjs')
 const { createIbkrPaperAdapter } = require('../analyst/ibkr-paper.cjs')
 
@@ -52,8 +53,10 @@ test('secure settings encrypt model and market-data secrets and expose redacted 
 
   store.saveConnectionSecrets({
     openRouterApiKey: 'openrouter-key-value',
+    massiveApiKey: 'massive-key-value',
     marketDataKey: 'market-key-value',
     marketDataSecret: 'market-secret-value',
+    secUserAgent: 'Research User research@example.com',
   })
   store.saveModels(MODELS)
 
@@ -61,7 +64,9 @@ test('secure settings encrypt model and market-data secrets and expose redacted 
   assert.equal(publicSettings.configured, true)
   assert.equal(publicSettings.openRouterKeyConfigured, true)
   assert.equal(publicSettings.marketDataConfigured, true)
-  assert.equal(publicSettings.marketDataProvider, 'alpaca_proxy_sip')
+  assert.equal(publicSettings.massiveConfigured, true)
+  assert.equal(publicSettings.secConfigured, true)
+  assert.equal(publicSettings.marketDataProvider, 'standalone_massive_alpaca')
   assert.equal('dataServiceUrl' in publicSettings, false)
   assert.equal('dataAccessTokenConfigured' in publicSettings, false)
   assert.deepEqual(publicSettings.models, MODELS)
@@ -71,10 +76,14 @@ test('secure settings encrypt model and market-data secrets and expose redacted 
   assert.equal(persisted.includes('openrouter-key-value'), false)
   assert.equal(persisted.includes('market-key-value'), false)
   assert.equal(persisted.includes('market-secret-value'), false)
+  assert.equal(persisted.includes('massive-key-value'), false)
+  assert.equal(persisted.includes('research@example.com'), false)
   assert.deepEqual(store.loadSecrets(), {
     openRouterApiKey: 'openrouter-key-value',
+    massiveApiKey: 'massive-key-value',
     marketDataKey: 'market-key-value',
     marketDataSecret: 'market-secret-value',
+    secUserAgent: 'Research User research@example.com',
   })
 })
 
@@ -97,8 +106,10 @@ test('secure settings fail closed when OS encryption is unavailable', () => {
   assert.throws(
     () => store.saveConnectionSecrets({
       openRouterApiKey: 'openrouter-key-value',
+      massiveApiKey: 'massive-key-value',
       marketDataKey: 'market-key-value',
       marketDataSecret: 'market-secret-value',
+      secUserAgent: 'Research User research@example.com',
     }),
     /不会以明文保存/,
   )
@@ -150,9 +161,12 @@ test('packaged runtime launch fixes the proxy endpoint and keeps secrets out of 
     projectRoot: '/unused',
     resourcesPath: '/Applications/AIQuant.app/Contents/Resources',
     token: 'ephemeral-runtime-token-value',
+    platform: 'darwin',
     marketData: {
       key: 'market-key-value',
       secret: 'market-secret-value',
+      massiveApiKey: 'massive-key-value',
+      secUserAgent: 'Research User research@example.com',
     },
   })
 
@@ -164,7 +178,7 @@ test('packaged runtime launch fixes the proxy endpoint and keeps secrets out of 
       'macos-research-runtime',
     ),
   )
-  assert.equal(launch.args.includes('alpaca_proxy'), true)
+  assert.equal(launch.args.includes('standalone'), true)
   assert.equal(
     launch.args.includes(
       path.join(
@@ -180,7 +194,38 @@ test('packaged runtime launch fixes the proxy endpoint and keeps secrets out of 
   assert.deepEqual(launch.marketDataEnv, {
     ALPACA_PROXY_KEY: 'market-key-value',
     ALPACA_PROXY_SECRET: 'market-secret-value',
+    MASSIVE_API_KEY: 'massive-key-value',
+    SEC_USER_AGENT: 'Research User research@example.com',
+    DESKTOP_MARKET_DATA_PROVIDER: 'alpaca_proxy_rest',
   })
+})
+
+test('packaged Windows runtime launches the bundled executable without external Python', () => {
+  const launch = runtimeLaunch({
+    app: {
+      isPackaged: true,
+      getPath: (name) => {
+        assert.equal(name, 'userData')
+        return 'C:\\Users\\research\\AppData\\Roaming\\AIQuant'
+      },
+    },
+    projectRoot: 'C:\\unused',
+    resourcesPath: 'C:\\Program Files\\AIQuant\\resources',
+    token: 'ephemeral-runtime-token-value',
+    platform: 'win32',
+  })
+
+  assert.equal(
+    launch.command,
+    path.join(
+      'C:\\Program Files\\AIQuant\\resources',
+      'runtime',
+      'windows-research-runtime.exe',
+    ),
+  )
+  assert.equal(launch.args.includes('unconfigured'), true)
+  assert.equal(launch.command.toLowerCase().includes('python'), false)
+  assert.equal(launch.args.some((value) => value.includes('.venv')), false)
 })
 
 test('OpenRouter client lists text models and sends non-streaming chat safely', async () => {
@@ -253,6 +298,80 @@ test('OpenRouter errors expose typed status but never echo the API key', async (
       return true
     },
   )
+})
+
+test('OpenRouter completion falls back when the selected model route returns 404', async () => {
+  const requestedModels = []
+  const client = createOpenRouterClient({
+    fetchImpl: async (_url, options = {}) => {
+      const model = JSON.parse(options.body).model
+      requestedModels.push(model)
+      if (model === 'model/unroutable') {
+        return jsonResponse({ error: { message: 'no route' } }, { status: 404 })
+      }
+      return jsonResponse({
+        model,
+        choices: [{ message: { role: 'assistant', content: '回退模型回答' } }],
+        usage: { total_tokens: 9 },
+      })
+    },
+  })
+
+  const completion = await client.complete({
+    apiKey: 'secret-key',
+    model: 'model/unroutable',
+    fallbackModels: ['model/available'],
+    messages: [{ role: 'user', content: '测试回退' }],
+  })
+
+  assert.deepEqual(requestedModels, ['model/unroutable', 'model/available'])
+  assert.equal(completion.content, '回退模型回答')
+  assert.equal(completion.model, 'model/available')
+  assert.equal(completion.fallbackFrom, 'model/unroutable')
+})
+
+test('OpenRouter completion accepts reasoning-only assistant responses', async () => {
+  const client = createOpenRouterClient({
+    fetchImpl: async () => jsonResponse({
+      model: 'model/reasoning',
+      choices: [{
+        message: {
+          role: 'assistant',
+          content: null,
+          reasoning: '这是模型返回的推理结论',
+        },
+      }],
+      usage: { total_tokens: 12 },
+    }),
+  })
+
+  const completion = await client.complete({
+    apiKey: 'secret-key',
+    model: 'model/reasoning',
+    messages: [{ role: 'user', content: '测试 reasoning 响应' }],
+  })
+
+  assert.equal(completion.content, '这是模型返回的推理结论')
+})
+
+test('OpenRouter completion reports truncated responses', async () => {
+  const client = createOpenRouterClient({
+    fetchImpl: async () => jsonResponse({
+      model: 'model/a',
+      choices: [{
+        finish_reason: 'length',
+        message: { role: 'assistant', content: '未完成回答' },
+      }],
+      usage: { total_tokens: 99 },
+    }),
+  })
+  const completion = await client.complete({
+    apiKey: 'secret-key',
+    model: 'model/a',
+    messages: [{ role: 'user', content: '测试截断' }],
+  })
+  assert.equal(completion.truncated, true)
+  assert.equal(completion.finishReason, 'length')
 })
 
 test('local runtime client authenticates locally and requires local evidence', async () => {
@@ -351,7 +470,74 @@ test('assistant and agent prompts are evidence bounded and force non-executable 
 
   assert.equal(compact.orders_authorized, false)
   assert.match(assistant[0].content, /不能把候选名单当作买入指令/)
+  assert.match(assistant[0].content, /不要复述快照 ID/)
+  assert.match(assistant[0].content, /禁止输出 snake_case/)
+  assert.match(assistant[0].content, /结论、关键数据、为什么只有它、风险与未知/)
+  assert.match(assistant[0].content, /600 个中文字符以内/)
   assert.match(assistant[1].content, /2026-07-31/)
   assert.match(redTeam[0].content, /不能授权买卖/)
   assert.throws(() => agentMessages('trader', desk), /未知 Agent/)
+})
+
+test('AI evidence is minimized and carries an immutable reference', () => {
+  const desk = {
+    observed_at_utc: '2026-07-31T12:00:00+00:00',
+    target_trade_date: '2026-07-31',
+    stage: 'research_only',
+    selection: {
+      status: 'ready',
+      session_date: '2026-07-31',
+      snapshot_id: 'selection-snapshot-1',
+      asof_utc: '2026-07-31T11:59:00+00:00',
+      stale: false,
+      candidates: [{
+        rank: 1,
+        symbol: 'AAA',
+        rvol: 5.5,
+        api_secret: 'must-not-leave-device',
+      }],
+    },
+    review: {
+      status: 'ready',
+      session_date: '2026-07-30',
+      snapshot_id: 'review-snapshot-1',
+      stale: true,
+      opportunities: [{
+        rank: 1,
+        symbol: 'BBB',
+        close_return: 0.1,
+        raw_payload: 'must-not-leave-device',
+      }],
+    },
+    jobs: [{
+      job_name: 'postmarket_review',
+      trade_date: '2026-07-30',
+      status: 'succeeded',
+      run_token: 'must-not-leave-device',
+    }],
+    maturity: { paper_trading_sessions: 2, secret: 'hidden' },
+  }
+
+  const compact = compactDeskEvidence(desk)
+  const supervisor = agentMessages('supervisor', desk)
+  const reference = evidenceReference(desk)
+  const serializedCompact = JSON.stringify(compact)
+  const serializedSupervisor = JSON.stringify(supervisor)
+
+  assert.equal(compact.jobs, undefined)
+  assert.equal(compact.maturity, undefined)
+  assert.doesNotMatch(serializedCompact, /must-not-leave-device/)
+  assert.match(serializedSupervisor, /postmarket_review/)
+  assert.doesNotMatch(serializedSupervisor, /run_token|must-not-leave-device/)
+  assert.deepEqual(reference, {
+    observedAtUtc: '2026-07-31T12:00:00+00:00',
+    targetTradeDate: '2026-07-31',
+    selectionSnapshotId: 'selection-snapshot-1',
+    selectionAsofUtc: '2026-07-31T11:59:00+00:00',
+    selectionSessionDate: '2026-07-31',
+    selectionStale: false,
+    reviewSnapshotId: 'review-snapshot-1',
+    reviewSessionDate: '2026-07-30',
+    reviewStale: true,
+  })
 })

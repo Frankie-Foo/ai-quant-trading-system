@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from operations.local_research_runtime import LocalResearchRuntime
 
@@ -48,6 +48,9 @@ def build_local_research_http_server(
             if path == "/v1/desk":
                 self._send(HTTPStatus.OK, runtime.snapshot(observed_at))
                 return
+            if path == "/v1/workflows":
+                self._send(HTTPStatus.OK, runtime.workflow_status())
+                return
             self._send(
                 HTTPStatus.NOT_FOUND,
                 {"error": "route not found", "orders_authorized": False},
@@ -66,6 +69,40 @@ def build_local_research_http_server(
             path = urlparse(self.path).path
             if path == "/v1/run-due":
                 self._send(HTTPStatus.OK, runtime.run_due(datetime.now(UTC)))
+                return
+            if path.startswith("/v1/workflows/"):
+                action = path.rsplit("/", 1)[-1]
+                query = parse_qs(urlparse(self.path).query)
+                raw_date = query.get("trade_date", [None])[0]
+                try:
+                    trade_date = date.fromisoformat(raw_date) if raw_date else date.today()
+                    result = runtime.submit_workflow(action, trade_date)
+                except (TypeError, ValueError) as exc:
+                    self._send(
+                        HTTPStatus.BAD_REQUEST,
+                        {
+                            "error": str(exc),
+                            "orders_authorized": False,
+                        },
+                    )
+                    return
+                self._send(HTTPStatus.ACCEPTED, result)
+                return
+            if path in {"/v1/monitor/start", "/v1/monitor/stop"}:
+                if path.endswith("/stop"):
+                    self._send(HTTPStatus.OK, runtime.stop_monitor())
+                    return
+                query = parse_qs(urlparse(self.path).query)
+                raw_date = query.get("trade_date", [None])[0]
+                try:
+                    trade_date = date.fromisoformat(raw_date) if raw_date else date.today()
+                except (TypeError, ValueError) as exc:
+                    self._send(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": str(exc), "orders_authorized": False},
+                    )
+                    return
+                self._send(HTTPStatus.ACCEPTED, runtime.start_monitor(trade_date))
                 return
             self._send(
                 HTTPStatus.NOT_FOUND,

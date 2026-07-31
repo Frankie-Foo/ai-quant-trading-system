@@ -1,7 +1,7 @@
 {
   "name": "adaptive-trading-client",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Read-only evidence-backed U.S. equity research desktop",
   "author": "Trading System v2",
   "type": "module",
@@ -14,8 +14,12 @@
     "test:electron": "node --test electron/test/*.test.cjs",
     "icon:mac": "bash scripts/build_macos_icon.sh",
     "runtime:mac": "bash scripts/build_macos_runtime.sh",
+    "runtime:win:analyst": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_runtime.ps1",
+    "bootstrap:win:analyst": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_bootstrap.ps1",
     "dist:win": "npm run build && electron-builder --win nsis",
-    "dist:mac:analyst": "npm run build && npm run test:electron && npm run icon:mac && npm run runtime:mac && electron-builder --config electron-builder.analyst.yml --mac dmg zip"
+    "dist:win:analyst": "npm run build && npm run test:electron && npm run bootstrap:win:analyst && npm run runtime:win:analyst && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_installer.ps1",
+    "dist:mac:analyst": "npm run build && npm run test:electron && npm run icon:mac && npm run runtime:mac && electron-builder --config electron-builder.analyst.yml --mac dmg zip",
+    "test:ui": "node --test test/*.test.js"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

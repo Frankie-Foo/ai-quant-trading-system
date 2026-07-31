@@ -9,12 +9,14 @@ import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
+from operations.bootstrap_data import BootstrapImporter
 from operations.local_research_http import build_local_research_http_server
 from operations.local_research_runtime import (
     AlpacaProxyMarketDataAdapter,
     EnvironmentMarketDataAdapter,
     LocalResearchRuntime,
     MarketDataAdapter,
+    StandaloneMarketDataAdapter,
     UnconfiguredMarketDataAdapter,
 )
 
@@ -25,9 +27,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--runs-root", type=Path, required=True)
+    parser.add_argument("--bootstrap-archive", type=Path)
     parser.add_argument(
         "--provider-id",
-        choices=("unconfigured", "environment", "alpaca_proxy"),
+        choices=("unconfigured", "environment", "alpaca_proxy", "standalone"),
         default="unconfigured",
     )
     parser.add_argument(
@@ -50,12 +53,24 @@ def main(argv: list[str] | None = None) -> int:
         market_data = EnvironmentMarketDataAdapter()
     elif args.provider_id == "alpaca_proxy":
         market_data = AlpacaProxyMarketDataAdapter()
+    elif args.provider_id == "standalone":
+        market_data = StandaloneMarketDataAdapter()
     else:
         market_data = UnconfiguredMarketDataAdapter()
+    data_root = args.data_root.expanduser().resolve()
+    runs_root = args.runs_root.expanduser().resolve()
+    bootstrap_status = None
+    if args.bootstrap_archive is not None:
+        bootstrap_status = BootstrapImporter(
+            archive_path=args.bootstrap_archive.expanduser().resolve(),
+            data_root=data_root,
+            runs_root=runs_root,
+        ).import_if_needed()
     runtime = LocalResearchRuntime(
-        data_root=args.data_root.expanduser().resolve(),
-        runs_root=args.runs_root.expanduser().resolve(),
+        data_root=data_root,
+        runs_root=runs_root,
         market_data=market_data,
+        bootstrap_status=bootstrap_status,
     )
     server = build_local_research_http_server(
         runtime,

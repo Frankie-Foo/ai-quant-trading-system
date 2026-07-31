@@ -391,8 +391,8 @@ def _selection_candidates(frame: pl.DataFrame) -> list[dict[str, object]]:
                 "earnings_intensity_score": _number(
                     row.get("earnings_intensity_score")
                 ),
-                "earnings_strength_confirmed": bool(
-                    row.get("earnings_strength_confirmed", False)
+                "earnings_strength_confirmed": _boolean(
+                    row.get("earnings_strength_confirmed")
                 ),
                 "rvol": _number(row.get("rvol")),
                 "premarket_gap_return": _number(
@@ -404,11 +404,11 @@ def _selection_candidates(frame: pl.DataFrame) -> list[dict[str, object]]:
                 "premarket_close_location": _number(
                     row.get("premarket_close_location")
                 ),
-                "premarket_above_vwap": bool(
-                    row.get("premarket_above_vwap", False)
+                "premarket_above_vwap": _boolean(
+                    row.get("premarket_above_vwap")
                 ),
-                "directional_volume_confirmed": bool(
-                    row.get("directional_volume_confirmed", False)
+                "directional_volume_confirmed": _boolean(
+                    row.get("directional_volume_confirmed")
                 ),
                 "market_cap": _number(row.get("market_cap")),
                 "adv_usd": _number(row.get("adv_usd")),
@@ -468,6 +468,10 @@ def _pipeline_status(
     if selection.get("status") == "ready":
         return "ready"
     return "waiting"
+
+
+def _boolean(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None
 
 
 def _number(value: object) -> float | None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,11 @@ import polars as pl
 from dotenv import load_dotenv
 
 from data_plane.calendar import build_xnys_schedule
-from data_plane.catalysts import CATALYST_SCHEMA_VERSION, audit_catalysts
+from data_plane.catalysts import (
+    CATALYST_SCHEMA_VERSION,
+    audit_catalysts,
+    empty_catalyst_frame,
+)
 from data_plane.contracts import DataQualityCheck, DatasetSnapshot, QualitySeverity
 from data_plane.providers.catalyst_news import fetch_alpaca_news, fetch_massive_news
 from data_plane.providers.sec_filings import (
@@ -403,7 +408,15 @@ def main() -> None:
             end_utc=end_utc,
         )
     else:
-        alpaca = fetch_alpaca_news(start_utc, end_utc)
+        standalone = os.getenv("DESKTOP_MARKET_DATA_PROVIDER", "").strip() in {
+            "local_massive",
+            "alpaca_proxy_rest",
+        }
+        alpaca = (
+            empty_catalyst_frame()
+            if standalone
+            else fetch_alpaca_news(start_utc, end_utc)
+        )
         massive = fetch_massive_news(
             start_utc, end_utc, pace_seconds=args.massive_pace_seconds
         )
@@ -427,7 +440,7 @@ def main() -> None:
             source="alpaca.news.benzinga",
             start_utc=start_utc,
             end_utc=end_utc,
-            require_non_empty=True,
+            require_non_empty=not standalone,
         )
         massive_snapshot = _store_provider(
             massive,

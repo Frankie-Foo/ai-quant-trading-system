@@ -4,7 +4,11 @@ const path = require('node:path')
 const { createIbkrPaperAdapter } = require('./analyst/ibkr-paper.cjs')
 const { createLocalRuntimeProcess } = require('./analyst/local-runtime.cjs')
 const { createOpenRouterClient } = require('./analyst/openrouter.cjs')
-const { agentMessages, assistantMessages } = require('./analyst/prompts.cjs')
+const {
+  agentMessages,
+  assistantMessages,
+  evidenceReference,
+} = require('./analyst/prompts.cjs')
 const {
   MODEL_KEYS,
   createSecureSettingsStore,
@@ -21,7 +25,19 @@ function marketDataFromSecrets(secrets) {
   return {
     key: String(secrets?.marketDataKey || '').trim(),
     secret: String(secrets?.marketDataSecret || '').trim(),
+    massiveApiKey: String(secrets?.massiveApiKey || '').trim(),
+    secUserAgent: String(secrets?.secUserAgent || '').trim(),
   }
+}
+
+function fallbackModels(models, primaryKey) {
+  const primary = models[primaryKey]
+  return [...new Set(
+    MODEL_KEYS
+      .filter((key) => key !== primaryKey)
+      .map((key) => models[key])
+      .filter((model) => model && model !== primary),
+  )]
 }
 
 async function restartLocalRuntime(marketData = {}) {
@@ -50,8 +66,10 @@ function registerHandlers() {
     async (_event, connection) => {
       const candidate = {
         openRouterApiKey: String(connection?.openRouterApiKey || '').trim(),
+        massiveApiKey: String(connection?.massiveApiKey || '').trim(),
         marketDataKey: String(connection?.marketDataKey || '').trim(),
         marketDataSecret: String(connection?.marketDataSecret || '').trim(),
+        secUserAgent: String(connection?.secUserAgent || '').trim(),
       }
       const models = await openRouter.listModels(candidate.openRouterApiKey)
       const previousSecrets = settingsStore.loadSecrets()
@@ -60,6 +78,8 @@ function registerHandlers() {
         runtime = await restartLocalRuntime({
           key: candidate.marketDataKey,
           secret: candidate.marketDataSecret,
+          massiveApiKey: candidate.massiveApiKey,
+          secUserAgent: candidate.secUserAgent,
         })
         if (runtime?.market_data?.healthy !== true) {
           throw new Error(
@@ -107,16 +127,35 @@ function registerHandlers() {
   ipcMain.handle('analyst:desk:get', () => fetchDesk())
   ipcMain.handle('analyst:runtime:status', () => localRuntime.client.status())
   ipcMain.handle('analyst:runtime:run-due', () => localRuntime.client.runDue())
+  ipcMain.handle('analyst:workflows:status', () => (
+    localRuntime.client.workflowStatus()
+  ))
+  ipcMain.handle('analyst:workflows:start', (_event, payload) => (
+    localRuntime.client.startWorkflow(
+      String(payload?.action || ''),
+      String(payload?.tradeDate || ''),
+    )
+  ))
+  ipcMain.handle('analyst:monitor:start', (_event, payload) => (
+    localRuntime.client.startMonitor(String(payload?.tradeDate || ''))
+  ))
+  ipcMain.handle('analyst:monitor:stop', () => (
+    localRuntime.client.stopMonitor()
+  ))
 
   ipcMain.handle('analyst:assistant:ask', async (_event, payload) => {
     const settings = requireConfiguredSettings()
     const secrets = settingsStore.loadSecrets()
     const desk = await fetchDesk()
-    return openRouter.complete({
+    const result = await openRouter.complete({
       apiKey: secrets.openRouterApiKey,
       model: settings.models.question,
+      fallbackModels: fallbackModels(settings.models, 'question'),
       messages: assistantMessages(payload?.question, desk),
+      maxTokens: 1_200,
+      temperature: 0.1,
     })
+    return { ...result, evidence: evidenceReference(desk) }
   })
 
   ipcMain.handle('analyst:agents:run', async (_event, payload) => {
@@ -127,11 +166,13 @@ function registerHandlers() {
     const settings = requireConfiguredSettings()
     const secrets = settingsStore.loadSecrets()
     const desk = await fetchDesk()
-    return openRouter.complete({
+    const result = await openRouter.complete({
       apiKey: secrets.openRouterApiKey,
       model: settings.models[role],
+      fallbackModels: fallbackModels(settings.models, role),
       messages: agentMessages(role, desk),
     })
+    return { ...result, evidence: evidenceReference(desk) }
   })
 
   ipcMain.handle('analyst:ibkr:status', () => ibkrPaper.status())

@@ -12,6 +12,11 @@ data/
 config/autonomous_paper.local.json
 client/release/
 client/release-macos-analyst/
+client/release-windows-analyst/
 client/build/runtime/
 client/build/runtime-work/
 client/build/macos-research-runtime.spec
+client/build/windows-research-runtime.spec
+client/build/bootstrap/
+client/build/*-qa*/
+client/build/*userdata*/

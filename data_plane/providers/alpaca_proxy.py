@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import AsyncGenerator, Callable
+from datetime import datetime
 from types import TracebackType
 from typing import Protocol
 from urllib.parse import urlparse
 
+import httpx
+import polars as pl
 from pydantic import SecretStr
 from websockets.asyncio.client import connect
 
+from data_plane.quality import canonicalize_bars, nullable_float
 from execution.alpaca_sip_stream import (
     SYMBOL_PATTERN,
     SipEvent,
@@ -19,6 +24,7 @@ from execution.alpaca_sip_stream import (
 )
 
 ALPACA_PROXY_SIP_URL = "wss://alpaca-trade-api.vertu.cn/v2/sip"
+ALPACA_PROXY_REST_URL = "https://alpaca-trade-api.vertu.cn/v2/stocks/bars"
 
 
 class _WebSocket(Protocol):
@@ -47,6 +53,85 @@ class AlpacaProxyStreamError(RuntimeError):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+def fetch_alpaca_proxy_bars(
+    symbols: tuple[str, ...],
+    start_utc: datetime,
+    end_utc: datetime,
+) -> pl.DataFrame:
+    if len(symbols) > 20:
+        frames = [
+            fetch_alpaca_proxy_bars(
+                symbols[index : index + 20],
+                start_utc,
+                end_utc,
+            )
+            for index in range(0, len(symbols), 20)
+        ]
+        return pl.concat(frames) if frames else pl.DataFrame()
+    key = os.getenv("ALPACA_PROXY_KEY", "").strip()
+    secret = os.getenv("ALPACA_PROXY_SECRET", "").strip()
+    if not key or not secret:
+        raise RuntimeError("Alpaca proxy credentials are missing")
+    rows: list[dict[str, object]] = []
+    token: str | None = None
+    with httpx.Client(timeout=30.0) as client:
+        while True:
+            params = {
+                "symbols": ",".join(symbols),
+                "timeframe": "1Min",
+                "start": start_utc.isoformat(),
+                "end": end_utc.isoformat(),
+                "feed": "sip",
+                "limit": "10000",
+            }
+            if token:
+                params["page_token"] = token
+            response = client.get(
+                ALPACA_PROXY_REST_URL,
+                params=params,
+                headers={
+                    "APCA-API-KEY-ID": key,
+                    "APCA-API-SECRET-KEY": secret,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            bars = payload.get("bars", {})
+            if not isinstance(bars, dict):
+                raise ValueError("Alpaca proxy bars response is invalid")
+            for symbol, values in bars.items():
+                if not isinstance(values, list):
+                    continue
+                for bar in values:
+                    if not isinstance(bar, dict):
+                        continue
+                    rows.append(
+                        {
+                            "symbol": symbol,
+                            "ts_utc": bar.get("t"),
+                            "open": bar.get("o"),
+                            "high": bar.get("h"),
+                            "low": bar.get("l"),
+                            "close": bar.get("c"),
+                            "volume": bar.get("v"),
+                            "trade_count": bar.get("n"),
+                            "vwap": nullable_float(bar.get("vw")),
+                            "source": "alpaca_proxy.rest",
+                            "feed": "sip",
+                            "adjustment": "split_adjusted",
+                        }
+                    )
+            next_token = payload.get("next_page_token")
+            if not next_token:
+                break
+            token = str(next_token)
+    if not rows:
+        return canonicalize_bars(pl.DataFrame())
+    return canonicalize_bars(pl.DataFrame(rows)).filter(
+        (pl.col("ts_utc") >= start_utc) & (pl.col("ts_utc") < end_utc)
+    )
 
 
 def _result(*, healthy: bool, reason: str | None) -> dict[str, object]:

@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - feature/macos-research-client
+      - feature/cross-platform-research-client
     paths:
       - client/**
       - config/**

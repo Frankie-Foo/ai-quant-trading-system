@@ -1,9 +1,10 @@
 const fs = require('node:fs')
 const path = require('node:path')
 
-const SETTINGS_SCHEMA = 'macos-local-research-settings.v3'
+const SETTINGS_SCHEMA = 'desktop-local-research-settings.v4'
 const LEGACY_SETTINGS_SCHEMA = 'macos-research-settings.v1'
 const PREVIOUS_SETTINGS_SCHEMA = 'macos-local-research-settings.v2'
+const PRIOR_SETTINGS_SCHEMA = 'macos-local-research-settings.v3'
 const MODEL_KEYS = ['question', 'catalyst', 'red_team', 'supervisor']
 
 function normalizeModels(models) {
@@ -25,8 +26,10 @@ function emptySettings() {
   return {
     schemaVersion: SETTINGS_SCHEMA,
     encryptedOpenRouterApiKey: '',
+    encryptedMassiveApiKey: '',
     encryptedMarketDataKey: '',
     encryptedMarketDataSecret: '',
+    encryptedSecUserAgent: '',
     models: {},
   }
 }
@@ -46,6 +49,15 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
     try {
       const parsed = JSON.parse(fsImpl.readFileSync(filePath, 'utf8'))
       if (!parsed || typeof parsed !== 'object') return emptySettings()
+      if (parsed.schemaVersion === PRIOR_SETTINGS_SCHEMA) {
+        return {
+          ...emptySettings(),
+          encryptedOpenRouterApiKey: String(parsed.encryptedOpenRouterApiKey || ''),
+          encryptedMarketDataKey: String(parsed.encryptedMarketDataKey || ''),
+          encryptedMarketDataSecret: String(parsed.encryptedMarketDataSecret || ''),
+          models: parsed.models || {},
+        }
+      }
       if ([LEGACY_SETTINGS_SCHEMA, PREVIOUS_SETTINGS_SCHEMA].includes(
         parsed.schemaVersion,
       )) {
@@ -94,20 +106,30 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
   return {
     saveConnectionSecrets(values) {
       const openRouterApiKey = String(values?.openRouterApiKey || '').trim()
+      const massiveApiKey = String(values?.massiveApiKey || '').trim()
       const marketDataKey = String(values?.marketDataKey || '').trim()
       const marketDataSecret = String(values?.marketDataSecret || '').trim()
+      const secUserAgent = String(values?.secUserAgent || '').trim()
       if (openRouterApiKey.length < 8) {
         throw new Error('OpenRouter API Key 无效')
       }
       if (marketDataKey.length < 8 || marketDataSecret.length < 16) {
         throw new Error('Alpaca 代理行情凭据无效')
       }
+      if (massiveApiKey.length < 8) {
+        throw new Error('Massive API Key 无效')
+      }
+      if (secUserAgent.length < 8 || !secUserAgent.includes('@')) {
+        throw new Error('SEC 联系信息必须包含联系邮箱')
+      }
       const current = read()
       write({
         ...current,
         encryptedOpenRouterApiKey: encrypt(openRouterApiKey),
+        encryptedMassiveApiKey: encrypt(massiveApiKey),
         encryptedMarketDataKey: encrypt(marketDataKey),
         encryptedMarketDataSecret: encrypt(marketDataSecret),
+        encryptedSecUserAgent: encrypt(secUserAgent),
       })
     },
 
@@ -127,8 +149,10 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
       const current = read()
       if (
         !current.encryptedOpenRouterApiKey
+        || !current.encryptedMassiveApiKey
         || !current.encryptedMarketDataKey
         || !current.encryptedMarketDataSecret
+        || !current.encryptedSecUserAgent
       ) {
         throw new Error('请先完成模型与行情连接配置')
       }
@@ -147,16 +171,20 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
         schemaVersion: SETTINGS_SCHEMA,
         configured: Boolean(
           current.encryptedOpenRouterApiKey
+          && current.encryptedMassiveApiKey
           && current.encryptedMarketDataKey
           && current.encryptedMarketDataSecret
+          && current.encryptedSecUserAgent
           && MODEL_KEYS.every((key) => models[key]),
         ),
         openRouterKeyConfigured: Boolean(current.encryptedOpenRouterApiKey),
+        massiveConfigured: Boolean(current.encryptedMassiveApiKey),
+        secConfigured: Boolean(current.encryptedSecUserAgent),
         marketDataConfigured: Boolean(
           current.encryptedMarketDataKey
           && current.encryptedMarketDataSecret,
         ),
-        marketDataProvider: 'alpaca_proxy_sip',
+        marketDataProvider: 'standalone_massive_alpaca',
         models,
       }
     },
@@ -165,8 +193,10 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
       const current = read()
       return {
         openRouterApiKey: decrypt(current.encryptedOpenRouterApiKey),
+        massiveApiKey: decrypt(current.encryptedMassiveApiKey),
         marketDataKey: decrypt(current.encryptedMarketDataKey),
         marketDataSecret: decrypt(current.encryptedMarketDataSecret),
+        secUserAgent: decrypt(current.encryptedSecUserAgent),
       }
     },
 

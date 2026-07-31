@@ -12,6 +12,7 @@ from operations.local_research_runtime import (
     AlpacaProxyMarketDataAdapter,
     EnvironmentMarketDataAdapter,
     LocalResearchRuntime,
+    StandaloneMarketDataAdapter,
     UnconfiguredMarketDataAdapter,
 )
 
@@ -146,6 +147,32 @@ def test_alpaca_proxy_adapter_fails_closed_without_credentials() -> None:
         "ALPACA_PROXY_SECRET",
     ]
     assert status["can_run_pipeline"] is False
+
+
+def test_standalone_adapter_unlocks_research_only_when_all_sources_are_ready() -> None:
+    status = StandaloneMarketDataAdapter(
+        environ={
+            "ALPACA_PROXY_KEY": "market-key",
+            "ALPACA_PROXY_SECRET": "market-secret",
+            "MASSIVE_API_KEY": "massive-key",
+            "SEC_USER_AGENT": "Research User research@example.com",
+        },
+        probe=lambda **_kwargs: {
+            "healthy": True,
+            "reason": None,
+            "endpoint_host": "alpaca-trade-api.vertu.cn",
+            "capabilities": ["bars", "quotes", "trades"],
+        },
+    ).status()
+
+    assert status["provider_id"] == "standalone_massive_alpaca"
+    assert status["configured"] is True
+    assert status["healthy"] is True
+    assert status["can_run_pipeline"] is True
+    assert status["research_inputs_ready"] is True
+    assert status["realtime_ready"] is True
+    assert "massive-key" not in repr(status)
+    assert "market-secret" not in repr(status)
 
 
 def test_configured_local_runtime_delegates_once_to_pipeline(

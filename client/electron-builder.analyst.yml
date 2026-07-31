@@ -12,6 +12,8 @@ extraMetadata:
 extraResources:
   - from: build/runtime/macos-research-runtime
     to: runtime/macos-research-runtime
+  - from: build/bootstrap/research-bootstrap.zip
+    to: bootstrap/research-bootstrap.zip
 directories:
   output: release-macos-analyst
 mac:

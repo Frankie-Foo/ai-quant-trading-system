@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -206,22 +207,20 @@ def fetch_ticker_details(
     key = api_key_from_env()
     headers = {"Authorization": f"Bearer {key}"}
     requested = tuple(sorted(set(symbols)))
-    rows: list[dict[str, object]] = []
-    previous_request_started = 0.0
-    for index, symbol in enumerate(requested, start=1):
-        elapsed = time.monotonic() - previous_request_started
-        if previous_request_started and elapsed < pace_seconds:
-            time.sleep(pace_seconds - elapsed)
-        previous_request_started = time.monotonic()
-        payload = get_json(
-            f"{TICKER_REFERENCE_URL}/{symbol}",
-            params={"date": asof_date.isoformat()},
-            headers=headers,
-        )
-        item = payload.get("results")
-        values = item if isinstance(item, dict) else {}
-        rows.append(
-            {
+    def fetch_one(symbol: str) -> dict[str, object]:
+        try:
+            payload = get_json(
+                f"{TICKER_REFERENCE_URL}/{symbol}",
+                params={"date": asof_date.isoformat()},
+                headers=headers,
+                attempts=1,
+                timeout_seconds=8.0,
+            )
+            item = payload.get("results")
+            values = item if isinstance(item, dict) else {}
+        except DownloadError:
+            values = {}
+        return {
                 "asof_date": asof_date,
                 "symbol": symbol,
                 "market_cap": nullable_float(values.get("market_cap")),
@@ -241,9 +240,24 @@ def fetch_ticker_details(
                     f"massive.ticker_details:{symbol}@{asof_date.isoformat()}"
                 ),
             }
-        )
-        if on_symbol:
-            on_symbol(index, len(requested))
+
+    rows: list[dict[str, object]] = []
+    if pace_seconds < 1 and len(requested) > 1:
+        with ThreadPoolExecutor(max_workers=min(12, len(requested))) as executor:
+            for index, row in enumerate(executor.map(fetch_one, requested), start=1):
+                rows.append(row)
+                if on_symbol:
+                    on_symbol(index, len(requested))
+    else:
+        previous_request_started = 0.0
+        for index, symbol in enumerate(requested, start=1):
+            elapsed = time.monotonic() - previous_request_started
+            if previous_request_started and elapsed < pace_seconds:
+                time.sleep(pace_seconds - elapsed)
+            previous_request_started = time.monotonic()
+            rows.append(fetch_one(symbol))
+            if on_symbol:
+                on_symbol(index, len(requested))
     frame = pl.DataFrame(rows) if rows else empty_ticker_details_frame()
     return _canonicalize_ticker_details(frame)
 

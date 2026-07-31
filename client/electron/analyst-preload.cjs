@@ -22,6 +22,18 @@ const bridge = Object.freeze({
     status: () => ipcRenderer.invoke('analyst:runtime:status'),
     runDue: () => ipcRenderer.invoke('analyst:runtime:run-due'),
   }),
+  workflows: Object.freeze({
+    status: () => ipcRenderer.invoke('analyst:workflows:status'),
+    start: (action, tradeDate) => (
+      ipcRenderer.invoke('analyst:workflows:start', { action, tradeDate })
+    ),
+  }),
+  monitor: Object.freeze({
+    start: (tradeDate) => (
+      ipcRenderer.invoke('analyst:monitor:start', { tradeDate })
+    ),
+    stop: () => ipcRenderer.invoke('analyst:monitor:stop'),
+  }),
   assistant: Object.freeze({
     ask: (question) => ipcRenderer.invoke('analyst:assistant:ask', { question }),
   }),

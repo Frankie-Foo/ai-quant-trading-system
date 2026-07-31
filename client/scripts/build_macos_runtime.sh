@@ -21,6 +21,8 @@ python -m PyInstaller \
   --add-data "$repo_root/config.yaml:." \
   --add-data "$repo_root/config:config" \
   --hidden-import data_plane.cli \
+  --hidden-import scripts.backfill_massive_news \
+  --hidden-import scripts.backfill_massive_reference_weekly \
   --hidden-import scripts.build_catalyst_snapshot \
   --hidden-import scripts.build_cross_asset_sentiment_snapshot \
   --hidden-import scripts.build_daily_universe \

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -13,6 +13,7 @@ from pydantic import SecretStr
 
 from data_plane.providers.alpaca_proxy import probe_alpaca_proxy_sip
 from operations.client_desk import TradingDeskEvidence
+from operations.desktop_workflows import DesktopWorkflowManager
 
 MARKET_DATA_REQUIREMENTS = (
     "CLOUD_MARKET_DATA_API_TOKEN",
@@ -21,6 +22,12 @@ MARKET_DATA_REQUIREMENTS = (
     "SEC_USER_AGENT",
 )
 ALPACA_PROXY_REQUIREMENTS = ("ALPACA_PROXY_KEY", "ALPACA_PROXY_SECRET")
+STANDALONE_REQUIREMENTS = (
+    "ALPACA_PROXY_KEY",
+    "ALPACA_PROXY_SECRET",
+    "MASSIVE_API_KEY",
+    "SEC_USER_AGENT",
+)
 ProxyProbe = Callable[..., dict[str, object]]
 
 
@@ -177,6 +184,76 @@ class AlpacaProxyMarketDataAdapter:
         }
 
 
+class StandaloneMarketDataAdapter:
+    """Massive history/reference/news plus Alpaca realtime and SEC filings."""
+
+    def __init__(
+        self,
+        *,
+        environ: Mapping[str, str] | None = None,
+        probe: ProxyProbe = _run_alpaca_proxy_probe,
+    ):
+        self._environ = os.environ if environ is None else environ
+        self._realtime = AlpacaProxyMarketDataAdapter(
+            environ=self._environ,
+            probe=probe,
+        )
+
+    def status(self) -> dict[str, object]:
+        missing = sorted(
+            name
+            for name in STANDALONE_REQUIREMENTS
+            if not str(self._environ.get(name, "")).strip()
+        )
+        if missing:
+            return {
+                "schema_version": "macos_market_data_adapter.v1",
+                "provider_id": "standalone_massive_alpaca",
+                "configured": False,
+                "healthy": False,
+                "reason": "market_data_requirements_missing",
+                "missing_requirements": missing,
+                "can_run_pipeline": False,
+                "realtime_ready": False,
+                "research_inputs_ready": False,
+                "endpoint_host": "alpaca-trade-api.vertu.cn",
+                "capabilities": [
+                    "historical_daily",
+                    "historical_minute",
+                    "news",
+                    "reference",
+                    "sec_filings",
+                    "realtime_bars",
+                    "realtime_quotes",
+                    "realtime_trades",
+                ],
+            }
+        realtime = self._realtime.status()
+        healthy = realtime.get("healthy") is True
+        return {
+            "schema_version": "macos_market_data_adapter.v1",
+            "provider_id": "standalone_massive_alpaca",
+            "configured": True,
+            "healthy": healthy,
+            "reason": None if healthy else realtime.get("reason"),
+            "missing_requirements": [],
+            "can_run_pipeline": healthy,
+            "realtime_ready": healthy,
+            "research_inputs_ready": healthy,
+            "endpoint_host": "alpaca-trade-api.vertu.cn",
+            "capabilities": [
+                "historical_daily",
+                "historical_minute",
+                "news",
+                "reference",
+                "sec_filings",
+                "realtime_bars",
+                "realtime_quotes",
+                "realtime_trades",
+            ],
+        }
+
+
 class ScheduledResearchPipeline:
     """Deep local module over the existing deterministic pre/postmarket DAGs."""
 
@@ -237,11 +314,18 @@ class LocalResearchRuntime:
         runs_root: Path,
         market_data: MarketDataAdapter,
         pipeline: ResearchPipeline | None = None,
+        workflows: DesktopWorkflowManager | None = None,
+        bootstrap_status: dict[str, object] | None = None,
     ):
         self.data_root = data_root
         self.runs_root = runs_root
         self.market_data = market_data
         self.pipeline = pipeline or ScheduledResearchPipeline()
+        self.workflows = workflows or DesktopWorkflowManager(
+            data_root=self.data_root,
+            runs_root=self.runs_root,
+        )
+        self.bootstrap_status = bootstrap_status or {"status": "not_configured"}
         self.data_root.mkdir(parents=True, exist_ok=True)
         self.runs_root.mkdir(parents=True, exist_ok=True)
         self._desk = TradingDeskEvidence(
@@ -259,6 +343,8 @@ class LocalResearchRuntime:
             "local_execution": True,
             "research_kernel": "trading-system-v2",
             "market_data": self.market_data.status(),
+            "workflows": self.workflows.status(),
+            "bootstrap": dict(self.bootstrap_status),
             "orders_authorized": False,
             "paper_runtime_authorized": False,
             "live_trading_authorized": False,
@@ -308,6 +394,46 @@ class LocalResearchRuntime:
             runs_root=self.runs_root,
         )
         return {**result, "orders_submitted": 0}
+
+    def workflow_status(self) -> dict[str, object]:
+        return self.workflows.status()
+
+    def submit_workflow(self, action: str, trade_date: date) -> dict[str, object]:
+        market_data = self.market_data.status()
+        if market_data.get("can_run_pipeline") is not True:
+            return {
+                "accepted": False,
+                "reason": str(
+                    market_data.get("reason")
+                    or "market_data_provider_unconfigured"
+                ),
+                "orders_submitted": 0,
+            }
+        inventory = self.workflows.data_inventory()
+        if (
+            action in {"run_selection", "run_today"}
+            and inventory.get("ready_for_selection") is not True
+        ):
+            return {
+                "accepted": False,
+                "reason": "initial_data_sync_required",
+                "data_inventory": inventory,
+                "orders_submitted": 0,
+            }
+        return self.workflows.submit(action, trade_date=trade_date)
+
+    def start_monitor(self, trade_date: date) -> dict[str, object]:
+        market_data = self.market_data.status()
+        if market_data.get("realtime_ready") is not True:
+            return {
+                "accepted": False,
+                "reason": str(market_data.get("reason") or "realtime_unavailable"),
+                "orders_submitted": 0,
+            }
+        return self.workflows.start_monitor(trade_date=trade_date)
+
+    def stop_monitor(self) -> dict[str, object]:
+        return self.workflows.stop_monitor()
 
 
 def _require_utc(value: datetime) -> None:
