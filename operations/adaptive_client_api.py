@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import secrets
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -195,17 +196,33 @@ def build_client_http_server(
     host: str,
     port: int,
     static_root: Path,
+    bearer_token: str | None = None,
 ) -> ThreadingHTTPServer:
     """Build a localhost-oriented server with dashboard JSON and SSE decisions."""
 
     if not static_root.is_dir():
         raise FileNotFoundError(f"client static root does not exist: {static_root}")
+    if bearer_token is not None and (
+        len(bearer_token) < 16 or "\r" in bearer_token or "\n" in bearer_token
+    ):
+        raise ValueError("client bearer token must be at least 16 safe characters")
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "AdaptiveTradingClient/1"
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
+            if parsed.path.startswith("/v1/") and not self._authorized():
+                self._send_json(
+                    ClientApiResponse(
+                        status=HTTPStatus.UNAUTHORIZED,
+                        body={
+                            "error": "read-only client authentication required",
+                            "orders_authorized": False,
+                        },
+                    )
+                )
+                return
             if parsed.path == "/v1/events/stream":
                 self._serve_event_stream(parse_qs(parsed.query))
                 return
@@ -236,6 +253,17 @@ def build_client_http_server(
 
         def do_POST(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
+            if parsed.path.startswith("/v1/") and not self._authorized():
+                self._send_json(
+                    ClientApiResponse(
+                        status=HTTPStatus.UNAUTHORIZED,
+                        body={
+                            "error": "read-only client authentication required",
+                            "orders_authorized": False,
+                        },
+                    )
+                )
+                return
             response = application.handle(
                 "POST",
                 parsed.path,
@@ -308,6 +336,15 @@ def build_client_http_server(
                 "img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
                 "script-src 'self'",
             )
+
+        def _authorized(self) -> bool:
+            if bearer_token is None:
+                return True
+            header = self.headers.get("Authorization", "")
+            prefix = "Bearer "
+            if not header.startswith(prefix):
+                return False
+            return secrets.compare_digest(header[len(prefix) :], bearer_token)
 
         def log_message(self, format: str, *args: Any) -> None:
             return

@@ -10,3 +10,5 @@ htmlcov/
 runs/
 data/
 config/autonomous_paper.local.json
+client/release/
+client/release-macos-analyst/

@@ -1,0 +1,57 @@
+name: macOS research client
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/macos-research-client
+    paths:
+      - client/**
+      - .github/workflows/macos-research-client.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build-unsigned:
+    runs-on: macos-14
+    timeout-minutes: 30
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install dependencies
+        working-directory: client
+        run: npm ci
+
+      - name: Test Electron services
+        working-directory: client
+        run: npm run test:electron
+
+      - name: Build renderer
+        working-directory: client
+        run: npm run build
+
+      - name: Build macOS icon
+        working-directory: client
+        run: npm run icon:mac
+
+      - name: Package Intel and Apple Silicon apps
+        working-directory: client
+        run: npx electron-builder --config electron-builder.analyst.yml --mac dmg zip --x64 --arm64 --publish never
+
+      - name: Upload unsigned artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-research-client-unsigned
+          path: client/release-macos-analyst/*
+          if-no-files-found: error

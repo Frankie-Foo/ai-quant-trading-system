@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -32,6 +33,11 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=ROOT / "client" / "dist",
     )
+    parser.add_argument(
+        "--bearer-token-env",
+        default="",
+        help="optional environment-variable name containing the read-only API token",
+    )
     return parser
 
 
@@ -50,6 +56,14 @@ def main() -> int:
         data_root=ROOT / "data",
         runs_root=ROOT / "runs",
     )
+    bearer_token = None
+    if args.bearer_token_env:
+        bearer_token = os.environ.get(args.bearer_token_env, "").strip()
+        if not bearer_token:
+            raise ValueError(
+                f"required bearer token environment variable is missing: "
+                f"{args.bearer_token_env}"
+            )
     application = AdaptiveClientApplication(
         store=store,
         emergency_stop=emergency_stop,
@@ -60,6 +74,7 @@ def main() -> int:
         host=args.host,
         port=args.port,
         static_root=args.static_root,
+        bearer_token=bearer_token,
     )
     print(
         json.dumps(
@@ -67,6 +82,7 @@ def main() -> int:
                 "status": "ready",
                 "url": f"http://{args.host}:{args.port}",
                 "orders_authorized": False,
+                "bearer_auth_required": bearer_token is not None,
             },
             ensure_ascii=False,
         ),

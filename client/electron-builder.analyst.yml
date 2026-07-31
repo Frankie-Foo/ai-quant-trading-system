@@ -1,0 +1,34 @@
+appId: cn.frank.ai-quant-research-desk
+productName: AI量化研究台
+asar: true
+files:
+  - dist/**/*
+  - electron/analyst-main.cjs
+  - electron/analyst-preload.cjs
+  - electron/analyst/**/*
+  - analyst-distribution.json
+  - package.json
+extraMetadata:
+  main: electron/analyst-main.cjs
+directories:
+  output: release-macos-analyst
+mac:
+  category: public.app-category.finance
+  icon: build/icon.icns
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  artifactName: "${productName}-${version}-${arch}.${ext}"
+win:
+  icon: build/icon.png
+dmg:
+  sign: false
+  title: AI量化研究台

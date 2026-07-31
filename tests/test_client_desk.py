@@ -145,8 +145,13 @@ def test_desk_exposes_ranked_selection_jobs_and_maturity_without_secrets(
     assert isinstance(candidates, list)
     assert [row["symbol"] for row in candidates] == ["BBB", "AAA"]
     assert candidates[0]["rvol"] == 21.0
-    assert result["maturity"]["paper_trading_sessions"] == 1
-    assert result["agents"][0]["status"] == "unavailable"
+    maturity = result["maturity"]
+    assert isinstance(maturity, dict)
+    assert maturity["paper_trading_sessions"] == 1
+    agents = result["agents"]
+    assert isinstance(agents, list)
+    assert isinstance(agents[0], dict)
+    assert agents[0]["status"] == "unavailable"
 
     serialized = json.dumps(result).lower()
     assert "opaque-token" not in serialized
@@ -197,6 +202,10 @@ def test_beijing_after_midnight_stays_on_open_us_session(tmp_path: Path) -> None
     ).snapshot(datetime(2026, 7, 31, 21, 0, tzinfo=UTC))
 
     assert during_session["target_trade_date"] == "2026-07-31"
-    assert during_session["selection"]["status"] == "ready"
+    during_selection = during_session["selection"]
+    assert isinstance(during_selection, dict)
+    assert during_selection["status"] == "ready"
     assert after_close["target_trade_date"] == "2026-08-03"
-    assert after_close["selection"]["stale"] is True
+    after_selection = after_close["selection"]
+    assert isinstance(after_selection, dict)
+    assert after_selection["stale"] is True

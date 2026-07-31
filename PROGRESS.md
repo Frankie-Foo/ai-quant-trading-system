@@ -868,3 +868,35 @@ remain unapproved and no live order route exists.
 - Repository acceptance: 451 tests passed in 23.08 seconds, Ruff clean, strict mypy
   success across 178 source files, Vite production build success, Electron main-process
   syntax validation success, and multi-page headless Chrome visual verification.
+
+## M30 distributable macOS research client - 2026-07-31
+
+Status: implemented on `feature/macos-research-client` as a separately packaged,
+read-only client. It preserves the existing local client while removing Paper and
+order capabilities from the macOS distribution boundary.
+
+- Added a dedicated Electron main/preload pair and an explicit packaging allow-list.
+  The built ASAR contains the analyst renderer, model/data services, encrypted settings,
+  and the reserved IBKR interface; it excludes the existing desktop main process,
+  tests, Python services, `.env` files, and execution modules.
+- Added a two-step first-run flow for a remote read-only evidence service and the
+  user's own OpenRouter Key. Four model roles are independently configurable:
+  evidence Q&A, catalyst analyst, red team, and supervisor. Model calls occur only in
+  the Electron main process and are bounded by a compact white-listed evidence payload.
+- Secrets are encrypted with Electron `safeStorage`, backed by macOS Keychain, and
+  settings fail closed when OS encryption is unavailable. Remote data requires HTTPS
+  outside loopback, supports an optional bearer token, and accepts only
+  `trading_desk_evidence.v1` with `stage=research_only` and
+  `orders_authorized=false`.
+- The IBKR Paper seam reports reserved/unconfigured status. Both connection and order
+  methods throw, and no renderer IPC channel exposes order submission.
+- Added Intel and Apple Silicon DMG/ZIP configuration plus a macOS GitHub Actions
+  build. Artifacts remain unsigned until an Apple Developer ID and notarization
+  credentials are supplied; this is intentionally not reported as a signed release.
+- Acceptance: 452 Python tests passed, nine Electron service tests passed, Ruff clean,
+  strict mypy success across 272 source files, Vite production build success, seven
+  CommonJS entry/service syntax checks passed, and a Windows directory packaging
+  contract check confirmed required ASAR files were present with forbidden execution
+  paths absent. Configured renderer QA showed 12 evidence candidates, eight review
+  rows, three research Agent cards, zero order controls, and no console/page/request
+  errors.
