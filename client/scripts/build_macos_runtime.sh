@@ -2,6 +2,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+repo_root="$(cd .. && pwd)"
 
 rm -rf build/runtime build/runtime-work build/macos-research-runtime.spec
 mkdir -p build/runtime
@@ -11,14 +12,14 @@ python -m PyInstaller \
   --clean \
   --onefile \
   --name macos-research-runtime \
-  --paths .. \
+  --paths "$repo_root" \
   --distpath build/runtime \
   --workpath build/runtime-work \
   --specpath build \
   --collect-data pandas_market_calendars \
   --copy-metadata pandas-market-calendars \
-  --add-data "../config.yaml:." \
-  --add-data "../config:config" \
+  --add-data "$repo_root/config.yaml:." \
+  --add-data "$repo_root/config:config" \
   --hidden-import data_plane.cli \
   --hidden-import scripts.build_catalyst_snapshot \
   --hidden-import scripts.build_cross_asset_sentiment_snapshot \
@@ -34,6 +35,6 @@ python -m PyInstaller \
   --hidden-import scripts.run_multisignal_shadow_pipeline \
   --hidden-import scripts.run_postclose_missed_movers_review \
   --hidden-import scripts.run_structured_pdca \
-  ../scripts/macos_research_entry.py
+  "$repo_root/scripts/macos_research_entry.py"
 
 chmod 755 build/runtime/macos-research-runtime
