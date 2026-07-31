@@ -1,151 +1,152 @@
-# macOS 研究分析版客户端
+# macOS 本地研究版客户端
 
 ## 定位
 
-这是给外部研究用户的独立客户端，不是本地交易终端的移植版。
+这个发行版复制主系统的本地研究模式，而不是远程选股结果查看器。
 
-它只提供：
+Mac 本机负责：
 
-- 当日不可变选股名单与证据；
-- OpenRouter 驱动的研究答疑；
-- 盘后强势股、漏选原因和因子缺口复盘；
-- 催化剂、红队、证据审计三个只读 Agent；
-- 独立的答疑模型和三个 Agent 模型配置。
+- 运行 `trading-system-v2` 的确定性选股内核；
+- 运行催化剂、纯因子、订单流与统一仲裁研究管线；
+- 保存不可变 accepted 数据快照、任务账本和复盘结果；
+- 运行收盘漏选归因与结构化复盘；
+- 调用用户自己的 OpenRouter Key 完成答疑和三个只读 Agent。
 
-它明确不提供：
+它明确不包含：
 
-- Alpaca Paper、IBKR Paper 或其他模拟盘；
+- Alpaca Paper 或其他模拟盘；
 - 持仓、买入、卖出、止盈、止损和急停按钮；
-- 实盘连接；
-- 任何订单路由。
+- 实盘连接或订单路由。
 
-客户端只接受 `stage=research_only` 且 `orders_authorized=false` 的
-`trading_desk_evidence.v1`。远程服务如果返回可执行状态，客户端会拒绝加载。
+IBKR Paper 只保留 fail-closed 的 Adapter 位置。行情 Adapter 当前为空，
+所以首次发布会明确显示 `market_data_provider_unconfigured`，不会下载数据，
+也不会用历史名单或测试数据伪造今日选股。
 
 ## 架构
 
 ```mermaid
 flowchart LR
-    A["VPS 选股与复盘管线"] --> B["不可变 accepted 快照"]
-    B --> C["只读 trading_desk_evidence.v1"]
-    C --> D["HTTPS + 单用户 Bearer Token"]
-    D --> E["macOS Electron 主进程"]
-    F["macOS Keychain"] --> E
-    E --> G["React 研究界面"]
-    E --> H["OpenRouter Models / Chat Completions"]
-    I["IBKR Paper 预留适配器"] -. "默认不可连接、不可下单" .-> E
+    A["Electron macOS 客户端"] --> B["本机 PyInstaller Research Runtime"]
+    B --> C["kernel / research / schedule"]
+    C --> D["本机 accepted 快照"]
+    C --> E["本机任务账本与自动复盘"]
+    F["行情 Adapter：当前未配置"] -. "未来接 Massive / 云行情 / IBKR" .-> C
+    G["用户自己的 OpenRouter Key"] --> A
+    H["IBKR Paper Adapter"] -. "预留且禁止下单" .-> A
 ```
 
-选股和复盘来自服务器，不依赖 Mac 用户拥有 Massive、Alpaca 或本地 Python 环境。
-OpenRouter Key 只用于用户自己的答疑和 Agent 调用，不会发送到选股服务器。
+Electron 启动时会拉起随 App 分发的原生 Python sidecar。sidecar 只绑定随机
+loopback 端口，Electron 为每次启动生成 256-bit 临时令牌；令牌不落盘、不进日志。
+本地接口只提供：
+
+- `GET /v1/health`
+- `GET /v1/desk`
+- `POST /v1/run-due`
+
+其他 POST 路由统一返回 404，不存在订单端点。
+
+## 本地文件
+
+App 的用户目录内维护两个互相分离的目录：
+
+```text
+~/Library/Application Support/AI量化研究台/
+├── research-data/       # accepted / quarantined 快照
+├── research-runs/       # jobs.sqlite3、锁、复盘与成熟度证据
+└── research-settings.json
+```
+
+`research-settings.json` 只保存模型 ID 和密文。OpenRouter Key 由 Electron
+`safeStorage` 使用 macOS Keychain 加密；渲染进程只能看到“已配置”状态。
 
 ## 首次启动
 
 首次打开分两步：
 
-1. 填写研究数据服务地址、该用户的只读访问令牌和自己的 OpenRouter API Key；
-2. 分别选择答疑、催化剂 Agent、红队 Agent、证据审计 Agent 使用的模型。
+1. 本地研究内核启动自检，用户填写自己的 OpenRouter API Key；
+2. 分别为答疑、催化剂 Agent、红队 Agent和证据审计 Agent 选择模型。
 
-四个模型可以相同，也可以完全不同。模型目录来自 OpenRouter 官方
-`GET /api/v1/models?output_modalities=text`。答疑和 Agent 使用官方
-`POST /api/v1/chat/completions`，当前采用非流式响应，方便记录确切模型和 token 用量。
+不再要求公网选股服务地址或数据访问令牌。
 
-OpenRouter Key 与数据访问令牌由 Electron `safeStorage` 加密保存。在 macOS 上，
-`safeStorage` 使用系统 Keychain。渲染进程只能看到“已配置/未配置”，拿不到明文。
-如果系统安全存储不可用，客户端拒绝保存，不会降级为明文文件。
+OpenRouter Key 只负责模型调用，不能替代行情源。行情 Adapter 未配置期间：
 
-## 配置发布时的默认数据地址
+- 本地内核和自动调度仍正常启动；
+- 选股状态固定为阻断；
+- 复盘只展示本机已有、可验证且带日期的 accepted 证据；
+- 三个 Agent 必须说明行情缺失，不能产生买卖建议或虚构今日名单。
 
-发布前可编辑：
+## 行情 Adapter seam
 
-`client/analyst-distribution.json`
+代码 seam 位于：
 
-```json
-{
-  "schema_version": "macos-research-distribution.v1",
-  "default_data_service_url": "https://research.example.com"
-}
+- `operations/local_research_runtime.py`
+- `MarketDataAdapter`
+
+现有两个 Adapter：
+
+1. `UnconfiguredMarketDataAdapter`：默认启用，永远 fail-closed；
+2. `EnvironmentMarketDataAdapter`：兼容当前 Massive 加云行情管线，但发行版
+   尚未提供配置入口，也不会自动启用。
+
+以后接 Massive、Alpaca、IBKR 或团队行情接口时，只需新增/启用 Adapter；
+Electron、选股内核、复盘和 Agent 界面无需重写。
+
+当前兼容 Adapter 要求：
+
+```text
+MASSIVE_API_KEY
+CLOUD_PLATFORM_BASE_URL
+CLOUD_MARKET_DATA_API_TOKEN
+SEC_USER_AGENT
 ```
 
-这个文件只能包含公开的 HTTPS 服务地址，不能包含访问令牌、OpenRouter Key 或其他凭据。
-配置后，Mac 用户首次启动只需确认地址并填写两个属于自己的凭据。
+状态接口只返回缺少的变量名称，永远不返回变量值。
 
-## 启动只读数据服务
+## 自动执行
 
-服务器继续只绑定 loopback，由 Nginx/Caddy/Cloudflare Tunnel 等认证 HTTPS 网关代理，
-不能把 Python 端口直接暴露到公网。
+sidecar 每 60 秒调用一次深模块 `ScheduledResearchPipeline.run_due()`。
+这个接口隐藏完整的盘前与盘后 DAG，内部复用：
 
-在 VPS 为该 Mac 用户生成独立的高熵只读令牌，并通过环境变量注入：
+- `schedule.premarket`
+- `schedule.postmarket`
+- 既有 `data_plane/`、`kernel/`、`research/` 和 `scripts/`
 
-```bash
-export MACOS_ANALYST_ACCESS_TOKEN='<user-specific-read-token>'
-.venv/bin/python -m scripts.serve_adaptive_client \
-  --host 127.0.0.1 \
-  --port 8787 \
-  --static-root client/dist \
-  --bearer-token-env MACOS_ANALYST_ACCESS_TOKEN
-```
+任务账本、进程锁和 accepted 快照保证重复轮询幂等。行情未配置时调用在
+进入任何下载或计算任务前被阻断，`orders_submitted` 始终为 0。
 
-网关必须：
+## OpenRouter 与三个 Agent
 
-- 终止 TLS；
-- 原样转发 `Authorization: Bearer ...`；
-- 只代理必要的 `/v1/desk` 和 `/v1/health`；
-- 设置请求频率与连接数限制；
-- 不记录 Authorization 请求头；
-- 不提供 `.env`、`runs`、`data` 或文件目录访问。
+四个模型角色相互独立：
 
-后端采用常量时间比较令牌，401 响应不会回显令牌。每个用户应使用独立令牌，以便单独吊销。
+- 研究答疑；
+- 催化剂 Agent；
+- 红队 Agent；
+- 证据审计 Agent。
 
-## OpenRouter 模型与答疑边界
+模型目录来自 OpenRouter 官方
+`GET /api/v1/models?output_modalities=text`，回答使用
+`POST /api/v1/chat/completions`。所有模型请求都由 Electron 主进程发出。
 
-答疑会附带白名单化后的当日选股、盘后复盘、任务和成熟度摘要。系统提示固定要求：
-
-- 先说明证据日期以及是否过期；
-- 不把候选名单当作买入指令；
-- 不承诺收益；
-- 不补造新闻或缺失数据；
-- 证据不足时明确回答不知道。
-
-三个 Agent 的输出同样只是解释和审计，不会写入服务器快照、修改选股阈值或触发订单。
-
-OpenRouter 官方接口：
+官方资料：
 
 - <https://openrouter.ai/docs/api/api-reference/models/get-models>
 - <https://openrouter.ai/docs/api/api-reference/chat/send-chat-completion-request>
 
-## IBKR Paper 预留接口
+## IBKR Paper 预留
 
 预留代码位于：
 
 `client/electron/analyst/ibkr-paper.cjs`
 
-当前状态固定为：
-
-```json
-{
-  "adapter": "ibkr-paper-reserved.v1",
-  "configured": false,
-  "connected": false,
-  "orderSubmissionEnabled": false
-}
-```
-
-`connect()` 和 `placeOrder()` 都会失败。后续接入时优先支持 Mac 本机运行的
-IBKR Client Portal Gateway 或 TWS/IB Gateway Paper：
-
-- Client Portal Gateway 默认 `https://localhost:5000/v1/api`，需要 Paper 专用用户名、
-  2FA 和持续会话维护；
-- TWS Paper 默认端口 7497，IB Gateway Paper 默认端口 4002；
-- 连接、账户核对、订单意图、幂等键、成交对账和恢复测试必须单独验收；
-- 研究版 UI 在验收前不能出现订单控件。
+`connect()` 与 `placeOrder()` 当前都会失败。后续接入必须单独完成账户核对、
+幂等订单、成交对账、断线恢复和 Paper 前向验收，验收前研究版 UI 不出现订单控件。
 
 IBKR 官方资料：
 
 - <https://ibkrcampus.com/campus/ibkr-api-page/cpapi-v1/>
 - <https://ibkrcampus.com/campus/ibkr-api-page/twsapi-doc/>
 
-## 本地开发与测试
+## 本地开发
 
 ```powershell
 Set-Location client
@@ -154,26 +155,28 @@ npm run test:electron
 npm run desktop:analyst
 ```
 
-`desktop:analyst` 使用独立的 `electron/analyst-main.cjs`，不会启动本地 Paper 监控。
+开发模式使用仓库 `.venv`。Electron 启动和关闭时会共同管理本地 sidecar，
+不会启动 Paper 监控。
 
-## macOS 构建
+## macOS 自包含构建
 
-macOS 包必须在 macOS runner 上生成：
+CI 在 ARM64 与 Intel 原生 runner 上分别构建 PyInstaller sidecar，再由
+Electron Builder 生成对应架构的 DMG/ZIP：
 
 ```bash
+python -m pip install -r requirements-macos-research.txt
 cd client
 npm ci
-npm run dist:mac:analyst
+npm run build
+npm run test:electron
+npm run icon:mac
+npm run runtime:mac
+npx electron-builder --config electron-builder.analyst.yml --mac dmg zip --arm64
 ```
 
-仓库内的 `.github/workflows/macos-research-client.yml` 会生成 Intel 与 Apple Silicon 的
-DMG/ZIP。默认 CI 产物未签名，仅用于工程验收。
+GitHub workflow：
 
-交付真实用户前还需要：
+`.github/workflows/macos-research-client.yml`
 
-1. Apple Developer ID Application 证书；
-2. Apple Team ID；
-3. notarization 使用的 App Store Connect API Key 或受控的签名凭据；
-4. 签名、notarization、stapling 和另一台干净 Mac 的 Gatekeeper 验收。
-
-没有这些证明时不能把 unsigned DMG 描述成正式生产发行版。
+默认 CI 产物未签名，只用于工程验收。正式交付仍需要 Developer ID Application
+签名、notarization、stapling 和另一台干净 Mac 的 Gatekeeper 验收。

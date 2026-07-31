@@ -18,6 +18,10 @@ const bridge = Object.freeze({
   desk: Object.freeze({
     get: () => ipcRenderer.invoke('analyst:desk:get'),
   }),
+  runtime: Object.freeze({
+    status: () => ipcRenderer.invoke('analyst:runtime:status'),
+    runDue: () => ipcRenderer.invoke('analyst:runtime:run-due'),
+  }),
   assistant: Object.freeze({
     ask: (question) => ipcRenderer.invoke('analyst:assistant:ask', { question }),
   }),

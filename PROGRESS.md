@@ -900,3 +900,39 @@ order capabilities from the macOS distribution boundary.
   paths absent. Configured renderer QA showed 12 evidence candidates, eight review
   rows, three research Agent cards, zero order controls, and no console/page/request
   errors.
+
+## M31 self-contained macOS local research runtime - 2026-07-31
+
+Status: the macOS edition now copies the main system's local research execution model.
+The earlier remote desk transport was removed from this distribution. Market data is
+an explicit empty Adapter and remains fail-closed.
+
+- Added a deep `LocalResearchRuntime` module over the existing deterministic
+  `data_plane`, `kernel`, `research`, `schedule`, and snapshot-backed desktop evidence.
+  Its small interface exposes status, one honest desk snapshot, and an idempotent
+  due-task tick; every result fixes `orders_authorized=false` and
+  `orders_submitted=0`.
+- Added a real market-data seam with two Adapters. The default unconfigured Adapter
+  blocks before download or selection. The environment compatibility Adapter detects
+  the existing Massive/cloud-market/SEC requirements but returns only missing variable
+  names, never values. The release does not yet expose a way to enable it.
+- Added an authenticated loopback sidecar. Electron generates a fresh 256-bit token
+  each launch, starts the runtime inside the user's Application Support directory,
+  and retains local accepted snapshots and job ledgers across restarts. No data-service
+  URL, remote access token, Broker, Paper process, or order route remains in the Mac UI.
+- Added a frozen `python -m` dispatcher so the existing premarket and postmarket DAGs
+  can spawn their current child modules inside a PyInstaller executable. The native
+  sidecar includes the deterministic research modules and configuration, while the
+  Electron ASAR remains allow-listed to the analyst UI and local launcher.
+- Replaced the macOS CI build with native ARM64 and Intel jobs. Each runner builds its
+  own PyInstaller sidecar before Electron Builder packages the matching DMG/ZIP.
+  Artifacts remain unsigned pending Apple Developer signing and notarization.
+- Real local smoke verification started Electron plus its managed Python sidecar,
+  reported `local_execution=true`, `provider_id=unconfigured`,
+  `selection_status=blocked`, `market_data_provider_unconfigured`, and
+  `orders_authorized=false`; stderr was empty. Visual QA confirmed the first screen
+  asks only for OpenRouter and explicitly shows local execution plus the empty market
+  Adapter.
+- Repository acceptance: 456 Python tests passed in 22.22 seconds, ten Electron
+  service tests passed, Ruff clean, strict mypy success across 277 source files, Vite
+  production build success, and all analyst CommonJS files passed syntax validation.

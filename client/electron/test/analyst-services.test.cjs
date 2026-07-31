@@ -6,15 +6,18 @@ const test = require('node:test')
 
 const {
   createSecureSettingsStore,
-  validateServiceUrl,
 } = require('../analyst/settings.cjs')
+const {
+  createLocalRuntimeClient,
+  runtimeLaunch,
+  validateRuntimeHandshake,
+} = require('../analyst/local-runtime.cjs')
 const { createOpenRouterClient } = require('../analyst/openrouter.cjs')
 const {
   agentMessages,
   assistantMessages,
   compactDeskEvidence,
 } = require('../analyst/prompts.cjs')
-const { createResearchDataClient } = require('../analyst/research-data.cjs')
 const { createIbkrPaperAdapter } = require('../analyst/ibkr-paper.cjs')
 
 const MODELS = {
@@ -39,7 +42,7 @@ function jsonResponse(body, { status = 200, headers = {} } = {}) {
   })
 }
 
-test('secure settings persist secrets encrypted and expose only redacted state', () => {
+test('secure settings persist only the OpenRouter secret and expose redacted state', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'analyst-settings-'))
   const settingsPath = path.join(root, 'settings.json')
   const store = createSecureSettingsStore({
@@ -47,26 +50,20 @@ test('secure settings persist secrets encrypted and expose only redacted state',
     safeStorage: fakeSafeStorage(),
   })
 
-  store.saveConnection({
-    dataServiceUrl: 'https://research.example.com',
-    dataAccessToken: 'data-token-value',
-    openRouterApiKey: 'openrouter-key-value',
-  })
+  store.saveOpenRouterKey('openrouter-key-value')
   store.saveModels(MODELS)
 
   const publicSettings = store.loadPublic()
   assert.equal(publicSettings.configured, true)
   assert.equal(publicSettings.openRouterKeyConfigured, true)
-  assert.equal(publicSettings.dataAccessTokenConfigured, true)
+  assert.equal('dataServiceUrl' in publicSettings, false)
+  assert.equal('dataAccessTokenConfigured' in publicSettings, false)
   assert.deepEqual(publicSettings.models, MODELS)
   assert.equal(JSON.stringify(publicSettings).includes('openrouter-key-value'), false)
-  assert.equal(JSON.stringify(publicSettings).includes('data-token-value'), false)
 
   const persisted = fs.readFileSync(settingsPath, 'utf8')
   assert.equal(persisted.includes('openrouter-key-value'), false)
-  assert.equal(persisted.includes('data-token-value'), false)
   assert.deepEqual(store.loadSecrets(), {
-    dataAccessToken: 'data-token-value',
     openRouterApiKey: 'openrouter-key-value',
   })
 })
@@ -88,23 +85,78 @@ test('secure settings fail closed when OS encryption is unavailable', () => {
   })
 
   assert.throws(
-    () => store.saveConnection({
-      dataServiceUrl: 'https://research.example.com',
-      dataAccessToken: 'data-token-value',
-      openRouterApiKey: 'openrouter-key-value',
-    }),
+    () => store.saveOpenRouterKey('openrouter-key-value'),
     /不会以明文保存/,
   )
   assert.equal(fs.existsSync(settingsPath), false)
 })
 
-test('remote data services require HTTPS while loopback remains available for QA', () => {
-  assert.equal(validateServiceUrl('https://research.example.com'), 'https://research.example.com')
-  assert.equal(validateServiceUrl('http://127.0.0.1:8787/'), 'http://127.0.0.1:8787')
-  assert.throws(
-    () => validateServiceUrl('http://research.example.com'),
-    /HTTPS/,
+test('local runtime handshake accepts only loopback and non-executable mode', () => {
+  assert.deepEqual(
+    validateRuntimeHandshake({
+      schema_version: 'macos_local_research_handshake.v1',
+      url: 'http://127.0.0.1:54321',
+      local_execution: true,
+      orders_authorized: false,
+    }),
+    {
+      url: 'http://127.0.0.1:54321',
+      localExecution: true,
+    },
   )
+  assert.throws(
+    () => validateRuntimeHandshake({
+      schema_version: 'macos_local_research_handshake.v1',
+      url: 'https://research.example.com',
+      local_execution: true,
+      orders_authorized: false,
+    }),
+    /loopback/,
+  )
+  assert.throws(
+    () => validateRuntimeHandshake({
+      schema_version: 'macos_local_research_handshake.v1',
+      url: 'http://127.0.0.1:54321',
+      local_execution: true,
+      orders_authorized: true,
+    }),
+    /non-executable/,
+  )
+})
+
+test('packaged runtime launch is local, user-scoped, and provider-empty', () => {
+  const launch = runtimeLaunch({
+    app: {
+      isPackaged: true,
+      getPath: (name) => {
+        assert.equal(name, 'userData')
+        return '/Users/research/Library/Application Support/AIQuant'
+      },
+    },
+    projectRoot: '/unused',
+    resourcesPath: '/Applications/AIQuant.app/Contents/Resources',
+    token: 'ephemeral-runtime-token-value',
+  })
+
+  assert.equal(
+    launch.command,
+    path.join(
+      '/Applications/AIQuant.app/Contents/Resources',
+      'runtime',
+      'macos-research-runtime',
+    ),
+  )
+  assert.equal(launch.args.includes('unconfigured'), true)
+  assert.equal(
+    launch.args.includes(
+      path.join(
+        '/Users/research/Library/Application Support/AIQuant',
+        'research-data',
+      ),
+    ),
+    true,
+  )
+  assert.equal(launch.args.some((value) => value.startsWith('http')), false)
 })
 
 test('OpenRouter client lists text models and sends non-streaming chat safely', async () => {
@@ -179,9 +231,9 @@ test('OpenRouter errors expose typed status but never echo the API key', async (
   )
 })
 
-test('research data client requires read-only evidence and sends optional bearer token', async () => {
+test('local runtime client authenticates locally and requires local evidence', async () => {
   const requests = []
-  const client = createResearchDataClient({
+  const client = createLocalRuntimeClient({
     fetchImpl: async (url, options) => {
       requests.push({ url, options })
       return jsonResponse({
@@ -193,37 +245,52 @@ test('research data client requires read-only evidence and sends optional bearer
         agents: [],
         jobs: [],
         maturity: {},
+        runtime: {
+          schema_version: 'macos_local_research_runtime.v1',
+          local_execution: true,
+          orders_authorized: false,
+        },
       })
     },
   })
-
-  const desk = await client.fetchDesk({
-    baseUrl: 'https://research.example.com/',
-    accessToken: 'read-only-token',
+  client.connect({
+    url: 'http://127.0.0.1:54321',
+    token: 'ephemeral-runtime-token-value',
   })
 
+  const desk = await client.fetchDesk()
+
   assert.equal(desk.orders_authorized, false)
-  assert.equal(requests[0].url, 'https://research.example.com/v1/desk')
-  assert.equal(requests[0].options.headers.Authorization, 'Bearer read-only-token')
+  assert.equal(desk.runtime.local_execution, true)
+  assert.equal(requests[0].url, 'http://127.0.0.1:54321/v1/desk')
+  assert.equal(
+    requests[0].options.headers.Authorization,
+    'Bearer ephemeral-runtime-token-value',
+  )
 })
 
-test('research data client rejects a remotely executable payload', async () => {
-  const client = createResearchDataClient({
+test('local runtime client rejects remote or executable evidence', async () => {
+  const client = createLocalRuntimeClient({
     fetchImpl: async () => jsonResponse({
       schema_version: 'trading_desk_evidence.v1',
       stage: 'paper',
       orders_authorized: true,
       selection: {},
       review: {},
+      runtime: {
+        schema_version: 'macos_local_research_runtime.v1',
+        local_execution: false,
+      },
     }),
+  })
+  client.connect({
+    url: 'http://127.0.0.1:54321',
+    token: 'ephemeral-runtime-token-value',
   })
 
   await assert.rejects(
-    client.fetchDesk({
-      baseUrl: 'https://research.example.com',
-      accessToken: '',
-    }),
-    /non-executable/,
+    client.fetchDesk(),
+    /local non-executable/,
   )
 })
 

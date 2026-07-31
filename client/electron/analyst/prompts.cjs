@@ -25,6 +25,16 @@ function compactDeskEvidence(desk) {
     stage: desk?.stage || null,
     pipeline_status: desk?.pipeline_status || null,
     orders_authorized: false,
+    runtime: {
+      execution_mode: desk?.runtime?.execution_mode || null,
+      local_execution: desk?.runtime?.local_execution === true,
+      market_data: {
+        provider_id: desk?.runtime?.market_data?.provider_id || null,
+        configured: desk?.runtime?.market_data?.configured === true,
+        healthy: desk?.runtime?.market_data?.healthy === true,
+        reason: desk?.runtime?.market_data?.reason || null,
+      },
+    },
     selection: {
       status: selection.status || null,
       blocker: selection.blocker || null,

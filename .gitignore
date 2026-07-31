@@ -12,3 +12,6 @@ data/
 config/autonomous_paper.local.json
 client/release/
 client/release-macos-analyst/
+client/build/runtime/
+client/build/runtime-work/
+client/build/macos-research-runtime.spec

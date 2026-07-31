@@ -27,6 +27,11 @@
 .step-label { display: inline-block; margin-top: 34px; color: var(--analyst-amber); font-size: 9px; font-weight: 800; letter-spacing: .08em; }
 .onboarding-card h1 { margin: 9px 0 8px; font-size: 26px; }
 .onboarding-lead { margin: 0 0 24px; color: #879498; font-size: 11px; line-height: 1.8; }
+.local-runtime-card { margin: -8px 0 20px; padding: 12px; display: flex; align-items: center; gap: 10px; border: 1px solid rgba(105,214,155,.22); border-radius: 9px; background: rgba(34,74,60,.12); }
+.local-runtime-card > span { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 8px; color: var(--analyst-green); background: rgba(105,214,155,.1); }
+.local-runtime-card > div { display: flex; flex-direction: column; gap: 3px; }
+.local-runtime-card strong { font-size: 10px; }
+.local-runtime-card small { color: #71857c; font-size: 8px; }
 .setup-form, .model-form { display: flex; flex-direction: column; gap: 15px; }
 .setup-form label, .model-form label { display: flex; flex-direction: column; gap: 7px; }
 .setup-form label > span, .model-form label > span { color: #bec8c5; font-size: 10px; font-weight: 700; }

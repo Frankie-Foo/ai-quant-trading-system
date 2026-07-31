@@ -13,8 +13,9 @@
     "desktop:analyst": "npm run build && electron electron/analyst-main.cjs",
     "test:electron": "node --test electron/test/*.test.cjs",
     "icon:mac": "bash scripts/build_macos_icon.sh",
+    "runtime:mac": "bash scripts/build_macos_runtime.sh",
     "dist:win": "npm run build && electron-builder --win nsis",
-    "dist:mac:analyst": "npm run build && npm run test:electron && npm run icon:mac && electron-builder --config electron-builder.analyst.yml --mac dmg zip"
+    "dist:mac:analyst": "npm run build && npm run test:electron && npm run icon:mac && npm run runtime:mac && electron-builder --config electron-builder.analyst.yml --mac dmg zip"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

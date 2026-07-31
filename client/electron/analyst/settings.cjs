@@ -1,28 +1,9 @@
 const fs = require('node:fs')
 const path = require('node:path')
 
-const SETTINGS_SCHEMA = 'macos-research-settings.v1'
+const SETTINGS_SCHEMA = 'macos-local-research-settings.v2'
+const LEGACY_SETTINGS_SCHEMA = 'macos-research-settings.v1'
 const MODEL_KEYS = ['question', 'catalyst', 'red_team', 'supervisor']
-
-function validateServiceUrl(value) {
-  if (typeof value !== 'string' || !value.trim()) {
-    throw new Error('研究数据服务地址不能为空')
-  }
-  let parsed
-  try {
-    parsed = new URL(value.trim())
-  } catch {
-    throw new Error('研究数据服务地址无效')
-  }
-  const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname)
-  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && loopback)) {
-    throw new Error('远程研究数据服务必须使用 HTTPS')
-  }
-  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
-    throw new Error('研究数据服务地址不能包含凭据、查询参数或片段')
-  }
-  return parsed.href.replace(/\/+$/, '')
-}
 
 function normalizeModels(models) {
   if (!models || typeof models !== 'object' || Array.isArray(models)) {
@@ -42,8 +23,6 @@ function normalizeModels(models) {
 function emptySettings() {
   return {
     schemaVersion: SETTINGS_SCHEMA,
-    dataServiceUrl: '',
-    encryptedDataAccessToken: '',
     encryptedOpenRouterApiKey: '',
     models: {},
   }
@@ -63,7 +42,17 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
   function read() {
     try {
       const parsed = JSON.parse(fsImpl.readFileSync(filePath, 'utf8'))
-      if (!parsed || parsed.schemaVersion !== SETTINGS_SCHEMA) return emptySettings()
+      if (!parsed || typeof parsed !== 'object') return emptySettings()
+      if (parsed.schemaVersion === LEGACY_SETTINGS_SCHEMA) {
+        return {
+          ...emptySettings(),
+          encryptedOpenRouterApiKey: String(
+            parsed.encryptedOpenRouterApiKey || '',
+          ),
+          models: parsed.models || {},
+        }
+      }
+      if (parsed.schemaVersion !== SETTINGS_SCHEMA) return emptySettings()
       return { ...emptySettings(), ...parsed }
     } catch (error) {
       if (error && error.code === 'ENOENT') return emptySettings()
@@ -98,27 +87,22 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
   }
 
   return {
-    saveConnection(connection) {
-      const dataServiceUrl = validateServiceUrl(connection.dataServiceUrl)
-      const openRouterApiKey = String(connection.openRouterApiKey || '').trim()
+    saveOpenRouterKey(value) {
+      const openRouterApiKey = String(value || '').trim()
       if (openRouterApiKey.length < 8) {
         throw new Error('OpenRouter API Key 无效')
       }
       const current = read()
       write({
         ...current,
-        dataServiceUrl,
-        encryptedDataAccessToken: encrypt(
-          String(connection.dataAccessToken || '').trim(),
-        ),
         encryptedOpenRouterApiKey: encrypt(openRouterApiKey),
       })
     },
 
     saveModels(models) {
       const current = read()
-      if (!current.dataServiceUrl || !current.encryptedOpenRouterApiKey) {
-        throw new Error('请先完成数据服务和 OpenRouter 配置')
+      if (!current.encryptedOpenRouterApiKey) {
+        throw new Error('请先完成 OpenRouter 配置')
       }
       write({ ...current, models: normalizeModels(models) })
     },
@@ -134,12 +118,9 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
       return {
         schemaVersion: SETTINGS_SCHEMA,
         configured: Boolean(
-          current.dataServiceUrl
-          && current.encryptedOpenRouterApiKey
+          current.encryptedOpenRouterApiKey
           && MODEL_KEYS.every((key) => models[key]),
         ),
-        dataServiceUrl: current.dataServiceUrl,
-        dataAccessTokenConfigured: Boolean(current.encryptedDataAccessToken),
         openRouterKeyConfigured: Boolean(current.encryptedOpenRouterApiKey),
         models,
       }
@@ -148,7 +129,6 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
     loadSecrets() {
       const current = read()
       return {
-        dataAccessToken: decrypt(current.encryptedDataAccessToken),
         openRouterApiKey: decrypt(current.encryptedOpenRouterApiKey),
       }
     },
@@ -170,5 +150,4 @@ module.exports = {
   SETTINGS_SCHEMA,
   createSecureSettingsStore,
   normalizeModels,
-  validateServiceUrl,
 }

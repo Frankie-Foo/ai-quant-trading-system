@@ -1,43 +1,20 @@
 const { app, BrowserWindow, ipcMain, safeStorage } = require('electron')
-const fs = require('node:fs')
 const path = require('node:path')
 
 const { createIbkrPaperAdapter } = require('./analyst/ibkr-paper.cjs')
+const { createLocalRuntimeProcess } = require('./analyst/local-runtime.cjs')
 const { createOpenRouterClient } = require('./analyst/openrouter.cjs')
 const { agentMessages, assistantMessages } = require('./analyst/prompts.cjs')
-const { createResearchDataClient } = require('./analyst/research-data.cjs')
 const {
   MODEL_KEYS,
   createSecureSettingsStore,
   normalizeModels,
-  validateServiceUrl,
 } = require('./analyst/settings.cjs')
 
 const openRouter = createOpenRouterClient()
-const researchData = createResearchDataClient()
 const ibkrPaper = createIbkrPaperAdapter()
 let settingsStore
-let distribution = { defaultDataServiceUrl: '' }
-
-function loadDistributionConfig() {
-  const pathFromApp = path.join(app.getAppPath(), 'analyst-distribution.json')
-  try {
-    const payload = JSON.parse(fs.readFileSync(pathFromApp, 'utf8'))
-    if (
-      payload?.schema_version !== 'macos-research-distribution.v1'
-      || !payload.default_data_service_url
-    ) {
-      return { defaultDataServiceUrl: '' }
-    }
-    return {
-      defaultDataServiceUrl: validateServiceUrl(
-        payload.default_data_service_url,
-      ),
-    }
-  } catch {
-    return { defaultDataServiceUrl: '' }
-  }
-}
+let localRuntime
 
 function requireConfiguredSettings() {
   const settings = settingsStore.loadPublic()
@@ -45,45 +22,26 @@ function requireConfiguredSettings() {
   return settings
 }
 
-async function fetchDesk() {
-  const settings = settingsStore.loadPublic()
-  const secrets = settingsStore.loadSecrets()
-  if (!settings.dataServiceUrl) throw new Error('研究数据服务尚未配置')
-  return researchData.fetchDesk({
-    baseUrl: settings.dataServiceUrl,
-    accessToken: secrets.dataAccessToken,
-  })
-}
+const fetchDesk = () => localRuntime.client.fetchDesk()
 
 function registerHandlers() {
-  ipcMain.handle('analyst:settings:get', () => ({
-    ...settingsStore.loadPublic(),
-    ...distribution,
-  }))
+  ipcMain.handle('analyst:settings:get', () => settingsStore.loadPublic())
 
   ipcMain.handle(
     'analyst:settings:validate-connection',
     async (_event, connection) => {
       const candidate = {
-        dataServiceUrl: String(connection?.dataServiceUrl || '').trim(),
-        dataAccessToken: String(connection?.dataAccessToken || '').trim(),
         openRouterApiKey: String(connection?.openRouterApiKey || '').trim(),
       }
-      const [models, desk] = await Promise.all([
+      const [models, runtime] = await Promise.all([
         openRouter.listModels(candidate.openRouterApiKey),
-        researchData.fetchDesk({
-          baseUrl: candidate.dataServiceUrl,
-          accessToken: candidate.dataAccessToken,
-        }),
+        localRuntime.client.status(),
       ])
-      settingsStore.saveConnection(candidate)
+      settingsStore.saveOpenRouterKey(candidate.openRouterApiKey)
       return {
         settings: settingsStore.loadPublic(),
         models,
-        desk: {
-          targetTradeDate: desk.target_trade_date,
-          pipelineStatus: desk.pipeline_status,
-        },
+        runtime,
       }
     },
   )
@@ -104,10 +62,7 @@ function registerHandlers() {
 
   ipcMain.handle('analyst:settings:clear', () => {
     settingsStore.clear()
-    return {
-      ...settingsStore.loadPublic(),
-      ...distribution,
-    }
+    return settingsStore.loadPublic()
   })
 
   ipcMain.handle('analyst:models:list', async () => {
@@ -116,6 +71,8 @@ function registerHandlers() {
   })
 
   ipcMain.handle('analyst:desk:get', () => fetchDesk())
+  ipcMain.handle('analyst:runtime:status', () => localRuntime.client.status())
+  ipcMain.handle('analyst:runtime:run-due', () => localRuntime.client.runDue())
 
   ipcMain.handle('analyst:assistant:ask', async (_event, payload) => {
     const settings = requireConfiguredSettings()
@@ -173,11 +130,16 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  const projectRoot = path.resolve(__dirname, '..', '..')
   settingsStore = createSecureSettingsStore({
     filePath: path.join(app.getPath('userData'), 'research-settings.json'),
     safeStorage,
   })
-  distribution = loadDistributionConfig()
+  localRuntime = createLocalRuntimeProcess({
+    app,
+    projectRoot,
+  })
+  await localRuntime.start()
   registerHandlers()
   await createWindow()
 }).catch((error) => {
@@ -186,5 +148,6 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
+  localRuntime?.stop()
   app.quit()
 })

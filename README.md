@@ -34,16 +34,18 @@ realtime kernel reads the local point-in-time cache and never waits on remote fe
 HTTP. Its separate market collector declares a bounded lease, verifies detailed market
 health, then consumes resumable cloud SSE into the existing local SIP store.
 
-## macOS 只读研究客户端
+## macOS 本地研究客户端
 
-`feature/macos-research-client` 提供一个与本地模拟盘隔离的 macOS 发行版。它保留
-选股、证据答疑、收盘复盘和三个研究 Agent，但安装包没有 Broker、OMS 或下单 IPC。
-首次启动由用户填写 OpenRouter Key 和只读研究数据服务地址，并分别为答疑、催化剂
-分析、红队和总控选择模型；密钥只通过 Electron 主进程调用，使用 macOS Keychain
-支持的系统加密保存，不进入渲染器、日志或安装包。
+`feature/macos-research-client` 提供一个与本地模拟盘隔离、但在 Mac 本机运行完整
+研究内核的发行版。它内置 `data_plane/`、`kernel/`、`research/` 和 `schedule/`，
+在用户目录保存 accepted 快照、任务账本和复盘结果；Electron 只负责选股、证据答疑、
+收盘复盘和三个研究 Agent 的交互。首次启动只需填写用户自己的 OpenRouter Key，
+四个模型角色可独立选择。
 
-当前发行版预留了 IBKR Paper 适配器接口，但连接和下单均为 fail-closed。完整的
-安全边界、远程数据部署、首次使用及 Intel/Apple Silicon 打包流程见
+行情 Adapter 当前有意留空。系统会启动本地自动调度，但在进入下载和选股前以
+`market_data_provider_unconfigured` 阻断，不使用示例数据或历史名单伪造今日结果。
+发行包没有 Broker、OMS 或下单 IPC；IBKR Paper 接口预留但连接和下单均为
+fail-closed。完整的本地数据目录、安全 seam、首次使用和双架构打包流程见
 [macOS 研究客户端](docs/MACOS_RESEARCH_CLIENT.md)。
 
 ## Windows adaptive decision client

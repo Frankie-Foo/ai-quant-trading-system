@@ -6,24 +6,20 @@ files:
   - electron/analyst-main.cjs
   - electron/analyst-preload.cjs
   - electron/analyst/**/*
-  - analyst-distribution.json
   - package.json
 extraMetadata:
   main: electron/analyst-main.cjs
+extraResources:
+  - from: build/runtime/macos-research-runtime
+    to: runtime/macos-research-runtime
 directories:
   output: release-macos-analyst
 mac:
   category: public.app-category.finance
   icon: build/icon.icns
   target:
-    - target: dmg
-      arch:
-        - x64
-        - arm64
-    - target: zip
-      arch:
-        - x64
-        - arm64
+    - dmg
+    - zip
   hardenedRuntime: true
   gatekeeperAssess: false
   artifactName: "${productName}-${version}-${arch}.${ext}"
