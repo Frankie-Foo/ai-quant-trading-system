@@ -3,7 +3,10 @@ const path = require('node:path')
 
 const { createIbkrPaperAdapter } = require('./analyst/ibkr-paper.cjs')
 const { createLocalRuntimeProcess } = require('./analyst/local-runtime.cjs')
-const { createOpenRouterClient } = require('./analyst/openrouter.cjs')
+const {
+  RESEARCH_QA_MAX_TOKENS,
+  createOpenRouterClient,
+} = require('./analyst/openrouter.cjs')
 const {
   agentMessages,
   assistantMessages,
@@ -152,7 +155,7 @@ function registerHandlers() {
       model: settings.models.question,
       fallbackModels: fallbackModels(settings.models, 'question'),
       messages: assistantMessages(payload?.question, desk),
-      maxTokens: 1_200,
+      maxTokens: RESEARCH_QA_MAX_TOKENS,
       temperature: 0.1,
     })
     return { ...result, evidence: evidenceReference(desk) }

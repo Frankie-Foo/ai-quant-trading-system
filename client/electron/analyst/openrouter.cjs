@@ -1,6 +1,7 @@
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
 const APP_REFERER = 'https://local.quant-research.app'
 const APP_TITLE = 'AI Quant Research Desk'
+const RESEARCH_QA_MAX_TOKENS = 8_192
 
 class OpenRouterRequestError extends Error {
   constructor(code, status) {
@@ -150,5 +151,6 @@ function createOpenRouterClient({
 }
 
 module.exports = {
+  RESEARCH_QA_MAX_TOKENS,
   createOpenRouterClient,
 }

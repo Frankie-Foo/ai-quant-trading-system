@@ -12,7 +12,10 @@ const {
   runtimeLaunch,
   validateRuntimeHandshake,
 } = require('../analyst/local-runtime.cjs')
-const { createOpenRouterClient } = require('../analyst/openrouter.cjs')
+const {
+  RESEARCH_QA_MAX_TOKENS,
+  createOpenRouterClient,
+} = require('../analyst/openrouter.cjs')
 const {
   agentMessages,
   assistantMessages,
@@ -226,6 +229,10 @@ test('packaged Windows runtime launches the bundled executable without external 
   assert.equal(launch.args.includes('unconfigured'), true)
   assert.equal(launch.command.toLowerCase().includes('python'), false)
   assert.equal(launch.args.some((value) => value.includes('.venv')), false)
+})
+
+test('research Q&A allows detailed answers up to 8192 tokens', () => {
+  assert.equal(RESEARCH_QA_MAX_TOKENS, 8_192)
 })
 
 test('OpenRouter client lists text models and sends non-streaming chat safely', async () => {
