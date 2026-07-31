@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
+from pydantic import SecretStr
+
+from data_plane.providers.alpaca_proxy import probe_alpaca_proxy_sip
 from operations.client_desk import TradingDeskEvidence
 
 MARKET_DATA_REQUIREMENTS = (
@@ -16,6 +20,8 @@ MARKET_DATA_REQUIREMENTS = (
     "MASSIVE_API_KEY",
     "SEC_USER_AGENT",
 )
+ALPACA_PROXY_REQUIREMENTS = ("ALPACA_PROXY_KEY", "ALPACA_PROXY_SECRET")
+ProxyProbe = Callable[..., dict[str, object]]
 
 
 class MarketDataAdapter(Protocol):
@@ -72,6 +78,102 @@ class EnvironmentMarketDataAdapter:
             "reason": None if configured else "market_data_requirements_missing",
             "missing_requirements": missing,
             "can_run_pipeline": configured,
+        }
+
+
+def _run_alpaca_proxy_probe(
+    *, key_id: SecretStr, secret_key: SecretStr
+) -> dict[str, object]:
+    return asyncio.run(
+        probe_alpaca_proxy_sip(key_id=key_id, secret_key=secret_key)
+    )
+
+
+class AlpacaProxyMarketDataAdapter:
+    """Fixed Alpaca proxy for realtime SIP; research history remains separate."""
+
+    def __init__(
+        self,
+        *,
+        environ: Mapping[str, str] | None = None,
+        probe: ProxyProbe = _run_alpaca_proxy_probe,
+    ):
+        self._environ = os.environ if environ is None else environ
+        self._probe = probe
+        self._cached_status: dict[str, object] | None = None
+
+    def status(self) -> dict[str, object]:
+        missing = sorted(
+            name
+            for name in ALPACA_PROXY_REQUIREMENTS
+            if not str(self._environ.get(name, "")).strip()
+        )
+        if missing:
+            return {
+                "schema_version": "macos_market_data_adapter.v1",
+                "provider_id": "alpaca_proxy_sip",
+                "configured": False,
+                "healthy": False,
+                "reason": "credentials_missing",
+                "missing_requirements": missing,
+                "can_run_pipeline": False,
+                "realtime_ready": False,
+                "research_inputs_ready": False,
+                "endpoint_host": "alpaca-trade-api.vertu.cn",
+                "capabilities": ["bars", "quotes", "trades"],
+            }
+        if self._cached_status is None:
+            try:
+                probe_status = self._probe(
+                    key_id=SecretStr(
+                        str(self._environ["ALPACA_PROXY_KEY"]).strip()
+                    ),
+                    secret_key=SecretStr(
+                        str(self._environ["ALPACA_PROXY_SECRET"]).strip()
+                    ),
+                )
+            except Exception:
+                probe_status = {
+                    "healthy": False,
+                    "reason": "connection_failed",
+                    "endpoint_host": "alpaca-trade-api.vertu.cn",
+                    "capabilities": ["bars", "quotes", "trades"],
+                }
+            healthy = probe_status.get("healthy") is True
+            raw_capabilities = probe_status.get("capabilities")
+            capabilities = (
+                [str(value) for value in raw_capabilities]
+                if isinstance(raw_capabilities, list)
+                else ["bars", "quotes", "trades"]
+            )
+            self._cached_status = {
+                "schema_version": "macos_market_data_adapter.v1",
+                "provider_id": "alpaca_proxy_sip",
+                "configured": True,
+                "healthy": healthy,
+                "reason": (
+                    "historical_research_inputs_missing"
+                    if healthy
+                    else str(probe_status.get("reason") or "connection_failed")
+                ),
+                "missing_requirements": [],
+                "can_run_pipeline": False,
+                "realtime_ready": healthy,
+                "research_inputs_ready": False,
+                "endpoint_host": str(
+                    probe_status.get("endpoint_host")
+                    or "alpaca-trade-api.vertu.cn"
+                ),
+                "capabilities": capabilities,
+            }
+        cached_capabilities = self._cached_status.get("capabilities")
+        return {
+            **self._cached_status,
+            "capabilities": (
+                [str(value) for value in cached_capabilities]
+                if isinstance(cached_capabilities, list)
+                else []
+            ),
         }
 
 

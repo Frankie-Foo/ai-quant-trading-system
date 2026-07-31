@@ -1,8 +1,9 @@
 const fs = require('node:fs')
 const path = require('node:path')
 
-const SETTINGS_SCHEMA = 'macos-local-research-settings.v2'
+const SETTINGS_SCHEMA = 'macos-local-research-settings.v3'
 const LEGACY_SETTINGS_SCHEMA = 'macos-research-settings.v1'
+const PREVIOUS_SETTINGS_SCHEMA = 'macos-local-research-settings.v2'
 const MODEL_KEYS = ['question', 'catalyst', 'red_team', 'supervisor']
 
 function normalizeModels(models) {
@@ -24,6 +25,8 @@ function emptySettings() {
   return {
     schemaVersion: SETTINGS_SCHEMA,
     encryptedOpenRouterApiKey: '',
+    encryptedMarketDataKey: '',
+    encryptedMarketDataSecret: '',
     models: {},
   }
 }
@@ -43,7 +46,9 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
     try {
       const parsed = JSON.parse(fsImpl.readFileSync(filePath, 'utf8'))
       if (!parsed || typeof parsed !== 'object') return emptySettings()
-      if (parsed.schemaVersion === LEGACY_SETTINGS_SCHEMA) {
+      if ([LEGACY_SETTINGS_SCHEMA, PREVIOUS_SETTINGS_SCHEMA].includes(
+        parsed.schemaVersion,
+      )) {
         return {
           ...emptySettings(),
           encryptedOpenRouterApiKey: String(
@@ -87,6 +92,25 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
   }
 
   return {
+    saveConnectionSecrets(values) {
+      const openRouterApiKey = String(values?.openRouterApiKey || '').trim()
+      const marketDataKey = String(values?.marketDataKey || '').trim()
+      const marketDataSecret = String(values?.marketDataSecret || '').trim()
+      if (openRouterApiKey.length < 8) {
+        throw new Error('OpenRouter API Key 无效')
+      }
+      if (marketDataKey.length < 8 || marketDataSecret.length < 16) {
+        throw new Error('Alpaca 代理行情凭据无效')
+      }
+      const current = read()
+      write({
+        ...current,
+        encryptedOpenRouterApiKey: encrypt(openRouterApiKey),
+        encryptedMarketDataKey: encrypt(marketDataKey),
+        encryptedMarketDataSecret: encrypt(marketDataSecret),
+      })
+    },
+
     saveOpenRouterKey(value) {
       const openRouterApiKey = String(value || '').trim()
       if (openRouterApiKey.length < 8) {
@@ -101,8 +125,12 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
 
     saveModels(models) {
       const current = read()
-      if (!current.encryptedOpenRouterApiKey) {
-        throw new Error('请先完成 OpenRouter 配置')
+      if (
+        !current.encryptedOpenRouterApiKey
+        || !current.encryptedMarketDataKey
+        || !current.encryptedMarketDataSecret
+      ) {
+        throw new Error('请先完成模型与行情连接配置')
       }
       write({ ...current, models: normalizeModels(models) })
     },
@@ -119,9 +147,16 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
         schemaVersion: SETTINGS_SCHEMA,
         configured: Boolean(
           current.encryptedOpenRouterApiKey
+          && current.encryptedMarketDataKey
+          && current.encryptedMarketDataSecret
           && MODEL_KEYS.every((key) => models[key]),
         ),
         openRouterKeyConfigured: Boolean(current.encryptedOpenRouterApiKey),
+        marketDataConfigured: Boolean(
+          current.encryptedMarketDataKey
+          && current.encryptedMarketDataSecret,
+        ),
+        marketDataProvider: 'alpaca_proxy_sip',
         models,
       }
     },
@@ -130,6 +165,8 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
       const current = read()
       return {
         openRouterApiKey: decrypt(current.encryptedOpenRouterApiKey),
+        marketDataKey: decrypt(current.encryptedMarketDataKey),
+        marketDataSecret: decrypt(current.encryptedMarketDataSecret),
       }
     },
 

@@ -39,11 +39,13 @@ health, then consumes resumable cloud SSE into the existing local SIP store.
 `feature/macos-research-client` 提供一个与本地模拟盘隔离、但在 Mac 本机运行完整
 研究内核的发行版。它内置 `data_plane/`、`kernel/`、`research/` 和 `schedule/`，
 在用户目录保存 accepted 快照、任务账本和复盘结果；Electron 只负责选股、证据答疑、
-收盘复盘和三个研究 Agent 的交互。首次启动只需填写用户自己的 OpenRouter Key，
-四个模型角色可独立选择。
+收盘复盘和三个研究 Agent 的交互。首次启动填写用户自己的 OpenRouter Key，以及
+固定 Alpaca SIP 代理的 Key/Secret；四个模型角色可独立选择。
 
-行情 Adapter 当前有意留空。系统会启动本地自动调度，但在进入下载和选股前以
-`market_data_provider_unconfigured` 阻断，不使用示例数据或历史名单伪造今日结果。
+固定代理地址为 `wss://alpaca-trade-api.vertu.cn/v2/sip`，程序会验证报价、成交和
+分钟线订阅。代理只覆盖实时 SIP，因此历史日线、新闻和财务输入未配置时仍以
+`historical_research_inputs_missing` 阻断完整选股，不使用历史名单伪造今日结果。
+代理凭据由 macOS Keychain 加密保存，不写入源码、安装包或 Git。
 发行包没有 Broker、OMS 或下单 IPC；IBKR Paper 接口预留但连接和下单均为
 fail-closed。完整的本地数据目录、安全 seam、首次使用和双架构打包流程见
 [macOS 研究客户端](docs/MACOS_RESEARCH_CLIENT.md)。

@@ -42,7 +42,7 @@ function jsonResponse(body, { status = 200, headers = {} } = {}) {
   })
 }
 
-test('secure settings persist only the OpenRouter secret and expose redacted state', () => {
+test('secure settings encrypt model and market-data secrets and expose redacted state', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'analyst-settings-'))
   const settingsPath = path.join(root, 'settings.json')
   const store = createSecureSettingsStore({
@@ -50,12 +50,18 @@ test('secure settings persist only the OpenRouter secret and expose redacted sta
     safeStorage: fakeSafeStorage(),
   })
 
-  store.saveOpenRouterKey('openrouter-key-value')
+  store.saveConnectionSecrets({
+    openRouterApiKey: 'openrouter-key-value',
+    marketDataKey: 'market-key-value',
+    marketDataSecret: 'market-secret-value',
+  })
   store.saveModels(MODELS)
 
   const publicSettings = store.loadPublic()
   assert.equal(publicSettings.configured, true)
   assert.equal(publicSettings.openRouterKeyConfigured, true)
+  assert.equal(publicSettings.marketDataConfigured, true)
+  assert.equal(publicSettings.marketDataProvider, 'alpaca_proxy_sip')
   assert.equal('dataServiceUrl' in publicSettings, false)
   assert.equal('dataAccessTokenConfigured' in publicSettings, false)
   assert.deepEqual(publicSettings.models, MODELS)
@@ -63,8 +69,12 @@ test('secure settings persist only the OpenRouter secret and expose redacted sta
 
   const persisted = fs.readFileSync(settingsPath, 'utf8')
   assert.equal(persisted.includes('openrouter-key-value'), false)
+  assert.equal(persisted.includes('market-key-value'), false)
+  assert.equal(persisted.includes('market-secret-value'), false)
   assert.deepEqual(store.loadSecrets(), {
     openRouterApiKey: 'openrouter-key-value',
+    marketDataKey: 'market-key-value',
+    marketDataSecret: 'market-secret-value',
   })
 })
 
@@ -85,7 +95,11 @@ test('secure settings fail closed when OS encryption is unavailable', () => {
   })
 
   assert.throws(
-    () => store.saveOpenRouterKey('openrouter-key-value'),
+    () => store.saveConnectionSecrets({
+      openRouterApiKey: 'openrouter-key-value',
+      marketDataKey: 'market-key-value',
+      marketDataSecret: 'market-secret-value',
+    }),
     /不会以明文保存/,
   )
   assert.equal(fs.existsSync(settingsPath), false)
@@ -124,7 +138,7 @@ test('local runtime handshake accepts only loopback and non-executable mode', ()
   )
 })
 
-test('packaged runtime launch is local, user-scoped, and provider-empty', () => {
+test('packaged runtime launch fixes the proxy endpoint and keeps secrets out of args', () => {
   const launch = runtimeLaunch({
     app: {
       isPackaged: true,
@@ -136,6 +150,10 @@ test('packaged runtime launch is local, user-scoped, and provider-empty', () => 
     projectRoot: '/unused',
     resourcesPath: '/Applications/AIQuant.app/Contents/Resources',
     token: 'ephemeral-runtime-token-value',
+    marketData: {
+      key: 'market-key-value',
+      secret: 'market-secret-value',
+    },
   })
 
   assert.equal(
@@ -146,7 +164,7 @@ test('packaged runtime launch is local, user-scoped, and provider-empty', () => 
       'macos-research-runtime',
     ),
   )
-  assert.equal(launch.args.includes('unconfigured'), true)
+  assert.equal(launch.args.includes('alpaca_proxy'), true)
   assert.equal(
     launch.args.includes(
       path.join(
@@ -157,6 +175,12 @@ test('packaged runtime launch is local, user-scoped, and provider-empty', () => 
     true,
   )
   assert.equal(launch.args.some((value) => value.startsWith('http')), false)
+  assert.equal(launch.args.includes('market-key-value'), false)
+  assert.equal(launch.args.includes('market-secret-value'), false)
+  assert.deepEqual(launch.marketDataEnv, {
+    ALPACA_PROXY_KEY: 'market-key-value',
+    ALPACA_PROXY_SECRET: 'market-secret-value',
+  })
 })
 
 test('OpenRouter client lists text models and sends non-streaming chat safely', async () => {

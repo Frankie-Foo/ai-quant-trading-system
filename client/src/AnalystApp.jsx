@@ -98,10 +98,12 @@ function LoadingScreen() {
 
 function ConnectionSetup({ busy, error, runtimeStatus, onValidated }) {
   const [openRouterApiKey, setOpenRouterApiKey] = useState('')
+  const [marketDataKey, setMarketDataKey] = useState('')
+  const [marketDataSecret, setMarketDataSecret] = useState('')
 
   const submit = async (event) => {
     event.preventDefault()
-    await onValidated({ openRouterApiKey })
+    await onValidated({ openRouterApiKey, marketDataKey, marketDataSecret })
   }
 
   return (
@@ -110,10 +112,10 @@ function ConnectionSetup({ busy, error, runtimeStatus, onValidated }) {
         <div className="onboarding-brand"><span><Activity size={24} /></span><div><strong>AI 量化研究台</strong><small>macOS RESEARCH EDITION</small></div></div>
         <span className="step-label">首次启动 · 1 / 2</span>
         <h1>启用本地研究内核与模型</h1>
-        <p className="onboarding-lead">选股、因子和复盘都在这台 Mac 本机运行；当前行情 Adapter 留空，不包含模拟盘或订单入口。</p>
+        <p className="onboarding-lead">选股、因子和复盘都在这台 Mac 本机运行；实时行情使用固定 Alpaca SIP 代理，不包含模拟盘或订单入口。</p>
         <div className="local-runtime-card">
           <span><Database size={17} /></span>
-          <div><strong>trading-system-v2 本地内核</strong><small>{runtimeStatus?.local_execution ? '已启动 · 本地执行' : '正在启动'} · 行情源：未配置</small></div>
+          <div><strong>trading-system-v2 本地内核</strong><small>{runtimeStatus?.local_execution ? '已启动 · 本地执行' : '正在启动'} · 行情源：Alpaca SIP 代理</small></div>
         </div>
         <form className="setup-form" onSubmit={submit}>
           <label>
@@ -121,13 +123,22 @@ function ConnectionSetup({ busy, error, runtimeStatus, onValidated }) {
             <input type="password" value={openRouterApiKey} onChange={(event) => setOpenRouterApiKey(event.target.value)} placeholder="sk-or-…" autoComplete="off" required />
             <small>只在 Electron 主进程使用，并由 macOS Keychain 加密保存。</small>
           </label>
+          <label>
+            <span>Alpaca 代理行情 Key</span>
+            <input type="password" value={marketDataKey} onChange={(event) => setMarketDataKey(event.target.value)} autoComplete="off" required />
+          </label>
+          <label>
+            <span>Alpaca 代理行情 Secret</span>
+            <input type="password" value={marketDataSecret} onChange={(event) => setMarketDataSecret(event.target.value)} autoComplete="off" required />
+            <small>代理地址固定写入程序；凭据只进入 macOS Keychain，不进入安装包或 Git。</small>
+          </label>
           {error && <div className="setup-error"><AlertTriangle size={16} />{error}</div>}
           <button className="primary-action" type="submit" disabled={busy}>
             {busy ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}
             验证连接
           </button>
         </form>
-        <div className="boundary-note"><ShieldCheck size={15} /><span>行情源为空时系统只报告阻断，不会用示例数据或历史名单冒充今日选股。</span></div>
+        <div className="boundary-note"><ShieldCheck size={15} /><span>实时 SIP 只提供报价、成交和分钟线；历史、新闻或财务数据不足时仍会阻断完整选股。</span></div>
       </section>
     </main>
   )
@@ -211,7 +222,7 @@ function TodayPage({ desk }) {
         <div><span className="eyebrow">POINT-IN-TIME SELECTION</span><h2>{SELECTION_STATUS[selection.status] || '正在读取'}</h2><p>目标 {selection.target_trade_date || desk?.target_trade_date || 'N/A'} · 证据 {selection.session_date || 'N/A'}{selection.stale ? ' · 历史快照，不构成今日建议' : ''}</p></div>
         <div className="selection-count"><strong>{selection.pass_count ?? 0}</strong><span>硬闸通过</span></div>
       </section>
-      {selection.blocker && <div className="analyst-warning"><AlertTriangle size={16} />流程阻断：{selection.blocker === 'market_data_provider_unconfigured' ? '行情源尚未配置' : selection.blocker}</div>}
+      {selection.blocker && <div className="analyst-warning"><AlertTriangle size={16} />流程阻断：{selection.blocker === 'market_data_provider_unconfigured' ? '行情源尚未配置' : selection.blocker === 'historical_research_inputs_missing' ? '实时行情已连接，但历史、新闻和财务研究输入尚未齐全' : selection.blocker}</div>}
       <div className="analyst-metrics">
         <article><span>第一名</span><strong>{top?.symbol || 'N/A'}</strong><small>冻结排名</small></article>
         <article><span>盘前缺口</span><strong>{percent(top?.premarket_gap_return)}</strong><small>不等于入场许可</small></article>
@@ -358,8 +369,8 @@ function SettingsPage({ settings, models, runtimeStatus, ibkrStatus, busy, error
     <div className="analyst-page-stack">
       <header className="analyst-page-header"><div><span className="eyebrow">SECURITY & PROVIDERS</span><h2>设置</h2></div><p>凭据不显示、不导出、不进入 Git</p></header>
       <div className="settings-grid">
-        <section className="panel settings-card"><KeyRound size={20} /><h3>安全凭据</h3><div><span>OpenRouter Key</span><strong>{settings.openRouterKeyConfigured ? '已保存在系统安全存储' : '未配置'}</strong></div><div><span>行情凭据</span><strong>未配置</strong></div><div><span>远程选股服务</span><strong>不使用</strong></div></section>
-        <section className="panel settings-card"><ShieldCheck size={20} /><h3>本地研究内核</h3><div><span>执行位置</span><strong>{runtimeStatus?.local_execution ? '本机 Mac' : '不可用'}</strong></div><div><span>行情 Adapter</span><strong>{runtimeStatus?.market_data?.configured ? runtimeStatus.market_data.provider_id : '未配置'}</strong></div><div><span>订单权限</span><strong>永久关闭</strong></div></section>
+        <section className="panel settings-card"><KeyRound size={20} /><h3>安全凭据</h3><div><span>OpenRouter Key</span><strong>{settings.openRouterKeyConfigured ? '已保存在系统安全存储' : '未配置'}</strong></div><div><span>行情凭据</span><strong>{settings.marketDataConfigured ? '已保存在系统安全存储' : '未配置'}</strong></div><div><span>远程选股服务</span><strong>不使用</strong></div></section>
+        <section className="panel settings-card"><ShieldCheck size={20} /><h3>本地研究内核</h3><div><span>执行位置</span><strong>{runtimeStatus?.local_execution ? '本机 Mac' : '不可用'}</strong></div><div><span>行情 Adapter</span><strong>{runtimeStatus?.market_data?.realtime_ready ? 'Alpaca SIP 已连接' : runtimeStatus?.market_data?.configured ? '连接异常' : '未配置'}</strong></div><div><span>研究输入</span><strong>{runtimeStatus?.market_data?.research_inputs_ready ? '完整' : '仍缺历史/新闻/财务'}</strong></div><div><span>订单权限</span><strong>永久关闭</strong></div></section>
         <section className="panel settings-card"><Clock3 size={20} /><h3>IBKR Paper 预留</h3><div><span>适配器</span><strong>{ibkrStatus?.adapter || 'N/A'}</strong></div><div><span>连接</span><strong>{ibkrStatus?.connected ? '已连接' : '未配置'}</strong></div><div><span>下单</span><strong>{ibkrStatus?.orderSubmissionEnabled ? '启用' : '强制关闭'}</strong></div></section>
       </div>
       {!editingModels ? (
@@ -370,7 +381,7 @@ function SettingsPage({ settings, models, runtimeStatus, ibkrStatus, busy, error
       ) : (
         <ModelSetup models={models} initialValues={settings.models} busy={busy} error={error} embedded onSave={async (values) => { if (await onSaveModels(values)) setEditingModels(false) }} />
       )}
-      <section className="panel reset-zone"><div><h3>重新配置连接</h3><p>清除本机保存的数据服务地址、访问令牌、OpenRouter Key 和模型选择。</p></div><button type="button" onClick={onReset}>清除并重新配置</button></section>
+      <section className="panel reset-zone"><div><h3>重新配置连接</h3><p>清除本机安全存储中的 OpenRouter、行情凭据和模型选择。</p></div><button type="button" onClick={onReset}>清除并重新配置</button></section>
     </div>
   )
 }
@@ -435,7 +446,7 @@ export default function AnalystApp() {
         if (cancelled) return
         setSettings(current)
         setRuntimeStatus(localStatus)
-        if (!current.openRouterKeyConfigured) {
+        if (!current.openRouterKeyConfigured || !current.marketDataConfigured) {
           setOnboarding('connection')
         } else if (!current.configured) {
           const catalog = await bridge.models.list()
@@ -533,7 +544,7 @@ export default function AnalystApp() {
         <div className="analyst-connection"><i className={error ? 'bad' : ''} /><span>{error ? '本地内核异常' : '本地研究内核在线'}</span></div>
         <button type="button" onClick={refreshDesk}><RefreshCw size={15} />刷新</button>
       </header>
-      <section className="analyst-boundary"><ShieldCheck size={17} /><div><strong>本地研究版 · 无交易能力</strong><span>选股、因子、复盘在本机执行；行情源留空，IBKR Paper 仅预留接口。</span></div><b>LOCAL · NO ORDERS</b></section>
+      <section className="analyst-boundary"><ShieldCheck size={17} /><div><strong>本地研究版 · 无交易能力</strong><span>选股、因子、复盘在本机执行；实时 SIP 使用固定代理，IBKR Paper 仅预留接口。</span></div><b>LOCAL · NO ORDERS</b></section>
       {error && <div className="analyst-global-error"><AlertTriangle size={16} />{error}。保留最后一次已知证据，不生成新的确定性结论。</div>}
       <div className="analyst-workspace">
         <nav className="analyst-nav">
@@ -545,7 +556,7 @@ export default function AnalystApp() {
         </nav>
         <section className="analyst-content">{pageContent}</section>
       </div>
-      <footer className="analyst-footer"><span><Database size={13} />本地不可变研究证据</span><span><KeyRound size={13} />OpenRouter Key：系统安全存储</span><span>行情源：未配置 · 模拟盘：无 · 订单：禁止</span></footer>
+      <footer className="analyst-footer"><span><Database size={13} />本地不可变研究证据</span><span><KeyRound size={13} />模型与行情凭据：系统安全存储</span><span>行情源：Alpaca SIP 代理 · 模拟盘：无 · 订单：禁止</span></footer>
     </main>
   )
 }

@@ -15,6 +15,24 @@ const openRouter = createOpenRouterClient()
 const ibkrPaper = createIbkrPaperAdapter()
 let settingsStore
 let localRuntime
+let projectRoot
+
+function marketDataFromSecrets(secrets) {
+  return {
+    key: String(secrets?.marketDataKey || '').trim(),
+    secret: String(secrets?.marketDataSecret || '').trim(),
+  }
+}
+
+async function restartLocalRuntime(marketData = {}) {
+  localRuntime?.stop()
+  localRuntime = createLocalRuntimeProcess({
+    app,
+    projectRoot,
+    marketData,
+  })
+  return localRuntime.start()
+}
 
 function requireConfiguredSettings() {
   const settings = settingsStore.loadPublic()
@@ -32,12 +50,27 @@ function registerHandlers() {
     async (_event, connection) => {
       const candidate = {
         openRouterApiKey: String(connection?.openRouterApiKey || '').trim(),
+        marketDataKey: String(connection?.marketDataKey || '').trim(),
+        marketDataSecret: String(connection?.marketDataSecret || '').trim(),
       }
-      const [models, runtime] = await Promise.all([
-        openRouter.listModels(candidate.openRouterApiKey),
-        localRuntime.client.status(),
-      ])
-      settingsStore.saveOpenRouterKey(candidate.openRouterApiKey)
+      const models = await openRouter.listModels(candidate.openRouterApiKey)
+      const previousSecrets = settingsStore.loadSecrets()
+      let runtime
+      try {
+        runtime = await restartLocalRuntime({
+          key: candidate.marketDataKey,
+          secret: candidate.marketDataSecret,
+        })
+        if (runtime?.market_data?.healthy !== true) {
+          throw new Error(
+            `Alpaca 代理行情验证失败：${runtime?.market_data?.reason || 'unknown'}`,
+          )
+        }
+        settingsStore.saveConnectionSecrets(candidate)
+      } catch (error) {
+        await restartLocalRuntime(marketDataFromSecrets(previousSecrets))
+        throw error
+      }
       return {
         settings: settingsStore.loadPublic(),
         models,
@@ -60,8 +93,9 @@ function registerHandlers() {
     return settingsStore.loadPublic()
   })
 
-  ipcMain.handle('analyst:settings:clear', () => {
+  ipcMain.handle('analyst:settings:clear', async () => {
     settingsStore.clear()
+    await restartLocalRuntime()
     return settingsStore.loadPublic()
   })
 
@@ -130,16 +164,12 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
-  const projectRoot = path.resolve(__dirname, '..', '..')
+  projectRoot = path.resolve(__dirname, '..', '..')
   settingsStore = createSecureSettingsStore({
     filePath: path.join(app.getPath('userData'), 'research-settings.json'),
     safeStorage,
   })
-  localRuntime = createLocalRuntimeProcess({
-    app,
-    projectRoot,
-  })
-  await localRuntime.start()
+  await restartLocalRuntime(marketDataFromSecrets(settingsStore.loadSecrets()))
   registerHandlers()
   await createWindow()
 }).catch((error) => {

@@ -11,8 +11,10 @@ from pathlib import Path
 
 from operations.local_research_http import build_local_research_http_server
 from operations.local_research_runtime import (
+    AlpacaProxyMarketDataAdapter,
     EnvironmentMarketDataAdapter,
     LocalResearchRuntime,
+    MarketDataAdapter,
     UnconfiguredMarketDataAdapter,
 )
 
@@ -25,7 +27,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--runs-root", type=Path, required=True)
     parser.add_argument(
         "--provider-id",
-        choices=("unconfigured", "environment"),
+        choices=("unconfigured", "environment", "alpaca_proxy"),
         default="unconfigured",
     )
     parser.add_argument(
@@ -43,11 +45,13 @@ def main(argv: list[str] | None = None) -> int:
     token = os.environ.get(args.bearer_token_env, "").strip()
     if not token:
         raise ValueError("ephemeral local runtime token is missing")
-    market_data = (
-        EnvironmentMarketDataAdapter()
-        if args.provider_id == "environment"
-        else UnconfiguredMarketDataAdapter()
-    )
+    market_data: MarketDataAdapter
+    if args.provider_id == "environment":
+        market_data = EnvironmentMarketDataAdapter()
+    elif args.provider_id == "alpaca_proxy":
+        market_data = AlpacaProxyMarketDataAdapter()
+    else:
+        market_data = UnconfiguredMarketDataAdapter()
     runtime = LocalResearchRuntime(
         data_root=args.data_root.expanduser().resolve(),
         runs_root=args.runs_root.expanduser().resolve(),

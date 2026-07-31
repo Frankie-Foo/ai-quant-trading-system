@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 
 from operations.local_research_http import build_local_research_http_server
 from operations.local_research_runtime import (
+    AlpacaProxyMarketDataAdapter,
     EnvironmentMarketDataAdapter,
     LocalResearchRuntime,
     UnconfiguredMarketDataAdapter,
@@ -99,6 +100,52 @@ def test_environment_adapter_is_a_real_second_adapter_and_never_exposes_values()
     serialized = repr(configured)
     assert "massive-secret" not in serialized
     assert "market-secret" not in serialized
+
+
+def test_alpaca_proxy_adapter_reports_realtime_ready_without_unlocking_research() -> None:
+    adapter = AlpacaProxyMarketDataAdapter(
+        environ={
+            "ALPACA_PROXY_KEY": "market-key",
+            "ALPACA_PROXY_SECRET": "market-secret",
+        },
+        probe=lambda **_kwargs: {
+            "healthy": True,
+            "reason": None,
+            "endpoint_host": "alpaca-trade-api.vertu.cn",
+            "capabilities": ["bars", "quotes", "trades"],
+        },
+    )
+
+    status = adapter.status()
+
+    assert status == {
+        "schema_version": "macos_market_data_adapter.v1",
+        "provider_id": "alpaca_proxy_sip",
+        "configured": True,
+        "healthy": True,
+        "reason": "historical_research_inputs_missing",
+        "missing_requirements": [],
+        "can_run_pipeline": False,
+        "realtime_ready": True,
+        "research_inputs_ready": False,
+        "endpoint_host": "alpaca-trade-api.vertu.cn",
+        "capabilities": ["bars", "quotes", "trades"],
+    }
+    assert "market-key" not in repr(status)
+    assert "market-secret" not in repr(status)
+
+
+def test_alpaca_proxy_adapter_fails_closed_without_credentials() -> None:
+    status = AlpacaProxyMarketDataAdapter(environ={}).status()
+
+    assert status["configured"] is False
+    assert status["healthy"] is False
+    assert status["reason"] == "credentials_missing"
+    assert status["missing_requirements"] == [
+        "ALPACA_PROXY_KEY",
+        "ALPACA_PROXY_SECRET",
+    ]
+    assert status["can_run_pipeline"] is False
 
 
 def test_configured_local_runtime_delegates_once_to_pipeline(

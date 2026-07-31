@@ -936,3 +936,30 @@ an explicit empty Adapter and remains fail-closed.
 - Repository acceptance: 456 Python tests passed in 22.22 seconds, ten Electron
   service tests passed, Ruff clean, strict mypy success across 277 source files, Vite
   production build success, and all analyst CommonJS files passed syntax validation.
+
+## M32 fixed Alpaca proxy SIP for macOS - 2026-07-31
+
+Status: the supplied Alpaca-compatible proxy was validated and integrated as the
+macOS client's fixed realtime market-data endpoint without committing credentials.
+
+- Added a protocol-level SIP probe for
+  `wss://alpaca-trade-api.vertu.cn/v2/sip`. It authenticates and verifies AAPL
+  quote, trade, and minute-bar subscriptions while returning only sanitized health,
+  host, reason, and capability fields.
+- Added a typed continuous `AlpacaProxySipStream.events()` interface that converts
+  proxy frames into the system's existing `SipQuote`, `SipTrade`, and `SipBar`
+  contracts for downstream SIP storage and intraday monitoring.
+- Added `AlpacaProxyMarketDataAdapter`. It distinguishes realtime readiness from
+  complete research-input readiness, so a healthy SIP stream does not incorrectly
+  unlock selection without historical, news, and financial evidence.
+- Extended macOS first-run settings with the proxy Key/Secret. Electron safeStorage
+  encrypts all three secrets with macOS Keychain and passes market credentials only
+  through the managed sidecar environment; they never appear in process arguments,
+  renderer state, source, build config, or Git.
+- Live verification using the owner-provided local credential file reported
+  `configured=true`, `healthy=true`, `realtime_ready=true`, all three SIP
+  capabilities, and the honest blocker `historical_research_inputs_missing`.
+- Repository acceptance: 461 Python tests passed in 26.04 seconds, Ruff clean,
+  strict mypy success across 253 source files, ten Electron tests passed, Vite
+  production build succeeded, and tracked-file scans found zero supplied-key or
+  supplied-secret matches.

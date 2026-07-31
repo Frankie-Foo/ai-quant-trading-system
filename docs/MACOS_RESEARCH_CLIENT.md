@@ -18,9 +18,9 @@ Mac 本机负责：
 - 持仓、买入、卖出、止盈、止损和急停按钮；
 - 实盘连接或订单路由。
 
-IBKR Paper 只保留 fail-closed 的 Adapter 位置。行情 Adapter 当前为空，
-所以首次发布会明确显示 `market_data_provider_unconfigured`，不会下载数据，
-也不会用历史名单或测试数据伪造今日选股。
+IBKR Paper 只保留 fail-closed 的 Adapter 位置。实时行情使用固定 Alpaca SIP
+代理；历史日线、新闻和财务研究输入仍是独立能力。只有实时流时会明确显示
+`historical_research_inputs_missing`，不会用历史名单或测试数据伪造今日选股。
 
 ## 架构
 
@@ -30,7 +30,8 @@ flowchart LR
     B --> C["kernel / research / schedule"]
     C --> D["本机 accepted 快照"]
     C --> E["本机任务账本与自动复盘"]
-    F["行情 Adapter：当前未配置"] -. "未来接 Massive / 云行情 / IBKR" .-> C
+    F["固定 Alpaca SIP 代理"] --> B
+    I["历史 / 新闻 / 财务 Adapter"] -. "待配置" .-> C
     G["用户自己的 OpenRouter Key"] --> A
     H["IBKR Paper Adapter"] -. "预留且禁止下单" .-> A
 ```
@@ -56,22 +57,25 @@ App 的用户目录内维护两个互相分离的目录：
 └── research-settings.json
 ```
 
-`research-settings.json` 只保存模型 ID 和密文。OpenRouter Key 由 Electron
-`safeStorage` 使用 macOS Keychain 加密；渲染进程只能看到“已配置”状态。
+`research-settings.json` 只保存模型 ID 和密文。OpenRouter Key、代理行情 Key
+和 Secret 由 Electron `safeStorage` 使用 macOS Keychain 加密；渲染进程只能
+看到“已配置”状态。
 
 ## 首次启动
 
 首次打开分两步：
 
-1. 本地研究内核启动自检，用户填写自己的 OpenRouter API Key；
+1. 本地研究内核启动自检，用户填写自己的 OpenRouter API Key 和代理行情凭据；
 2. 分别为答疑、催化剂 Agent、红队 Agent和证据审计 Agent 选择模型。
 
 不再要求公网选股服务地址或数据访问令牌。
 
-OpenRouter Key 只负责模型调用，不能替代行情源。行情 Adapter 未配置期间：
+OpenRouter Key 只负责模型调用，不能替代行情源。代理行情凭据验证通过后：
 
-- 本地内核和自动调度仍正常启动；
-- 选股状态固定为阻断；
+- 固定连接 `wss://alpaca-trade-api.vertu.cn/v2/sip`；
+- 验证 AAPL 的 quote、trade 与 minute bar 订阅；
+- 实时盯盘能力标记为 ready；
+- 历史、新闻或财务输入未齐全时，完整选股仍固定为阻断；
 - 复盘只展示本机已有、可验证且带日期的 accepted 证据；
 - 三个 Agent 必须说明行情缺失，不能产生买卖建议或虚构今日名单。
 
@@ -82,13 +86,17 @@ OpenRouter Key 只负责模型调用，不能替代行情源。行情 Adapter �
 - `operations/local_research_runtime.py`
 - `MarketDataAdapter`
 
-现有两个 Adapter：
+现有三个 Adapter：
 
 1. `UnconfiguredMarketDataAdapter`：默认启用，永远 fail-closed；
 2. `EnvironmentMarketDataAdapter`：兼容当前 Massive 加云行情管线，但发行版
-   尚未提供配置入口，也不会自动启用。
+   尚未提供配置入口，也不会自动启用；
+3. `AlpacaProxyMarketDataAdapter`：使用固定代理地址，真实探测认证和三类 SIP
+   订阅，只声明实时能力，不冒充完整研究数据源。底层
+   `AlpacaProxySipStream.events()` 持续输出系统已有的 `SipQuote`、`SipTrade`
+   和 `SipBar` 类型，可直接接现有 SIP store 与盘中监控。
 
-以后接 Massive、Alpaca、IBKR 或团队行情接口时，只需新增/启用 Adapter；
+以后补 Massive、IBKR 或团队历史数据接口时，只需新增/启用 Adapter；
 Electron、选股内核、复盘和 Agent 界面无需重写。
 
 当前兼容 Adapter 要求：
@@ -99,6 +107,16 @@ CLOUD_PLATFORM_BASE_URL
 CLOUD_MARKET_DATA_API_TOKEN
 SEC_USER_AGENT
 ```
+
+固定实时代理 Adapter 从 Electron 的安全存储注入：
+
+```text
+ALPACA_PROXY_KEY
+ALPACA_PROXY_SECRET
+```
+
+代理 URL 写死在程序中，Key/Secret 不写死。把凭据直接编译进公开安装包等同于
+公开凭据，因此客户端只允许 Keychain 解密后通过子进程环境传递。
 
 状态接口只返回缺少的变量名称，永远不返回变量值。
 
@@ -111,8 +129,8 @@ sidecar 每 60 秒调用一次深模块 `ScheduledResearchPipeline.run_due()`。
 - `schedule.postmarket`
 - 既有 `data_plane/`、`kernel/`、`research/` 和 `scripts/`
 
-任务账本、进程锁和 accepted 快照保证重复轮询幂等。行情未配置时调用在
-进入任何下载或计算任务前被阻断，`orders_submitted` 始终为 0。
+任务账本、进程锁和 accepted 快照保证重复轮询幂等。只有实时 SIP 而缺少完整
+研究输入时，调用在进入选股 DAG 前被阻断，`orders_submitted` 始终为 0。
 
 ## OpenRouter 与三个 Agent
 

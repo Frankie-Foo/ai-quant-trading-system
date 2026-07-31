@@ -113,10 +113,13 @@ function runtimeLaunch({
   app,
   projectRoot,
   token,
-  providerId = 'unconfigured',
+  marketData = {},
   resourcesPath = process.resourcesPath,
 }) {
   const userData = app.getPath('userData')
+  const marketDataKey = String(marketData.key || '').trim()
+  const marketDataSecret = String(marketData.secret || '').trim()
+  const marketDataConfigured = Boolean(marketDataKey && marketDataSecret)
   const sharedArgs = [
     '--host',
     '127.0.0.1',
@@ -127,8 +130,14 @@ function runtimeLaunch({
     '--runs-root',
     path.join(userData, 'research-runs'),
     '--provider-id',
-    providerId,
+    marketDataConfigured ? 'alpaca_proxy' : 'unconfigured',
   ]
+  const marketDataEnv = marketDataConfigured
+    ? {
+        ALPACA_PROXY_KEY: marketDataKey,
+        ALPACA_PROXY_SECRET: marketDataSecret,
+      }
+    : {}
   if (app.isPackaged) {
     if (!resourcesPath) throw new Error('打包运行时目录不可用')
     return {
@@ -140,6 +149,7 @@ function runtimeLaunch({
       args: sharedArgs,
       cwd: userData,
       token,
+      marketDataEnv,
     }
   }
   const python = process.platform === 'win32'
@@ -150,6 +160,7 @@ function runtimeLaunch({
     args: ['-m', 'scripts.serve_macos_research_runtime', ...sharedArgs],
     cwd: projectRoot,
     token,
+    marketDataEnv,
   }
 }
 
@@ -159,6 +170,7 @@ function createLocalRuntimeProcess({
   spawnImpl = spawn,
   client = createLocalRuntimeClient(),
   startupTimeoutMs = 45_000,
+  marketData = {},
 }) {
   let child = null
 
@@ -168,11 +180,12 @@ function createLocalRuntimeProcess({
     async start() {
       if (child) return client.status()
       const token = crypto.randomBytes(32).toString('base64url')
-      const launch = runtimeLaunch({ app, projectRoot, token })
+      const launch = runtimeLaunch({ app, projectRoot, token, marketData })
       child = spawnImpl(launch.command, launch.args, {
         cwd: launch.cwd,
         env: {
           ...process.env,
+          ...launch.marketDataEnv,
           MACOS_RESEARCH_RUNTIME_TOKEN: token,
         },
         stdio: ['ignore', 'pipe', 'pipe'],
