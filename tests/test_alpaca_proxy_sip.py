@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ssl
 from collections.abc import AsyncIterator
 from types import TracebackType
 from typing import Self
@@ -139,3 +140,33 @@ def test_proxy_stream_yields_typed_realtime_events() -> None:
     assert event.symbol == "AAPL"
     assert event.close == 225.0
     assert event.provenance.startswith("alpaca.sip.websocket@")
+
+
+def test_proxy_probe_supplies_a_portable_verified_tls_context() -> None:
+    websocket = _FakeWebSocket(
+        [
+            '[{"T":"success","msg":"connected"}]',
+            '[{"T":"success","msg":"authenticated"}]',
+            '[{"T":"subscription","trades":["AAPL"],'
+            '"quotes":["AAPL"],"bars":["AAPL"]}]',
+        ]
+    )
+    observed: dict[str, object] = {}
+
+    def connector(*_args: object, **kwargs: object) -> _FakeWebSocket:
+        observed.update(kwargs)
+        return websocket
+
+    result = asyncio.run(
+        probe_alpaca_proxy_sip(
+            key_id=SecretStr("market-key"),
+            secret_key=SecretStr("market-secret"),
+            connector=connector,
+        )
+    )
+
+    tls_context = observed.get("ssl")
+    assert result["healthy"] is True
+    assert isinstance(tls_context, ssl.SSLContext)
+    assert tls_context.check_hostname is True
+    assert tls_context.verify_mode == ssl.CERT_REQUIRED

@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import ssl
 from collections.abc import AsyncGenerator, Callable
 from datetime import datetime
 from types import TracebackType
 from typing import Protocol
 from urllib.parse import urlparse
 
+import certifi
 import httpx
 import polars as pl
 from pydantic import SecretStr
@@ -25,6 +27,11 @@ from execution.alpaca_sip_stream import (
 
 ALPACA_PROXY_SIP_URL = "wss://alpaca-trade-api.vertu.cn/v2/sip"
 ALPACA_PROXY_REST_URL = "https://alpaca-trade-api.vertu.cn/v2/stocks/bars"
+
+def _verified_tls_context() -> ssl.SSLContext:
+    """Use a bundled CA store so packaged macOS runtimes verify TLS reliably."""
+
+    return ssl.create_default_context(cafile=certifi.where())
 
 
 class _WebSocket(Protocol):
@@ -251,6 +258,7 @@ class AlpacaProxySipStream:
                 ALPACA_PROXY_SIP_URL,
                 open_timeout=self._timeout_seconds,
                 close_timeout=min(self._timeout_seconds, 5.0),
+                ssl=_verified_tls_context(),
             ) as websocket:
                 await _authenticate_and_subscribe(
                     websocket,
@@ -289,6 +297,7 @@ async def probe_alpaca_proxy_sip(
             ALPACA_PROXY_SIP_URL,
             open_timeout=timeout_seconds,
             close_timeout=min(timeout_seconds, 5.0),
+            ssl=_verified_tls_context(),
         ) as websocket:
             await _authenticate_and_subscribe(
                 websocket,
