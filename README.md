@@ -43,6 +43,18 @@ changes in an append-only SQLite event stream. Soft plan revisions have a three-
 cooldown and a per-session cap; hard stops and the UTC time stop remain immediate.
 Neither the client nor its HTTP interface contains an order route.
 
+To open the evidence-only console without starting market collection or Paper
+monitoring:
+
+```powershell
+Set-Location client
+npm.cmd run desktop
+```
+
+This view remains useful without a registered adaptive plan: it shows the latest
+immutable selection and post-close review, durable job failures, runtime Agent
+availability, and maturity gates, with stale evidence explicitly marked.
+
 Install the JavaScript dependencies once, copy the secret-free example plan, replace
 every placeholder with accepted point-in-time evidence, and start the complete local
 loop:

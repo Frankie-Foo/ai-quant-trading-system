@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -46,9 +47,11 @@ class AdaptiveClientApplication:
         *,
         store: AdaptivePlanStore,
         emergency_stop: EmergencyStopStore | None = None,
+        desk_provider: Callable[[], dict[str, object]] | None = None,
     ):
         self.store = store
         self.emergency_stop = emergency_stop
+        self.desk_provider = desk_provider
 
     def handle(
         self,
@@ -101,12 +104,27 @@ class AdaptiveClientApplication:
                 body={
                     "schema_version": "adaptive_client_health.v1",
                     "status": "ready",
+                    "stage": "research_only",
                     "orders_authorized": False,
                     "emergency_stop_active": stop_active,
-                    "execution_mode": "alpaca_paper",
+                    "execution_mode": "read_only",
+                    "paper_runtime_authorized": False,
                     "live_trading_authorized": False,
                     "ui_order_entry_enabled": False,
                 },
+            )
+        if path == "/v1/desk":
+            if self.desk_provider is None:
+                return ClientApiResponse(
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
+                    body={
+                        "error": "trading-desk evidence unavailable",
+                        "orders_authorized": False,
+                    },
+                )
+            return ClientApiResponse(
+                status=HTTPStatus.OK,
+                body=self.desk_provider(),
             )
         if path == "/v1/dashboard":
             return ClientApiResponse(

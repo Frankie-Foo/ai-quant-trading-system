@@ -11,6 +11,7 @@ from typing import cast
 
 import polars as pl
 import pytest
+from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from pydantic import ValidationError
 
@@ -33,7 +34,6 @@ from agent_gateway.service import AgentGatewayService
 from agent_gateway.store import SQLiteAgentFactStore
 from data_plane.contracts import DataQualityCheck, QualitySeverity
 from data_plane.storage import persist_snapshot
-from mcp import ClientSession, StdioServerParameters
 from research.monthly_evolution_agents import (
     MonthlyProposalReview,
     ProposalDraft,

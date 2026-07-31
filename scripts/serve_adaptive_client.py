@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 from operations.adaptive_client_api import (
@@ -11,6 +12,7 @@ from operations.adaptive_client_api import (
     build_client_http_server,
 )
 from operations.adaptive_plan_store import AdaptivePlanStore
+from operations.client_desk import TradingDeskEvidence
 from operations.emergency_stop import EmergencyStopStore
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,9 +46,14 @@ def main() -> int:
     emergency_stop = EmergencyStopStore(
         args.state_db.with_name("emergency-stop.sqlite3")
     )
+    desk = TradingDeskEvidence(
+        data_root=ROOT / "data",
+        runs_root=ROOT / "runs",
+    )
     application = AdaptiveClientApplication(
         store=store,
         emergency_stop=emergency_stop,
+        desk_provider=lambda: desk.snapshot(datetime.now(UTC)),
     )
     server = build_client_http_server(
         application,

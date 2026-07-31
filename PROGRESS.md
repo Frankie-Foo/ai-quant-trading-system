@@ -843,3 +843,28 @@ orders.
   files, Skill validator success, clean-venv package install and `pip check` success,
   Docker non-root `doctor` success, and live public smoke with Hyperliquid 4/4 plus
   Aevo 2/2 observations healthy. No notification was sent and no order path exists.
+
+## M29 evidence-backed desktop operating console - 2026-07-31
+
+Status: implemented and locally verified as a read-only research console. Paper writes
+remain unapproved and no live order route exists.
+
+- Added `trading_desk_evidence.v1`, a white-listed projection over immutable selection
+  and post-close review snapshots, the durable scheduler ledger, validated runtime
+  Agent assessments, and maturity evidence. API output cannot expose scheduler tokens,
+  credentials, `.env` values, or order authorization.
+- Replaced misleading static/transport health with evidence health. The client now
+  distinguishes current, waiting, blocked, missing, and stale selection states; a
+  prior-session candidate list is visibly historical and cannot masquerade as today's
+  executable selection.
+- The six Chinese pages now show the deterministic gate ranking, RVOL/gap/earnings
+  evidence, dynamic-plan availability, accepted missed-mover attribution, actual
+  Agent availability, maturity gates, and recent failed/successful jobs. Paper/live
+  eligibility and manual client ordering remain explicitly false.
+- Real local QA on 2026-07-31 displayed the failed current catalyst lock and the
+  2026-07-30 twelve-symbol snapshot as stale evidence, eight accepted review rows,
+  three unavailable runtime roles, and twelve durable job rows. Browser interaction
+  produced no console errors, page errors, or failed requests.
+- Repository acceptance: 451 tests passed in 23.08 seconds, Ruff clean, strict mypy
+  success across 178 source files, Vite production build success, Electron main-process
+  syntax validation success, and multi-page headless Chrome visual verification.
