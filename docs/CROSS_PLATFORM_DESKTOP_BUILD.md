@@ -19,9 +19,11 @@ npm ci
 npm run dist:mac:analyst -- --arm64
 ```
 
-输出位于 `client/release-macos-analyst/`。没有 bootstrap 时客户端仍可启动，但
-首次需要同步完整历史数据。bootstrap 不包含 API Key，只包含带哈希清单的 accepted
-研究快照。
+输出位于 `client/release-macos-analyst/`。macOS 构建现在强制要求 bootstrap；缺失或哈希校验失败时会中止，不再生成没有存量数据的安装包。bootstrap 不包含 API Key，只包含带哈希清单的 accepted 研究快照。也可以直接运行：
+
+```bash
+BOOTSTRAP_ARCHIVE=/absolute/path/research-bootstrap.zip npm run dist:mac:analyst -- --arm64
+```
 
 ## Windows
 

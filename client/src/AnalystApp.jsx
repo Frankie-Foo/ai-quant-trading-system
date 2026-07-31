@@ -21,6 +21,8 @@ import {
   booleanLabel,
   evidenceReferenceFromDesk,
   evidenceReferenceKey,
+  loadAssistantHistory,
+  saveAssistantHistory,
 } from './client-state'
 
 const bridge = window.analystDesktop
@@ -310,10 +312,9 @@ function DataPage({ workflowStatus, onSyncData }) {
   return <div className="analyst-page-stack"><header className="analyst-page-header"><div><span className="eyebrow">LOCAL DATA PLANE</span><h2>数据与同步</h2></div><button type="button" disabled={Boolean(active)} onClick={onSyncData}><RefreshCw size={15} />同步缺失增量</button></header><div className="review-summary"><article><span>日线快照</span><strong>{inventory.grouped_daily || 0}</strong><small>Massive</small></article><article><span>参考数据</span><strong>{inventory.reference || 0}</strong><small>证券身份</small></article><article><span>新闻分区</span><strong>{inventory.news || 0}</strong><small>催化剂历史</small></article><article><span>选股准备</span><strong>{inventory.ready_for_selection ? '已就绪' : '未就绪'}</strong><small>仅补缺失日期</small></article></div>{active?.action === 'sync_data' && <section className="panel workflow-progress-panel"><header><div><span className="eyebrow">SYNC PROGRESS</span><h3>正在同步数据</h3></div><strong>{(active.overall_progress_percent || 0).toFixed(1)}%</strong></header><div className="workflow-progress-track"><i style={{ width: `${active.overall_progress_percent || 0}%` }} /></div><div className="workflow-progress-meta"><span>{active.completed_steps}/{active.total_steps}</span><span>{active.current_step}</span><span>{active.step_progress_current || 0}/{active.step_progress_total || 0}</span><span>{active.progress_detail || ''}</span></div></section>}</div>
 }
 
-function AssistantPage({ desk, model }) {
+function AssistantPage({ desk, model, messages, setMessages }) {
   const currentEvidenceKey = evidenceReferenceKey(evidenceReferenceFromDesk(desk))
   const [question, setQuestion] = useState('')
-  const [messages, setMessages] = useState([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -488,6 +489,9 @@ export default function AnalystApp() {
   const [loading, setLoading] = useState(true)
   const [selectionBusy, setSelectionBusy] = useState(false)
   const [selectionRun, setSelectionRun] = useState(null)
+  const [assistantHistory, setAssistantHistory] = useState(
+    () => loadAssistantHistory(),
+  )
   const connectionError = [runtimeError, deskError, workflowError].filter(Boolean).join('；')
   const error = [connectionError, actionError].filter(Boolean).join('；')
 
@@ -502,6 +506,9 @@ export default function AnalystApp() {
       return null
     }
   }, [])
+  useEffect(() => {
+    saveAssistantHistory(assistantHistory)
+  }, [assistantHistory])
 
   const refreshRuntime = useCallback(async () => {
     try {
@@ -738,7 +745,7 @@ export default function AnalystApp() {
     : page === 'data'
       ? <DataPage workflowStatus={workflowStatus} onSyncData={() => startWorkflow('sync_data')} />
     : page === 'assistant'
-      ? <AssistantPage desk={desk} model={settings.models.question} />
+      ? <AssistantPage desk={desk} model={settings.models.question} messages={assistantHistory} setMessages={setAssistantHistory} />
       : page === 'review'
         ? <ReviewPage desk={desk} workflowStatus={workflowStatus} onRunReview={() => startWorkflow('run_review')} />
         : page === 'agents'

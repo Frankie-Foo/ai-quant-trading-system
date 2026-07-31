@@ -150,11 +150,21 @@ function runtimeLaunch({
       ? 'standalone'
       : realtimeConfigured ? 'alpaca_proxy' : 'unconfigured',
   ]
-  if (['win32', 'darwin'].includes(platform) && resourcesPath) {
-    sharedArgs.push(
-      '--bootstrap-archive',
-      path.join(resourcesPath, 'bootstrap', 'research-bootstrap.zip'),
-    )
+  if (['win32', 'darwin'].includes(platform)) {
+    const bootstrapArchive = app.isPackaged
+      ? resourcesPath
+        ? path.join(resourcesPath, 'bootstrap', 'research-bootstrap.zip')
+        : null
+      : path.join(
+        projectRoot,
+        'client',
+        'build',
+        'bootstrap',
+        'research-bootstrap.zip',
+      )
+    if (bootstrapArchive) {
+      sharedArgs.push('--bootstrap-archive', bootstrapArchive)
+    }
   }
   const marketDataEnv = realtimeConfigured
     ? {

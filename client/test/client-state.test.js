@@ -6,6 +6,8 @@ import {
   evaluationPresentation,
   evidenceReferenceFromDesk,
   evidenceReferenceKey,
+  loadAssistantHistory,
+  saveAssistantHistory,
 } from '../src/client-state.js'
 
 
@@ -80,4 +82,32 @@ test('evidence references change when the immutable selection snapshot changes',
     '2026-07-31T11:59:00+00:00',
     'review-1',
   ].join('|'))
+})
+
+test('assistant history survives page remounts and drops unknown fields', () => {
+  const values = new Map()
+  const storage = {
+    getItem: (key) => values.get(key) || null,
+    setItem: (key, value) => values.set(key, value),
+  }
+  saveAssistantHistory([
+    { role: 'user', content: '为什么选择 BRKR？', apiKey: 'must-not-persist' },
+    {
+      role: 'assistant',
+      content: '因为量价与催化共同确认。',
+      model: 'model/a',
+      truncated: false,
+      usage: { totalTokens: 321 },
+      evidence: { selectionSnapshotId: 'selection-1' },
+      rawPayload: 'must-not-persist',
+    },
+  ], storage)
+
+  const restored = loadAssistantHistory(storage)
+  assert.equal(restored.length, 2)
+  assert.equal(restored[0].content, '为什么选择 BRKR？')
+  assert.equal(restored[1].model, 'model/a')
+  assert.equal(restored[1].usage.totalTokens, 321)
+  assert.equal(restored[1].evidence.selectionSnapshotId, 'selection-1')
+  assert.equal(JSON.stringify(restored).includes('must-not-persist'), false)
 })

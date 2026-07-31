@@ -203,6 +203,32 @@ test('packaged runtime launch fixes the proxy endpoint and keeps secrets out of 
   })
 })
 
+test('development macOS runtime reads the repository bootstrap archive', () => {
+  const launch = runtimeLaunch({
+    app: {
+      isPackaged: false,
+      getPath: () => '/Users/test/Library/Application Support/AIQuant',
+    },
+    projectRoot: '/private/tmp/ai-quant-trading-system',
+    token: 'ephemeral-runtime-token-value',
+    marketData: {},
+    platform: 'darwin',
+    resourcesPath: '/private/tmp/electron/Electron.app/Contents/Resources',
+  })
+
+  const archiveIndex = launch.args.indexOf('--bootstrap-archive')
+  assert.notEqual(archiveIndex, -1)
+  assert.equal(
+    launch.args[archiveIndex + 1],
+    path.join(
+      '/private/tmp/ai-quant-trading-system',
+      'client',
+      'build',
+      'bootstrap',
+      'research-bootstrap.zip',
+    ),
+  )
+})
 test('packaged Windows runtime launches the bundled executable without external Python', () => {
   const launch = runtimeLaunch({
     app: {

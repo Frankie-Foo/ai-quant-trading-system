@@ -1,4 +1,4 @@
-name: macOS research client
+name: macOS research client checks
 
 on:
   workflow_dispatch:
@@ -63,6 +63,10 @@ jobs:
         working-directory: client
         run: npm run test:electron
 
+      - name: Test renderer state
+        working-directory: client
+        run: npm run test:ui
+
       - name: Build renderer
         working-directory: client
         run: npm run build
@@ -74,14 +78,3 @@ jobs:
       - name: Build native local research runtime
         working-directory: client
         run: npm run runtime:mac
-
-      - name: Package native app
-        working-directory: client
-        run: npx electron-builder --config electron-builder.analyst.yml --mac dmg zip --${{ matrix.arch }} --publish never
-
-      - name: Upload unsigned artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-local-research-client-unsigned-${{ matrix.arch }}
-          path: client/release-macos-analyst/*
-          if-no-files-found: error
