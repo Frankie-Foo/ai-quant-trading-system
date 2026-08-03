@@ -13,6 +13,9 @@ const bridge = Object.freeze({
     saveExecution: (settings) => (
       ipcRenderer.invoke('analyst:settings:save-execution', settings)
     ),
+    savePaperExecution: (settings) => (
+      ipcRenderer.invoke('analyst:settings:save-paper-execution', settings)
+    ),
     importExecutionProfile: () => (
       ipcRenderer.invoke('analyst:settings:import-execution-profile')
     ),
@@ -47,6 +50,12 @@ const bridge = Object.freeze({
     snapshot: () => ipcRenderer.invoke('analyst:execution:snapshot'),
     command: (command) => (
       ipcRenderer.invoke('analyst:execution:command', command)
+    ),
+  }),
+  paperAutopilot: Object.freeze({
+    snapshot: () => ipcRenderer.invoke('analyst:paper-autopilot:snapshot'),
+    command: (command) => (
+      ipcRenderer.invoke('analyst:paper-autopilot:command', command)
     ),
   }),
   assistant: Object.freeze({

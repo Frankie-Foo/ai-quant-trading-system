@@ -57,6 +57,14 @@ class ExecutionDesk(Protocol):
     def handle(self, command: dict[str, object]) -> dict[str, object]: ...
 
 
+class PaperAutopilotDesk(Protocol):
+    """Paper-only automatic execution plane, isolated from manual live orders."""
+
+    def snapshot(self) -> dict[str, object]: ...
+
+    def handle(self, command: dict[str, object]) -> dict[str, object]: ...
+
+
 class DisabledExecutionDesk:
     """Default manual execution adapter: visible, honest, and fail-closed."""
 
@@ -80,6 +88,33 @@ class DisabledExecutionDesk:
     def handle(self, command: dict[str, object]) -> dict[str, object]:
         del command
         raise RuntimeError("IBKR execution desk is not configured")
+
+
+class DisabledPaperAutopilot:
+    """Visible but inert default; it cannot create a Paper order."""
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "schema_version": "ibkr.paper_autopilot.v1",
+            "mode": "paper",
+            "port": 4002,
+            "configured": False,
+            "connected": False,
+            "running": False,
+            "paper_writes_armed": False,
+            "account_masked": "",
+            "arm_confirmation_phrase": "",
+            "plan_status": "missing",
+            "plan_error": "paper_profile_invalid",
+            "last_tick_at_utc": "",
+            "last_outcomes": [],
+            "last_error": "",
+            "root_research_orders_authorized": False,
+        }
+
+    def handle(self, command: dict[str, object]) -> dict[str, object]:
+        del command
+        raise RuntimeError("IBKR Paper autopilot is not configured")
 
 
 class UnconfiguredMarketDataAdapter:
@@ -350,6 +385,7 @@ class LocalResearchRuntime:
         workflows: DesktopWorkflowManager | None = None,
         bootstrap_status: dict[str, object] | None = None,
         execution_desk: ExecutionDesk | None = None,
+        paper_autopilot: PaperAutopilotDesk | None = None,
     ):
         self.data_root = data_root
         self.runs_root = runs_root
@@ -361,6 +397,7 @@ class LocalResearchRuntime:
         )
         self.bootstrap_status = bootstrap_status or {"status": "not_configured"}
         self.execution_desk = execution_desk or DisabledExecutionDesk()
+        self.paper_autopilot = paper_autopilot or DisabledPaperAutopilot()
         self.data_root.mkdir(parents=True, exist_ok=True)
         self.runs_root.mkdir(parents=True, exist_ok=True)
         self._desk = TradingDeskEvidence(
@@ -384,6 +421,7 @@ class LocalResearchRuntime:
             "paper_runtime_authorized": False,
             "live_trading_authorized": False,
             "manual_execution": self.execution_desk.snapshot(),
+            "paper_autopilot": self.paper_autopilot.snapshot(),
         }
 
     def snapshot(self, observed_at_utc: datetime | None = None) -> dict[str, object]:
@@ -478,6 +516,14 @@ class LocalResearchRuntime:
         self, command: dict[str, object]
     ) -> dict[str, object]:
         return self.execution_desk.handle(command)
+
+    def paper_autopilot_snapshot(self) -> dict[str, object]:
+        return self.paper_autopilot.snapshot()
+
+    def handle_paper_autopilot(
+        self, command: dict[str, object]
+    ) -> dict[str, object]:
+        return self.paper_autopilot.handle(command)
 
 
 def _require_utc(value: datetime) -> None:

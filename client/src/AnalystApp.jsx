@@ -25,6 +25,8 @@ import {
   executionErrorMessage,
   loadAssistantHistory,
   normalizeExecutionSnapshot,
+  normalizePaperAutopilotSnapshot,
+  paperAutopilotErrorMessage,
   orderPreviewCommand,
   saveAssistantHistory,
 } from './client-state'
@@ -464,7 +466,54 @@ function AgentsPage({ settings, desk }) {
   )
 }
 
-function ExecutionPage({ snapshot, settings, error, onRefresh, onCommand }) {
+function PaperAutopilotPanel({ snapshot, settings, onRefresh, onCommand }) {
+  const paper = normalizePaperAutopilotSnapshot(snapshot)
+  const [busy, setBusy] = useState(false)
+  const [confirmation, setConfirmation] = useState('')
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+  const phrase = paper.armConfirmationPhrase
+    || `启用模拟盘自动执行 ${paper.accountMasked || '当前账户'}`
+
+  const run = async (command, successMessage = '') => {
+    setBusy(true)
+    setError('')
+    setMessage('')
+    try {
+      await onCommand(command)
+      if (successMessage) setMessage(successMessage)
+    } catch (caught) {
+      setError(paperAutopilotErrorMessage(caught))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="panel execution-control-panel paper-autopilot-panel">
+      <header className="analyst-panel-header"><div><span className="eyebrow">ISOLATED PAPER AUTOMATION</span><h3>IBKR 模拟盘自动执行</h3></div><span>固定端口 {paper.port}</span></header>
+      <p>这条通道只接收今日冻结的执行计划与安全包；Agent 只能影响安全包，不能把自然语言直接变成订单。它与 4001 实盘手动执行完全隔离。</p>
+      <div className="execution-status-grid" aria-live="polite">
+        <article><span>模拟盘配置</span><strong>{paper.configured && settings?.paperExecution?.configured ? '已保存' : '未配置'}</strong><small>{paper.accountMasked || settings?.paperExecution?.paperAccountMasked || '需填写 DU 账户'}</small></article>
+        <article><span>网关连接</span><strong>{paper.connected ? '已连接' : '未连接'}</strong><small>仅模拟盘 4002</small></article>
+        <article><span>冻结计划</span><strong>{paper.planStatus === 'valid' ? '已校验' : '未就绪'}</strong><small>{paper.planError || '必须是今天的计划和安全包'}</small></article>
+        <article><span>自动执行</span><strong className={paper.running ? 'danger-text' : ''}>{paper.running ? '运行中' : '关闭'}</strong><small>{paper.lastTickAtUtc ? `最近轮询 ${localTime(paper.lastTickAtUtc)}` : '重启后默认关闭'}</small></article>
+      </div>
+      {paper.lastError && <div className="analyst-warning" role="alert"><AlertTriangle size={16} />{paperAutopilotErrorMessage(paper.lastError)}</div>}
+      {error && <div className="analyst-warning" role="alert"><AlertTriangle size={16} />{error}</div>}
+      <div className="execution-arm-control">
+        <div><strong>自动模拟盘总开关</strong><small>启动前必须连接、校验当日冻结计划、通过 What-If；停止只禁止后续决策，不会撤销已提交的保护性订单。</small></div>
+        {!paper.running && <div className="execution-form-actions"><button type="button" disabled={busy || !settings?.paperExecution?.configured} onClick={() => run(paper.connected ? { kind: 'disconnect' } : { kind: 'connect' }, paper.connected ? '模拟盘连接已关闭。' : '模拟盘已连接；尚未启用自动下单。')}>{paper.connected ? '关闭模拟盘连接' : '连接模拟盘'}</button><button type="button" disabled={busy || !paper.connected} onClick={() => run({ kind: 'validate_plan' }, '冻结计划与安全包校验完成。')}>校验今日冻结计划</button></div>}
+        {paper.running ? <button type="button" className="danger-button" disabled={busy} onClick={() => run({ kind: 'stop' }, '自动模拟盘已停止；请在 IBKR 中核对未完成的保护性订单。')}>停止自动模拟盘</button> : <div className="paper-arm-row"><label><span>输入“{phrase}”</span><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoComplete="off" /></label><button type="button" className="danger-button" disabled={busy || !paper.connected || paper.planStatus !== 'valid' || confirmation !== phrase} onClick={() => run({ kind: 'start', confirmation }, '自动模拟盘已启动：仅会执行冻结计划中的标的与风控规则。')}>启动自动模拟盘</button></div>}
+      </div>
+      {paper.lastOutcomes.length > 0 && <div className="execution-ledger"><header className="analyst-panel-header"><h3>最近自动决策</h3><span>{paper.lastOutcomes.length} 条</span></header>{paper.lastOutcomes.map((outcome) => <p key={`${outcome.planId}-${outcome.symbol}`}><strong>{outcome.symbol || 'N/A'} · {outcome.action || 'N/A'}</strong> {outcome.reasons.join('；') || '无补充原因'}{outcome.degradedReasons.length > 0 ? ` · 降级：${outcome.degradedReasons.join('；')}` : ''}</p>)}</div>}
+      {message && <p className="execution-status-message" aria-live="polite">{message}</p>}
+      <button type="button" className="subtle-button" disabled={busy} onClick={onRefresh}><RefreshCw size={14} />刷新模拟盘状态</button>
+    </section>
+  )
+}
+
+function ExecutionPage({ snapshot, paperSnapshot, settings, error, onRefresh, onCommand, onPaperRefresh, onPaperCommand }) {
   const execution = normalizeExecutionSnapshot(snapshot)
   const [busy, setBusy] = useState(false)
   const [localError, setLocalError] = useState('')
@@ -667,6 +716,7 @@ function ExecutionPage({ snapshot, settings, error, onRefresh, onCommand }) {
         <header className="analyst-panel-header"><div><h3>最近提交订单</h3><small>包括已成交、已取消及瞬时离开挂单列表的订单，避免重复提交。</small></div><span>账户数据刷新：{localTime(execution.accountRefreshedAtUtc)}</span></header>
         <div className="execution-table-wrap"><table><thead><tr><th>更新时间</th><th>标的</th><th>方向</th><th>数量</th><th>限价</th><th>状态</th><th>券商 ID</th></tr></thead><tbody>{execution.recentOrders.map((order) => <tr key={order.client_order_id || `${order.broker_order_id}-${order.updated_at_utc}`}><td>{localTime(order.updated_at_utc)}</td><td>{order.symbol || 'N/A'}</td><td>{order.action || 'N/A'}</td><td>{order.quantity ?? 'N/A'}</td><td>{currency(order.limit_price)}</td><td>{order.status || 'N/A'}</td><td>{order.broker_order_id ?? order.perm_id ?? 'N/A'}</td></tr>)}</tbody></table>{!execution.recentOrders.length && <p className="table-empty">暂无本机提交记录。</p>}</div>
       </section>
+      <PaperAutopilotPanel snapshot={paperSnapshot} settings={settings} onRefresh={onPaperRefresh} onCommand={onPaperCommand} />
     </div>
   )
 }
@@ -717,7 +767,27 @@ function ExecutionSettingsForm({ settings, busy, error, onImport, onSave, onClea
   )
 }
 
-function SettingsPage({ settings, models, runtimeStatus, workflowStatus, executionSnapshot, busy, error, onLoadModels, onSaveModels, onImportExecution, onSaveExecution, onClearExecutionBinding, onReset }) {
+function PaperExecutionSettingsForm({ settings, busy, error, onSave }) {
+  const configured = settings.paperExecution?.configured === true
+  const [values, setValues] = useState({ host: '', clientId: '', paperAccount: '' })
+  const update = (key, value) => setValues((current) => ({ ...current, [key]: value }))
+  return (
+    <section className="panel execution-settings-panel paper-autopilot-settings">
+      <header className="analyst-panel-header"><div><span className="eyebrow">IBKR PAPER AUTO EXECUTION</span><h3>盈透模拟盘自动执行连接</h3></div><span>固定端口 4002</span></header>
+      <p>这是与实盘 4001 分开的连接。只接受 DU 开头的模拟账户；不保存盈透登录名或密码，登录仍由 TWS / IB Gateway 完成。</p>
+      <form onSubmit={(event) => { event.preventDefault(); onSave(values) }}>
+        <label><span>模拟网关主机</span><input value={values.host} onChange={(event) => update('host', event.target.value)} placeholder={configured ? '已安全保存；仍需填写以修改' : '127.0.0.1'} required /></label>
+        <label><span>模拟盘 Client ID</span><input type="number" min="0" step="1" value={values.clientId} onChange={(event) => update('clientId', event.target.value)} placeholder={configured ? '已安全保存；仍需填写以修改' : '91'} required /></label>
+        <label><span>模拟账户 ID</span><input value={values.paperAccount} onChange={(event) => update('paperAccount', event.target.value.toUpperCase())} placeholder={settings.paperExecution?.paperAccountMasked || 'DU1234567'} autoComplete="off" required /></label>
+        <button type="submit" disabled={busy}>{busy ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}{configured ? '更新模拟盘配置' : '保存模拟盘配置'}</button>
+      </form>
+      {error && <div className="inline-error" role="alert"><AlertTriangle size={15} />{error}</div>}
+      <p>保存后请到“交易”页面先连接，再校验今日冻结计划，最后输入动态文字启动自动模拟盘。任何一步失败都不会提交订单。</p>
+    </section>
+  )
+}
+
+function SettingsPage({ settings, models, runtimeStatus, workflowStatus, executionSnapshot, paperSnapshot, busy, error, onLoadModels, onSaveModels, onImportExecution, onSaveExecution, onSavePaperExecution, onClearExecutionBinding, onReset }) {
   const [editingModels, setEditingModels] = useState(false)
   const execution = normalizeExecutionSnapshot(executionSnapshot)
   return (
@@ -727,8 +797,10 @@ function SettingsPage({ settings, models, runtimeStatus, workflowStatus, executi
         <section className="panel settings-card"><KeyRound size={20} /><h3>安全凭据</h3><div><span>OpenRouter</span><strong>{settings.openRouterKeyConfigured ? '已安全保存' : '未配置'}</strong></div><div><span>Massive</span><strong>{settings.massiveConfigured ? '已安全保存' : '未配置'}</strong></div><div><span>Alpaca SIP</span><strong>{settings.marketDataConfigured ? '已安全保存' : '未配置'}</strong></div><div><span>SEC</span><strong>{settings.secConfigured ? '已安全保存' : '未配置'}</strong></div></section>
         <section className="panel settings-card"><ShieldCheck size={20} /><h3>数据源状态</h3><div><span>执行位置</span><strong>{runtimeStatus?.local_execution ? '本机' : '不可用'}</strong></div><div><span>实时行情</span><strong>{runtimeStatus?.market_data?.realtime_ready ? 'Alpaca SIP 已连接' : '不可用'}</strong></div><div><span>Massive 日线</span><strong>{workflowStatus?.data_inventory?.grouped_daily || 0} 个快照</strong></div><div><span>选股准备</span><strong>{workflowStatus?.data_inventory?.ready_for_selection ? '已就绪' : '等待首次同步'}</strong></div></section>
         <section className="panel settings-card"><Clock3 size={20} /><h3>IBKR 实盘执行</h3><div><span>连接配置</span><strong>{settings.execution?.configured ? '已安全保存' : '未配置'}</strong></div><div><span>账户绑定</span><strong>{settings.execution?.accountBound ? settings.execution?.liveAccountMasked : '未绑定'}</strong></div><div><span>总开关</span><strong>{execution.enabled ? '开启' : '关闭'}</strong></div><div><span>连接</span><strong>{execution.connected ? '已连接' : '未连接'}</strong></div><div><span>下单</span><strong>{execution.writesArmed ? '临时启用' : '关闭'}</strong></div></section>
+        <section className="panel settings-card"><Bot size={20} /><h3>IBKR 模拟盘自动执行</h3><div><span>连接配置</span><strong>{settings.paperExecution?.configured ? '已安全保存' : '未配置'}</strong></div><div><span>账户</span><strong>{settings.paperExecution?.paperAccountMasked || '未配置'}</strong></div><div><span>端口</span><strong>4002</strong></div><div><span>状态</span><strong>{normalizePaperAutopilotSnapshot(paperSnapshot).running ? '运行中' : '关闭'}</strong></div></section>
       </div>
       <ExecutionSettingsForm settings={settings} busy={busy} error={error} onImport={onImportExecution} onSave={onSaveExecution} onClearBinding={onClearExecutionBinding} />
+      <PaperExecutionSettingsForm settings={settings} busy={busy} error={error} onSave={onSavePaperExecution} />
       {!editingModels ? (
         <section className="panel current-models">
           <header className="analyst-panel-header"><div><span className="eyebrow">MODEL ROUTING</span><h3>当前模型</h3></div><button type="button" onClick={async () => { await onLoadModels(); setEditingModels(true) }}>更改模型</button></header>
@@ -747,6 +819,7 @@ export default function AnalystApp() {
   const [models, setModels] = useState([])
   const [desk, setDesk] = useState(null)
   const [executionSnapshot, setExecutionSnapshot] = useState(null)
+  const [paperAutopilotSnapshot, setPaperAutopilotSnapshot] = useState(null)
   const [executionError, setExecutionError] = useState('')
   const [runtimeStatus, setRuntimeStatus] = useState(null)
   const [workflowStatus, setWorkflowStatus] = useState(null)
@@ -817,6 +890,17 @@ export default function AnalystApp() {
     }
   }, [])
 
+  const refreshPaperAutopilot = useCallback(async () => {
+    try {
+      const snapshot = await bridge.paperAutopilot.snapshot()
+      setPaperAutopilotSnapshot(snapshot)
+      return snapshot
+    } catch (caught) {
+      setActionError(caught.message || 'IBKR 模拟盘自动执行服务不可用')
+      return null
+    }
+  }, [])
+
   const loadModels = useCallback(async () => {
     setBusy(true)
     setActionError('')
@@ -874,6 +958,7 @@ export default function AnalystApp() {
             refreshDesk(),
             refreshWorkflows(),
             refreshExecution(),
+            refreshPaperAutopilot(),
           ])
         }
       } catch (caught) {
@@ -884,7 +969,7 @@ export default function AnalystApp() {
     }
     initialize()
     return () => { cancelled = true }
-  }, [refreshDesk, refreshExecution, refreshWorkflows])
+  }, [refreshDesk, refreshExecution, refreshPaperAutopilot, refreshWorkflows])
 
   useEffect(() => {
     if (!settings?.configured || onboarding) return undefined
@@ -893,9 +978,10 @@ export default function AnalystApp() {
       refreshRuntime()
       refreshWorkflows()
       refreshExecution()
+      refreshPaperAutopilot()
     }, 5_000)
     return () => window.clearInterval(timer)
-  }, [onboarding, refreshDesk, refreshExecution, refreshRuntime, refreshWorkflows, settings?.configured])
+  }, [onboarding, refreshDesk, refreshExecution, refreshPaperAutopilot, refreshRuntime, refreshWorkflows, settings?.configured])
 
   const validateConnection = async (connection) => {
     setBusy(true)
@@ -924,6 +1010,7 @@ export default function AnalystApp() {
         refreshDesk(),
         refreshWorkflows(),
         refreshExecution(),
+        refreshPaperAutopilot(),
       ])
       return true
     } catch (caught) {
@@ -946,6 +1033,7 @@ export default function AnalystApp() {
       setRuntimeStatus(null)
       setWorkflowStatus(null)
       setExecutionSnapshot(null)
+      setPaperAutopilotSnapshot(null)
       setExecutionError('')
       setRuntimeError('')
       setDeskError('')
@@ -1020,6 +1108,23 @@ export default function AnalystApp() {
     }
   }
 
+  const savePaperExecution = async (values) => {
+    setBusy(true)
+    setActionError('')
+    try {
+      const result = await bridge.settings.savePaperExecution(values)
+      setSettings(result.settings)
+      setRuntimeStatus(result.runtime)
+      setPaperAutopilotSnapshot(result.paper_autopilot)
+      return true
+    } catch (caught) {
+      setActionError(caught.message || '盈透模拟盘配置保存失败')
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const clearExecutionBinding = async () => {
     if (!window.confirm('确认清除当前实盘账户绑定？这会立即断开执行连接并禁止新单，但不会撤销 IBKR 已有挂单；下次连接需重新检测并确认账户。')) return false
     setBusy(true)
@@ -1044,6 +1149,12 @@ export default function AnalystApp() {
     if (result?.settings) setSettings(result.settings)
     if (result?.execution) setExecutionSnapshot(result.execution)
     else await refreshExecution()
+    return result
+  }
+
+  const sendPaperAutopilotCommand = async (command) => {
+    const result = await bridge.paperAutopilot.command(command)
+    setPaperAutopilotSnapshot(result)
     return result
   }
 
@@ -1072,25 +1183,26 @@ export default function AnalystApp() {
     : page === 'data'
       ? <DataPage workflowStatus={workflowStatus} onSyncData={() => startWorkflow('sync_data')} />
       : page === 'execution'
-        ? <ExecutionPage snapshot={executionSnapshot} settings={settings} error={executionError} onRefresh={refreshExecution} onCommand={sendExecutionCommand} />
+        ? <ExecutionPage snapshot={executionSnapshot} paperSnapshot={paperAutopilotSnapshot} settings={settings} error={executionError} onRefresh={refreshExecution} onCommand={sendExecutionCommand} onPaperRefresh={refreshPaperAutopilot} onPaperCommand={sendPaperAutopilotCommand} />
         : page === 'assistant'
           ? <AssistantPage desk={desk} model={settings.models.question} messages={assistantHistory} setMessages={setAssistantHistory} />
           : page === 'review'
             ? <ReviewPage desk={desk} workflowStatus={workflowStatus} onRunReview={() => startWorkflow('run_review')} />
             : page === 'agents'
               ? <AgentsPage settings={settings} desk={desk} />
-              : <SettingsPage settings={settings} models={models} runtimeStatus={runtimeStatus} workflowStatus={workflowStatus} executionSnapshot={executionSnapshot} busy={busy} error={actionError} onLoadModels={loadModels} onSaveModels={saveModels} onImportExecution={() => bridge.settings.importExecutionProfile()} onSaveExecution={saveExecution} onClearExecutionBinding={clearExecutionBinding} onReset={reset} />
+              : <SettingsPage settings={settings} models={models} runtimeStatus={runtimeStatus} workflowStatus={workflowStatus} executionSnapshot={executionSnapshot} paperSnapshot={paperAutopilotSnapshot} busy={busy} error={actionError} onLoadModels={loadModels} onSaveModels={saveModels} onImportExecution={() => bridge.settings.importExecutionProfile()} onSaveExecution={saveExecution} onSavePaperExecution={savePaperExecution} onClearExecutionBinding={clearExecutionBinding} onReset={reset} />
 
   return (
     <main className="analyst-app">
       <header className="analyst-topbar">
         <div className="analyst-brand"><span><Activity size={21} /></span><div><strong>AI 量化研究台</strong><small>DESKTOP RESEARCH EDITION</small></div></div>
         <div className="analyst-connection"><i className={connectionError ? 'bad' : ''} /><span>{connectionError ? '本地研究服务异常' : '本地研究内核在线'}</span></div>
-        <button type="button" onClick={() => Promise.all([refreshDesk(), refreshRuntime(), refreshWorkflows(), refreshExecution()])}><RefreshCw size={15} />刷新全部</button>
+        <button type="button" onClick={() => Promise.all([refreshDesk(), refreshRuntime(), refreshWorkflows(), refreshExecution(), refreshPaperAutopilot()])}><RefreshCw size={15} />刷新全部</button>
       </header>
       <div className="analyst-boundary-stack">
         <section className="analyst-boundary"><ShieldCheck size={17} /><div><strong>研究内核 · orders_authorized=false</strong><span>选股、因子、复盘和 Agent 永远只读，不能调用订单接口。</span></div><b>RESEARCH ONLY</b></section>
         <section className={`analyst-boundary manual ${normalizeExecutionSnapshot(executionSnapshot).enabled ? 'live' : ''}`}><ArrowLeftRight size={17} /><div><strong>手动执行台 · 仅实盘 4001</strong><span>隔离的人工订单入口；实盘总开关与写权限分离，重启默认全部关闭。</span></div><b>{normalizeExecutionSnapshot(executionSnapshot).writesArmed ? 'ARMED' : normalizeExecutionSnapshot(executionSnapshot).enabled ? 'CONNECTED' : 'OFF'}</b></section>
+        <section className={`analyst-boundary paper ${normalizePaperAutopilotSnapshot(paperAutopilotSnapshot).running ? 'live' : ''}`}><Bot size={17} /><div><strong>自动模拟盘 · 仅 Paper 4002</strong><span>仅执行今日冻结计划；重启默认停止，实盘 4001 永远不受此开关影响。</span></div><b>{normalizePaperAutopilotSnapshot(paperAutopilotSnapshot).running ? 'RUNNING' : normalizePaperAutopilotSnapshot(paperAutopilotSnapshot).connected ? 'CONNECTED' : 'OFF'}</b></section>
       </div>
       {error && <div className="analyst-global-error"><AlertTriangle size={16} />{error}。保留最后一次已知证据，不生成新的确定性结论。</div>}
       <div className="analyst-workspace">

@@ -67,6 +67,27 @@ class _RecordingExecutionDesk:
         }
 
 
+class _RecordingPaperAutopilot:
+    def __init__(self) -> None:
+        self.commands: list[dict[str, object]] = []
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "schema_version": "ibkr.paper_autopilot.v1",
+            "mode": "paper",
+            "port": 4002,
+            "configured": True,
+            "connected": False,
+            "running": False,
+            "paper_writes_armed": False,
+            "root_research_orders_authorized": False,
+        }
+
+    def handle(self, command: dict[str, object]) -> dict[str, object]:
+        self.commands.append(dict(command))
+        return {**self.snapshot(), "connected": command.get("kind") == "connect"}
+
+
 def test_unconfigured_local_runtime_is_honest_and_fail_closed(
     tmp_path: Path,
 ) -> None:
@@ -360,6 +381,56 @@ def test_execution_desk_http_is_authenticated_and_keeps_research_fail_closed(
     assert execution.commands == [{"kind": "connect"}]
     assert health_code == 200
     assert health["orders_authorized"] is False
+
+
+def test_paper_autopilot_http_is_an_isolated_4002_control_plane(
+    tmp_path: Path,
+) -> None:
+    paper = _RecordingPaperAutopilot()
+    runtime = LocalResearchRuntime(
+        data_root=tmp_path / "data",
+        runs_root=tmp_path / "runs",
+        market_data=UnconfiguredMarketDataAdapter(),
+        pipeline=_RecordingPipeline(),
+        paper_autopilot=paper,
+    )
+    token = "ephemeral-local-runtime-token-1234"
+    server = build_local_research_http_server(
+        runtime,
+        host="127.0.0.1",
+        port=0,
+        bearer_token=token,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        status_code, status = _http_json(
+            f"{base}/v1/paper-autopilot", token=token
+        )
+        command_code, receipt = _http_json(
+            f"{base}/v1/paper-autopilot/commands",
+            token=token,
+            method="POST",
+            payload={"kind": "connect"},
+        )
+        health_code, health = _http_json(f"{base}/v1/health", token=token)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert status_code == 200
+    assert status["mode"] == "paper"
+    assert status["port"] == 4002
+    assert command_code == 200
+    assert receipt["connected"] is True
+    assert paper.commands == [{"kind": "connect"}]
+    assert health_code == 200
+    assert health["orders_authorized"] is False
+    paper_status = health["paper_autopilot"]
+    assert isinstance(paper_status, dict)
+    assert paper_status["port"] == 4002
 
 
 def test_execution_command_rejects_non_object_json(tmp_path: Path) -> None:

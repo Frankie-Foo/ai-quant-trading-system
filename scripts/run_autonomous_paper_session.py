@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -21,6 +22,8 @@ from execution.autonomous_paper_session import (
     PaperSessionLedger,
     PaperSessionOrchestrator,
 )
+from execution.ibkr_paper_broker import IBKRPaperBroker
+from execution.ibkr_tws_adapter import OfficialIbapiPaperAdapter
 from execution.settings import ExecutionSettings
 from execution.sip_store import SipEventStore
 from operations.adaptive_plan_adapters import (
@@ -49,7 +52,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument(
         "--broker-mode",
-        choices=("direct", "cloud"),
+        choices=("direct", "cloud", "ibkr"),
         default="direct",
     )
     parser.add_argument(
@@ -157,20 +160,55 @@ def _broker(
     *,
     mode: str,
     paper_authorized: bool,
+    state_db: Path,
+    environment: Mapping[str, str],
 ) -> AutonomousPaperBroker:
     if mode == "direct":
-        key_id, secret_key = direct_paper_credentials(os.environ)
+        key_id, secret_key = direct_paper_credentials(environment)
         return DirectAlpacaPaperBroker(
             key_id=key_id,
             secret_key=secret_key,
+        writes_enabled=paper_authorized,
+    )
+    if mode == "ibkr":
+        host, client_id, paper_account = ibkr_paper_profile(environment)
+        broker = IBKRPaperBroker(
+            path=state_db.with_name("ibkr-paper-orders.sqlite3"),
+            transport=OfficialIbapiPaperAdapter(
+                api_read_only=False,
+                expected_account_id=paper_account,
+            ),
+            paper_account=paper_account,
             writes_enabled=paper_authorized,
         )
+        broker.connect(host=host, client_id=client_id)
+        return broker
     settings = ExecutionSettings()  # type: ignore[call-arg]
     return CloudPaperBroker(
         base_url=settings.cloud_platform_base_url,
         token=settings.cloud_paper_api_token,
         writes_enabled=paper_authorized,
     )
+
+
+def ibkr_paper_profile(
+    environment: Mapping[str, str],
+) -> tuple[str, int, str]:
+    """Read only the non-secret 4002 connection profile for IBKR Paper."""
+
+    host = str(environment.get("IBKR_PAPER_HOST", "")).strip()
+    client_id_text = str(environment.get("IBKR_PAPER_CLIENT_ID", "")).strip()
+    account = str(environment.get("IBKR_PAPER_ACCOUNT", "")).strip().upper()
+    if not host or len(host) > 253 or re.fullmatch(r"[A-Za-z0-9.-]+", host) is None:
+        raise RuntimeError("IBKR Paper host is invalid")
+    if re.fullmatch(r"\d+", client_id_text) is None:
+        raise RuntimeError("IBKR Paper client id is invalid")
+    client_id = int(client_id_text)
+    if client_id > 2_147_483_647:
+        raise RuntimeError("IBKR Paper client id is invalid")
+    if re.fullmatch(r"DU[A-Z0-9-]{4,30}", account) is None:
+        raise RuntimeError("IBKR Paper account is invalid")
+    return host, client_id, account
 
 
 def _livermore_push(
@@ -228,6 +266,8 @@ def main() -> int:
     broker = _broker(
         mode=str(args.broker_mode),
         paper_authorized=paper_authorized,
+        state_db=args.state_db,
+        environment=os.environ,
     )
     push = _livermore_push(os.environ)
     notifier = AutonomousPaperNotifier(

@@ -16,6 +16,7 @@ const {
   MODEL_KEYS,
   createSecureSettingsStore,
   normalizeExecutionCommand,
+  normalizePaperAutopilotCommand,
   normalizeModels,
   parseIbkrProfileText,
   safeResultText,
@@ -36,10 +37,17 @@ function marketDataFromSecrets(secrets) {
   }
 }
 
-function runtimeConfiguration(connectionSecrets, executionSecrets) {
+function runtimeConfiguration(
+  connectionSecrets,
+  executionSecrets,
+  paperExecutionSecrets,
+) {
   return {
     ...marketDataFromSecrets(connectionSecrets),
-    ibkr: executionSecrets,
+    ibkr: {
+      ...executionSecrets,
+      paper: paperExecutionSecrets,
+    },
   }
 }
 
@@ -120,6 +128,44 @@ function sanitizeExecutionSnapshot(snapshot) {
   }
 }
 
+function sanitizePaperAutopilotSnapshot(snapshot) {
+  const source = snapshot && typeof snapshot === 'object' ? snapshot : {}
+  const outcomes = Array.isArray(source.last_outcomes)
+    ? source.last_outcomes.slice(0, 20).map((outcome) => {
+        const value = outcome && typeof outcome === 'object' ? outcome : {}
+        return {
+          plan_id: safeResultText(value.plan_id, 120) || '',
+          symbol: safeResultText(value.symbol, 15) || '',
+          action: safeResultText(value.action, 40) || '',
+          reasons: Array.isArray(value.reasons)
+            ? value.reasons.slice(0, 12).map((item) => safeResultText(item, 120) || '')
+            : [],
+          degraded_reasons: Array.isArray(value.degraded_reasons)
+            ? value.degraded_reasons.slice(0, 12).map((item) => safeResultText(item, 120) || '')
+            : [],
+        }
+      })
+    : []
+  return {
+    schema_version: 'ibkr.paper_autopilot.v1',
+    mode: 'paper',
+    port: 4002,
+    configured: source.configured === true,
+    connected: source.connected === true,
+    running: source.running === true,
+    paper_writes_armed: source.paper_writes_armed === true,
+    account_masked: safeResultText(source.account_masked, 80) || '',
+    arm_confirmation_phrase:
+      safeResultText(source.arm_confirmation_phrase, 200) || '',
+    plan_status: safeResultText(source.plan_status, 40) || 'missing',
+    plan_error: safeResultText(source.plan_error, 200) || '',
+    last_tick_at_utc: safeResultText(source.last_tick_at_utc, 50) || '',
+    last_outcomes: outcomes,
+    last_error: safeResultText(source.last_error, 200) || '',
+    root_research_orders_authorized: false,
+  }
+}
+
 function fallbackModels(models, primaryKey) {
   const primary = models[primaryKey]
   return [...new Set(
@@ -164,11 +210,13 @@ function registerHandlers() {
       const models = await openRouter.listModels(candidate.openRouterApiKey)
       const previousSecrets = settingsStore.loadSecrets()
       const executionSecrets = settingsStore.loadExecutionSecrets()
+      const paperExecutionSecrets = settingsStore.loadPaperExecutionSecrets()
       let runtime
       try {
         runtime = await restartLocalRuntime(runtimeConfiguration(
           candidate,
           executionSecrets,
+          paperExecutionSecrets,
         ))
         if (runtime?.market_data?.healthy !== true) {
           throw new Error(
@@ -180,6 +228,7 @@ function registerHandlers() {
         await restartLocalRuntime(runtimeConfiguration(
           previousSecrets,
           executionSecrets,
+          paperExecutionSecrets,
         ))
         throw error
       }
@@ -210,11 +259,28 @@ function registerHandlers() {
     const runtime = await restartLocalRuntime(runtimeConfiguration(
       settingsStore.loadSecrets(),
       settingsStore.loadExecutionSecrets(),
+      settingsStore.loadPaperExecutionSecrets(),
     ))
     return {
       settings: settingsStore.loadPublic(),
       execution: sanitizeExecutionSnapshot(
         await localRuntime.client.executionSnapshot(),
+      ),
+      runtime,
+    }
+  })
+
+  ipcMain.handle('analyst:settings:save-paper-execution', async (_event, values) => {
+    settingsStore.savePaperExecutionSettings(values)
+    const runtime = await restartLocalRuntime(runtimeConfiguration(
+      settingsStore.loadSecrets(),
+      settingsStore.loadExecutionSecrets(),
+      settingsStore.loadPaperExecutionSecrets(),
+    ))
+    return {
+      settings: settingsStore.loadPublic(),
+      paper_autopilot: sanitizePaperAutopilotSnapshot(
+        await localRuntime.client.paperAutopilotSnapshot(),
       ),
       runtime,
     }
@@ -245,6 +311,7 @@ function registerHandlers() {
     const runtime = await restartLocalRuntime(runtimeConfiguration(
       settingsStore.loadSecrets(),
       settingsStore.loadExecutionSecrets(),
+      settingsStore.loadPaperExecutionSecrets(),
     ))
     return {
       settings: settingsStore.loadPublic(),
@@ -312,6 +379,7 @@ function registerHandlers() {
     await restartLocalRuntime(runtimeConfiguration(
       settingsStore.loadSecrets(),
       settingsStore.loadExecutionSecrets(),
+      settingsStore.loadPaperExecutionSecrets(),
     ))
     const execution = sanitizeExecutionSnapshot(
       await localRuntime.client.executionSnapshot(),
@@ -325,6 +393,18 @@ function registerHandlers() {
       settings: settingsStore.loadPublic(),
       execution,
     }
+  })
+
+  ipcMain.handle('analyst:paper-autopilot:snapshot', async () => (
+    sanitizePaperAutopilotSnapshot(
+      await localRuntime.client.paperAutopilotSnapshot(),
+    )
+  ))
+  ipcMain.handle('analyst:paper-autopilot:command', async (_event, command) => {
+    const normalized = normalizePaperAutopilotCommand(command)
+    return sanitizePaperAutopilotSnapshot(
+      await localRuntime.client.paperAutopilotCommand(normalized),
+    )
   })
 
   ipcMain.handle('analyst:assistant:ask', async (_event, payload) => {
@@ -396,6 +476,7 @@ app.whenReady().then(async () => {
   await restartLocalRuntime(runtimeConfiguration(
     settingsStore.loadSecrets(),
     settingsStore.loadExecutionSecrets(),
+    settingsStore.loadPaperExecutionSecrets(),
   ))
   registerHandlers()
   await createWindow()

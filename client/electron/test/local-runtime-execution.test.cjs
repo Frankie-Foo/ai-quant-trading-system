@@ -72,6 +72,38 @@ test('local runtime client exposes only bounded execution error codes', async ()
   )
 })
 
+test('local runtime client keeps Paper auto-execution on its own 4002 routes', async () => {
+  const requests = []
+  const client = createLocalRuntimeClient({
+    fetchImpl: async (url, options) => {
+      requests.push({ url, options })
+      return jsonResponse({
+        schema_version: 'ibkr.paper_autopilot.v1',
+        mode: 'paper',
+        port: 4002,
+        configured: true,
+        connected: options.method === 'POST',
+        running: false,
+        paper_writes_armed: false,
+      })
+    },
+  })
+  client.connect({
+    url: 'http://127.0.0.1:54321',
+    token: 'ephemeral-runtime-token-value',
+  })
+
+  await client.paperAutopilotSnapshot()
+  await client.paperAutopilotCommand({ kind: 'connect' })
+
+  assert.equal(requests[0].url, 'http://127.0.0.1:54321/v1/paper-autopilot')
+  assert.equal(
+    requests[1].url,
+    'http://127.0.0.1:54321/v1/paper-autopilot/commands',
+  )
+  assert.equal(requests[1].options.body, JSON.stringify({ kind: 'connect' }))
+})
+
 test('runtime launch forwards only the fixed live execution profile through env', () => {
   const launch = runtimeLaunch({
     app: {
@@ -137,4 +169,41 @@ test('runtime launch can detect an account before first secure binding', () => {
     IBKR_CLIENT_ID: '87',
     IBKR_MAX_ORDER_NOTIONAL: '25000',
   })
+})
+
+test('runtime launch forwards a separate fixed Paper 4002 profile without changing live 4001', () => {
+  const launch = runtimeLaunch({
+    app: {
+      isPackaged: false,
+      getPath: () => 'C:\\Users\\research\\AppData\\Roaming\\AIQuant',
+    },
+    projectRoot: 'C:\\project',
+    token: 'ephemeral-runtime-token-value',
+    platform: 'win32',
+    marketData: {
+      ibkr: {
+        host: '192.0.2.10',
+        clientId: 17,
+        liveAccount: 'U1234567',
+        maxOrderNotional: 25_000,
+        paper: {
+          host: '192.0.2.44',
+          clientId: 91,
+          paperAccount: 'DU7654321',
+        },
+      },
+    },
+  })
+
+  assert.deepEqual(launch.executionEnv, {
+    IBKR_HOST: '192.0.2.10',
+    IBKR_CLIENT_ID: '17',
+    IBKR_LIVE_ACCOUNT: 'U1234567',
+    IBKR_MAX_ORDER_NOTIONAL: '25000',
+    IBKR_PAPER_HOST: '192.0.2.44',
+    IBKR_PAPER_CLIENT_ID: '91',
+    IBKR_PAPER_ACCOUNT: 'DU7654321',
+  })
+  assert.equal(Object.hasOwn(launch.executionEnv, 'IBKR_PAPER_PORT'), false)
+  assert.equal(Object.hasOwn(launch.executionEnv, 'IBKR_PORT'), false)
 })

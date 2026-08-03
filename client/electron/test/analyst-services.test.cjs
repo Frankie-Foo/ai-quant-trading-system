@@ -8,6 +8,7 @@ const vm = require('node:vm')
 const {
   createSecureSettingsStore,
   normalizeExecutionCommand,
+  normalizePaperAutopilotCommand,
   parseIbkrProfileText,
   sanitizeExecutionCommandResult,
 } = require('../analyst/settings.cjs')
@@ -178,6 +179,53 @@ test('IBKR execution settings support first-use account discovery and encrypted 
   assert.equal(store.loadExecutionSecrets().liveAccount, '')
 })
 
+test('IBKR Paper settings use a separate encrypted DU-only 4002 profile', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'analyst-paper-settings-'))
+  const settingsPath = path.join(root, 'settings.json')
+  const store = createSecureSettingsStore({
+    filePath: settingsPath,
+    safeStorage: fakeSafeStorage(),
+  })
+
+  store.saveExecutionSettings({
+    host: '127.0.0.1',
+    clientId: 17,
+    maxOrderNotional: 25000,
+  })
+  store.savePaperExecutionSettings({
+    host: '192.0.2.44',
+    clientId: 91,
+    paperAccount: 'DU7654321',
+  })
+
+  assert.deepEqual(store.loadPaperExecutionSecrets(), {
+    host: '192.0.2.44',
+    clientId: 91,
+    paperAccount: 'DU7654321',
+    port: 4002,
+  })
+  assert.deepEqual(store.loadPublic().paperExecution, {
+    configured: true,
+    hostConfigured: true,
+    clientIdConfigured: true,
+    accountConfigured: true,
+    paperAccountMasked: 'DU***4321',
+    port: 4002,
+  })
+
+  assert.throws(
+    () => store.savePaperExecutionSettings({
+      host: '192.0.2.44',
+      clientId: 91,
+      paperAccount: 'U7654321',
+    }),
+    /DU/,
+  )
+  const persisted = fs.readFileSync(settingsPath, 'utf8')
+  assert.equal(persisted.includes('DU7654321'), false)
+  assert.equal(persisted.includes('192.0.2.44'), false)
+})
+
 test('execution IPC accepts only explicit long-only command shapes', () => {
   assert.deepEqual(normalizeExecutionCommand({
     kind: 'preview',
@@ -282,6 +330,27 @@ test('execution IPC accepts only explicit long-only command shapes', () => {
       },
     }),
     /OpenLong.*ReduceLong/,
+  )
+})
+
+test('Paper autopilot IPC accepts only its fixed lifecycle commands', () => {
+  assert.deepEqual(normalizePaperAutopilotCommand({ kind: 'connect' }), {
+    kind: 'connect',
+  })
+  assert.deepEqual(normalizePaperAutopilotCommand({ kind: 'validate_plan' }), {
+    kind: 'validate_plan',
+  })
+  assert.deepEqual(normalizePaperAutopilotCommand({
+    kind: 'start',
+    confirmation: '启用模拟盘自动执行 DU***4321',
+    symbol: 'must-not-cross-ipc',
+  }), {
+    kind: 'start',
+    confirmation: '启用模拟盘自动执行 DU***4321',
+  })
+  assert.throws(
+    () => normalizePaperAutopilotCommand({ kind: 'submit', order: {} }),
+    /未知模拟盘自动执行命令/,
   )
 })
 
@@ -399,13 +468,19 @@ test('preload exposes isolated execution IPC and main registers matching handler
   assert.equal(exposed.key, 'analystDesktop')
   await exposed.value.execution.snapshot()
   await exposed.value.execution.command({ kind: 'connect' })
+  await exposed.value.paperAutopilot.snapshot()
+  await exposed.value.paperAutopilot.command({ kind: 'connect' })
   await exposed.value.settings.saveExecution({ host: '127.0.0.1' })
+  await exposed.value.settings.savePaperExecution({ host: '127.0.0.1' })
   await exposed.value.settings.importExecutionProfile()
   await exposed.value.settings.clearExecutionAccountBinding()
   assert.deepEqual(invocations, [
     ['analyst:execution:snapshot'],
     ['analyst:execution:command', { kind: 'connect' }],
+    ['analyst:paper-autopilot:snapshot'],
+    ['analyst:paper-autopilot:command', { kind: 'connect' }],
     ['analyst:settings:save-execution', { host: '127.0.0.1' }],
+    ['analyst:settings:save-paper-execution', { host: '127.0.0.1' }],
     ['analyst:settings:import-execution-profile'],
     ['analyst:settings:clear-execution-account'],
   ])
@@ -416,6 +491,10 @@ test('preload exposes isolated execution IPC and main registers matching handler
   )
   assert.match(main, /ipcMain\.handle\('analyst:execution:snapshot'/)
   assert.match(main, /ipcMain\.handle\('analyst:execution:command'/)
+  assert.match(main, /ipcMain\.handle\('analyst:paper-autopilot:snapshot'/)
+  assert.match(main, /ipcMain\.handle\('analyst:paper-autopilot:command'/)
+  assert.match(main, /normalizePaperAutopilotCommand\(command\)/)
+  assert.match(main, /analyst:settings:save-paper-execution/)
   assert.match(main, /normalizeExecutionCommand\(command\)/)
   assert.match(main, /saveBoundExecutionAccount/)
   assert.match(main, /actual_account_id/)

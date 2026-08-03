@@ -5,6 +5,7 @@ import pytest
 from scripts.run_autonomous_paper_session import (
     _livermore_push,
     direct_paper_credentials,
+    ibkr_paper_profile,
     resolve_paper_authorization,
 )
 
@@ -77,3 +78,22 @@ def test_livermore_push_requires_app_secret_and_exact_channel() -> None:
         assert client.channel_id == "channel-id"
     finally:
         client.close()
+
+
+def test_ibkr_paper_profile_requires_a_du_account_and_nonnegative_client_id() -> None:
+    assert ibkr_paper_profile(
+        {
+            "IBKR_PAPER_HOST": "127.0.0.1",
+            "IBKR_PAPER_CLIENT_ID": "91",
+            "IBKR_PAPER_ACCOUNT": "DU7654321",
+        }
+    ) == ("127.0.0.1", 91, "DU7654321")
+
+    with pytest.raises(RuntimeError, match="Paper account"):
+        ibkr_paper_profile(
+            {
+                "IBKR_PAPER_HOST": "127.0.0.1",
+                "IBKR_PAPER_CLIENT_ID": "91",
+                "IBKR_PAPER_ACCOUNT": "U7654321",
+            }
+        )

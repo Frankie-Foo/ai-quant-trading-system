@@ -12,7 +12,9 @@ from execution.ibkr_execution import BrokerOrderRejected, BrokerOrderRequest
 from execution.ibkr_tws_adapter import (
     BrokerConnectionTimeout,
     BrokerGatewayUnavailable,
+    IbkrOrderCommand,
     OfficialIbapiAdapter,
+    OfficialIbapiPaperAdapter,
 )
 
 
@@ -66,6 +68,24 @@ def test_official_adapter_refuses_every_non_live_port() -> None:
         adapter.connect(host="127.0.0.1", port=4002, client_id=71)
 
     assert client.args is None
+
+
+def test_official_paper_adapter_refuses_live_port_and_connects_only_to_4002() -> None:
+    client = BlockingClient()
+    adapter = OfficialIbapiPaperAdapter(
+        connect_timeout=0.02,
+        shutdown_grace=0.2,
+        client_factory=lambda _wrapper: client,
+    )
+
+    with pytest.raises(ValueError, match="4002"):
+        adapter.connect(host="127.0.0.1", port=4001, client_id=91)
+
+    with pytest.raises(BrokerConnectionTimeout, match="connection_timeout"):
+        adapter.connect(host="172.18.0.1", port=4002, client_id=91)
+
+    assert client.args == ("172.18.0.1", 4002, 91)
+    assert client.conn.closed.is_set()
 
 
 class UnavailableClient:
@@ -358,3 +378,151 @@ def test_synchronous_sdk_send_is_time_bounded_and_marks_connection_lost() -> Non
     assert time.monotonic() - started < 0.2
     assert adapter.connected is False
     assert clients[0].send_release.is_set()
+
+
+class PaperResponsiveClient(ResponsiveClient):
+    def connect(self, host: str, port: int, client_id: int) -> None:
+        super().connect(host, port, client_id)
+        self.wrapper.managedAccounts("DU7654321")
+
+    def reqAccountSummary(self, request_id: int, group: str, tags: str) -> None:
+        assert group == "All"
+        assert "NetLiquidation" in tags
+        assert "PreviousDayEquityWithLoanValue" in tags
+        assert "BuyingPower" in tags
+        self.wrapper.accountSummary(
+            request_id,
+            "DU7654321",
+            "NetLiquidation",
+            "100000",
+            "USD",
+        )
+        self.wrapper.accountSummary(
+            request_id,
+            "DU7654321",
+            "PreviousDayEquityWithLoanValue",
+            "101000",
+            "USD",
+        )
+        self.wrapper.accountSummary(
+            request_id,
+            "DU7654321",
+            "BuyingPower",
+            "400000",
+            "USD",
+        )
+        self.wrapper.accountSummaryEnd(request_id)
+
+    def cancelAccountSummary(self, request_id: int) -> None:
+        del request_id
+
+    def cancelOrder(self, order_id: int, manual_cancel_time: str) -> None:
+        assert manual_cancel_time == ""
+        self.live_orders = [
+            item for item in self.live_orders if item[0] != order_id
+        ]
+
+
+def test_official_paper_adapter_returns_account_values_and_submits_only_to_paper() -> None:
+    clients: list[PaperResponsiveClient] = []
+
+    def factory(wrapper: Any) -> PaperResponsiveClient:
+        client = PaperResponsiveClient(wrapper)
+        clients.append(client)
+        return client
+
+    adapter = OfficialIbapiPaperAdapter(
+        connect_timeout=0.2,
+        request_timeout=0.2,
+        expected_account_id="DU7654321",
+        client_factory=factory,
+    )
+    adapter.connect(host="127.0.0.1", port=4002, client_id=91)
+    values = adapter.account_values()
+    submitted = adapter.submit_order_command(
+        IbkrOrderCommand(
+            account_id="DU7654321",
+            symbol="AAPL",
+            side="BUY",
+            quantity=1,
+            order_type="LMT",
+            limit_price=Decimal("1"),
+            outside_rth=True,
+            order_ref="aiq-paper-test",
+        )
+    )
+
+    sent = clients[0].placed[-1][2]
+    assert values.account_id == "DU7654321"
+    assert values.net_liquidation == Decimal("100000")
+    assert values.previous_equity == Decimal("101000")
+    assert values.buying_power == Decimal("400000")
+    assert submitted.status == "submitted"
+    assert sent.outsideRth is True
+    assert sent.orderType == "LMT"
+    assert sent.eTradeOnly is False
+    assert adapter.cancel_order(submitted.order_id) is True
+    adapter.disconnect()
+
+
+def test_official_paper_adapter_submits_a_transmitted_bracket_as_one_group() -> None:
+    clients: list[PaperResponsiveClient] = []
+
+    def factory(wrapper: Any) -> PaperResponsiveClient:
+        client = PaperResponsiveClient(wrapper)
+        clients.append(client)
+        return client
+
+    adapter = OfficialIbapiPaperAdapter(
+        connect_timeout=0.2,
+        request_timeout=0.2,
+        expected_account_id="DU7654321",
+        client_factory=factory,
+    )
+    adapter.connect(host="127.0.0.1", port=4002, client_id=91)
+
+    submitted = adapter.submit_order_group(
+        (
+            IbkrOrderCommand(
+                account_id="DU7654321",
+                symbol="AAPL",
+                side="BUY",
+                quantity=1,
+                order_type="MKT",
+                order_ref="aiq-paper-parent",
+                transmit=False,
+            ),
+            IbkrOrderCommand(
+                account_id="DU7654321",
+                symbol="AAPL",
+                side="SELL",
+                quantity=1,
+                order_type="LMT",
+                limit_price=Decimal("210"),
+                order_ref="aiq-paper-take-profit",
+                parent_index=0,
+                transmit=False,
+            ),
+            IbkrOrderCommand(
+                account_id="DU7654321",
+                symbol="AAPL",
+                side="SELL",
+                quantity=1,
+                order_type="STP",
+                stop_price=Decimal("190"),
+                order_ref="aiq-paper-stop",
+                parent_index=0,
+                transmit=True,
+            ),
+        )
+    )
+
+    orders = [item[2] for item in clients[0].placed]
+    assert tuple(item.order_id for item in submitted) == (8100, 8101, 8102)
+    assert orders[0].transmit is False
+    assert orders[1].parentId == 8100
+    assert orders[1].transmit is False
+    assert orders[2].parentId == 8100
+    assert orders[2].auxPrice == 190.0
+    assert orders[2].transmit is True
+    adapter.disconnect()

@@ -241,6 +241,32 @@ export function executionErrorMessage(error) {
   return String(error?.message || error || '盈透执行操作失败').slice(0, 500)
 }
 
+export function paperAutopilotErrorMessage(error) {
+  const message = String(error?.message || error || '').toLowerCase()
+  if (message.includes('paper_profile_invalid') || message.includes('not configured')) {
+    return '请先在设置中保存 IBKR 模拟盘主机、Client ID 和 DU 账户。'
+  }
+  if (
+    message.includes('connection_timeout')
+    || message.includes('connection_failed')
+  ) {
+    return '无法连接盈透模拟盘端口 4002，请确认 Paper TWS / IB Gateway 已登录并启用 Socket API。'
+  }
+  if (message.includes('paper_plan_invalid')) {
+    return '今日冻结执行计划无效或已过期，自动模拟盘不会启动。'
+  }
+  if (message.includes('paper_safety_envelope_invalid')) {
+    return '安全包缺失、过期或不一致，自动模拟盘已保持关闭。'
+  }
+  if (message.includes('account_mismatch')) {
+    return '当前模拟网关账户与配置的 DU 账户不一致，连接已拒绝。'
+  }
+  if (message.includes('confirmation')) {
+    return '模拟盘自动执行确认文字不匹配，未启动。'
+  }
+  return String(error?.message || error || '模拟盘自动执行操作失败').slice(0, 500)
+}
+
 function executionRows(rows, keys) {
   if (!Array.isArray(rows)) return []
   return rows.slice(0, 250).map((row) => {
@@ -326,6 +352,49 @@ export function normalizeExecutionSnapshot(snapshot) {
     ]),
     lastError: typeof source.last_error === 'string'
       ? source.last_error.slice(0, 500)
+      : '',
+  }
+}
+
+export function normalizePaperAutopilotSnapshot(snapshot) {
+  const source = snapshot && typeof snapshot === 'object' ? snapshot : {}
+  const outcomes = Array.isArray(source.last_outcomes)
+    ? source.last_outcomes.slice(0, 20).map((item) => ({
+        planId: typeof item?.plan_id === 'string' ? item.plan_id.slice(0, 120) : '',
+        symbol: typeof item?.symbol === 'string' ? item.symbol.slice(0, 15) : '',
+        action: typeof item?.action === 'string' ? item.action.slice(0, 40) : '',
+        reasons: Array.isArray(item?.reasons)
+          ? item.reasons.filter((reason) => typeof reason === 'string').slice(0, 12)
+          : [],
+        degradedReasons: Array.isArray(item?.degraded_reasons)
+          ? item.degraded_reasons.filter((reason) => typeof reason === 'string').slice(0, 12)
+          : [],
+      }))
+    : []
+  return {
+    configured: source.configured === true,
+    connected: source.connected === true,
+    running: source.running === true,
+    paperWritesArmed: source.paper_writes_armed === true,
+    port: finiteNumber(source.port) || 4002,
+    accountMasked: typeof source.account_masked === 'string'
+      ? source.account_masked.slice(0, 80)
+      : '',
+    armConfirmationPhrase: typeof source.arm_confirmation_phrase === 'string'
+      ? source.arm_confirmation_phrase.slice(0, 200)
+      : '',
+    planStatus: typeof source.plan_status === 'string'
+      ? source.plan_status.slice(0, 40)
+      : 'missing',
+    planError: typeof source.plan_error === 'string'
+      ? source.plan_error.slice(0, 200)
+      : '',
+    lastTickAtUtc: typeof source.last_tick_at_utc === 'string'
+      ? source.last_tick_at_utc.slice(0, 50)
+      : '',
+    lastOutcomes: outcomes,
+    lastError: typeof source.last_error === 'string'
+      ? source.last_error.slice(0, 200)
       : '',
   }
 }

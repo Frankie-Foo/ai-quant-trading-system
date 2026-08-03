@@ -9,8 +9,9 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 
 from ibapi.client import EClient
 from ibapi.contract import Contract
@@ -19,6 +20,7 @@ from ibapi.wrapper import EWrapper
 
 from execution.ibkr_execution import (
     LIVE_PORT,
+    PAPER_PORT,
     BrokerAccountSnapshot,
     BrokerOrderRejected,
     BrokerOrderRequest,
@@ -33,6 +35,64 @@ class BrokerConnectionTimeout(TimeoutError):
 
 class BrokerGatewayUnavailable(ConnectionError):
     """TWS/Gateway rejected or could not establish the API connection."""
+
+
+@dataclass(frozen=True)
+class IbkrAccountValues:
+    """Account values required by the autonomous Paper risk envelope."""
+
+    account_id: str
+    net_liquidation: Decimal
+    previous_equity: Decimal
+    buying_power: Decimal
+
+
+@dataclass(frozen=True)
+class IbkrOrderCommand:
+    """One constrained stock order sent through the official IBKR API."""
+
+    account_id: str
+    symbol: str
+    side: Literal["BUY", "SELL"]
+    quantity: int
+    order_type: Literal["MKT", "LMT", "STP"]
+    order_ref: str
+    limit_price: Decimal | None = None
+    stop_price: Decimal | None = None
+    outside_rth: bool = False
+    parent_order_id: int | None = None
+    parent_index: int | None = None
+    transmit: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.account_id.strip():
+            raise ValueError("IBKR order account is required")
+        if not self.symbol or self.symbol != self.symbol.strip().upper():
+            raise ValueError("IBKR order symbol must be uppercase")
+        if self.quantity <= 0:
+            raise ValueError("IBKR order quantity must be positive")
+        if not self.order_ref.strip() or len(self.order_ref) > 45:
+            raise ValueError("IBKR order_ref must be between 1 and 45 characters")
+        if self.parent_order_id is not None and self.parent_order_id <= 0:
+            raise ValueError("IBKR parent order id must be positive")
+        if self.parent_index is not None and self.parent_index < 0:
+            raise ValueError("IBKR parent order index cannot be negative")
+        if self.parent_order_id is not None and self.parent_index is not None:
+            raise ValueError("IBKR parent order id and index are mutually exclusive")
+        if self.order_type == "LMT":
+            if self.limit_price is None or self.limit_price <= 0:
+                raise ValueError("IBKR limit order needs a positive limit price")
+            if self.stop_price is not None:
+                raise ValueError("IBKR limit order cannot include a stop price")
+        elif self.order_type == "STP":
+            if self.stop_price is None or self.stop_price <= 0:
+                raise ValueError("IBKR stop order needs a positive stop price")
+            if self.limit_price is not None:
+                raise ValueError("IBKR stop order cannot include a limit price")
+            if self.outside_rth:
+                raise ValueError("IBKR stop order cannot be outside regular trading hours")
+        elif self.limit_price is not None or self.stop_price is not None:
+            raise ValueError("IBKR market order cannot include a limit or stop price")
 
 
 class _IbkrCallbacks(EWrapper):  # type: ignore[misc]
@@ -56,6 +116,8 @@ class _IbkrCallbacks(EWrapper):  # type: ignore[misc]
         self.order_results: dict[int, dict[str, Any]] = {}
         self.errors_by_request: dict[int, tuple[int, str]] = {}
         self.warnings_by_request: dict[int, list[tuple[int, str]]] = {}
+        self.account_summary_values: dict[int, dict[str, dict[str, str]]] = {}
+        self.account_summary_events: dict[int, threading.Event] = {}
         self.lock = threading.RLock()
 
     def nextValidId(self, orderId: int) -> None:  # noqa: N802
@@ -67,6 +129,26 @@ class _IbkrCallbacks(EWrapper):  # type: ignore[misc]
             account.strip() for account in accountsList.split(",") if account.strip()
         )
         self.accounts_ready.set()
+
+    def accountSummary(  # noqa: N802
+        self,
+        reqId: int,
+        account: str,
+        tag: str,
+        value: str,
+        currency: str,
+    ) -> None:
+        del currency
+        with self.lock:
+            self.account_summary_values.setdefault(reqId, {}).setdefault(account, {})[
+                tag
+            ] = value
+
+    def accountSummaryEnd(self, reqId: int) -> None:  # noqa: N802
+        with self.lock:
+            event = self.account_summary_events.get(reqId)
+        if event is not None:
+            event.set()
 
     def error(
         self,
@@ -213,6 +295,8 @@ class _IbkrCallbacks(EWrapper):  # type: ignore[misc]
 class OfficialIbapiAdapter:
     """Thread-bounded adapter around the official synchronous ``ibapi`` client."""
 
+    _allowed_port = LIVE_PORT
+
     def __init__(
         self,
         *,
@@ -239,6 +323,8 @@ class OfficialIbapiAdapter:
         self._run_thread: threading.Thread | None = None
         self._connected = False
         self._order_id_lock = threading.Lock()
+        self._summary_request_id = 900_000
+        self._summary_request_lock = threading.Lock()
 
     @property
     def connected(self) -> bool:
@@ -249,8 +335,11 @@ class OfficialIbapiAdapter:
         )
 
     def connect(self, *, host: str, port: int, client_id: int) -> None:
-        if port != LIVE_PORT:
-            raise ValueError("OfficialIbapiAdapter permits only the live IBKR port 4001")
+        if port != self._allowed_port:
+            raise ValueError(
+                "OfficialIbapiAdapter permits only the IBKR port "
+                f"{self._allowed_port}"
+            )
         self.disconnect()
         callbacks = _IbkrCallbacks()
         client = self._client_factory(callbacks)
@@ -359,6 +448,182 @@ class OfficialIbapiAdapter:
             positions=positions,
             open_orders=open_orders,
         )
+
+    def account_values(self) -> IbkrAccountValues:
+        """Read the exact managed account's current and prior-day risk values.
+
+        The Paper executor needs all three values.  Missing or non-positive values
+        are a hard failure rather than a sizing fallback.
+        """
+
+        client, callbacks = self._require_connection()
+        account_id = self._selected_account_id(callbacks)
+        request_id = self._reserve_summary_request_id()
+        event = threading.Event()
+        with callbacks.lock:
+            callbacks.account_summary_values.pop(request_id, None)
+            callbacks.account_summary_events[request_id] = event
+            callbacks.errors_by_request.pop(request_id, None)
+        tags = (
+            "NetLiquidation,PreviousDayEquityWithLoanValue,BuyingPower"
+        )
+        try:
+            self._call_bounded(
+                "account_summary_request_send",
+                client.reqAccountSummary,
+                request_id,
+                "All",
+                tags,
+            )
+            if not event.wait(self.request_timeout):
+                raise TimeoutError("account_summary_timeout")
+            error = callbacks.errors_by_request.get(request_id)
+            if error is not None:
+                raise RuntimeError(f"ibkr_error_{error[0]}")
+            with callbacks.lock:
+                values = dict(
+                    callbacks.account_summary_values.get(request_id, {}).get(
+                        account_id,
+                        {},
+                    )
+                )
+            return IbkrAccountValues(
+                account_id=account_id,
+                net_liquidation=self._required_decimal(
+                    values.get("NetLiquidation"),
+                    name="NetLiquidation",
+                ),
+                previous_equity=self._required_decimal(
+                    values.get("PreviousDayEquityWithLoanValue"),
+                    name="PreviousDayEquityWithLoanValue",
+                ),
+                buying_power=self._required_decimal(
+                    values.get("BuyingPower"),
+                    name="BuyingPower",
+                ),
+            )
+        finally:
+            cancel = getattr(client, "cancelAccountSummary", None)
+            if callable(cancel):
+                try:
+                    self._call_bounded(
+                        "account_summary_cancel_send",
+                        cancel,
+                        request_id,
+                    )
+                except (OSError, RuntimeError, TimeoutError):
+                    self._connected = False
+            with callbacks.lock:
+                callbacks.account_summary_events.pop(request_id, None)
+                callbacks.account_summary_values.pop(request_id, None)
+
+    def submit_order_command(self, command: IbkrOrderCommand) -> BrokerSubmission:
+        """Submit one constrained order and await a broker acknowledgement."""
+
+        return self.submit_order_group((command,))[0]
+
+    def what_if_order_command(self, command: IbkrOrderCommand) -> BrokerWhatIf:
+        """Run IBKR's non-transmitting margin/commission preflight for one order."""
+
+        client, callbacks = self._require_connection()
+        order_id = self._reserve_order_id(callbacks)
+        event = self._prepare_order_request(callbacks, order_id)
+        contract, order = self._build_order_command(command)
+        order.orderId = order_id
+        order.whatIf = True
+        self._call_bounded("what_if_send", client.placeOrder, order_id, contract, order)
+        if not event.wait(self.request_timeout):
+            raise TimeoutError("what_if_timeout")
+        error = callbacks.errors_by_request.get(order_id)
+        if error is not None:
+            raise RuntimeError(f"ibkr_error_{error[0]}")
+        with callbacks.lock:
+            result = dict(callbacks.order_results[order_id])
+            request_warnings = tuple(callbacks.warnings_by_request.get(order_id, ()))
+        warnings = [f"{code}: {message}" for code, message in request_warnings]
+        state_warning = str(result.get("warning", "")).strip()
+        if state_warning:
+            warnings.append(state_warning)
+        return BrokerWhatIf(
+            accepted=True,
+            estimated_commission=self._optional_decimal(result.get("commission")),
+            initial_margin_change=self._optional_decimal(
+                result.get("initial_margin_change")
+            ),
+            warning="; ".join(warnings) or None,
+        )
+
+    def submit_order_group(
+        self,
+        commands: tuple[IbkrOrderCommand, ...],
+    ) -> tuple[BrokerSubmission, ...]:
+        """Submit a linked group, resolving parent indexes inside one order-ID block."""
+
+        if not commands:
+            raise ValueError("IBKR order group cannot be empty")
+
+        client, callbacks = self._require_connection()
+        if self.api_read_only:
+            raise RuntimeError("IBKR API is read-only")
+        order_ids = tuple(self._reserve_order_id(callbacks) for _ in commands)
+        resolved: list[IbkrOrderCommand] = []
+        for index, command in enumerate(commands):
+            parent_index = command.parent_index
+            if parent_index is not None:
+                if parent_index >= index:
+                    raise ValueError("IBKR bracket parent must precede its child")
+                command = replace(
+                    command,
+                    parent_order_id=order_ids[parent_index],
+                    parent_index=None,
+                )
+            resolved.append(command)
+        submissions: list[BrokerSubmission] = []
+        for order_id, command in zip(order_ids, resolved, strict=True):
+            event = self._prepare_order_request(callbacks, order_id)
+            contract, order = self._build_order_command(command)
+            order.orderId = order_id
+            self._call_bounded(
+                "order_send",
+                client.placeOrder,
+                order_id,
+                contract,
+                order,
+            )
+            if not event.wait(self.request_timeout):
+                raise TimeoutError("order_submission_timeout")
+            error = callbacks.errors_by_request.get(order_id)
+            if error is not None:
+                raise BrokerOrderRejected(f"ibkr_error_{error[0]}")
+            with callbacks.lock:
+                result = dict(callbacks.order_results[order_id])
+            submissions.append(
+                BrokerSubmission(
+                    status=self._normalize_status(
+                        str(result.get("status", "Submitted"))
+                    ),
+                    order_id=order_id,
+                    perm_id=_IbkrCallbacks._optional_int(result.get("perm_id")),
+                    order_ref=command.order_ref,
+                )
+            )
+        return tuple(submissions)
+
+    def cancel_order(self, order_id: int) -> bool:
+        """Cancel an API-owned order and verify it no longer remains open."""
+
+        if order_id <= 0:
+            raise ValueError("IBKR order id must be positive")
+        client, callbacks = self._require_connection()
+        self._call_bounded("cancel_order_send", client.cancelOrder, order_id, "")
+        with callbacks.lock:
+            callbacks.open_orders = {}
+            callbacks.open_orders_done.clear()
+        self._call_bounded("cancel_recovery_send", client.reqAllOpenOrders)
+        if not callbacks.open_orders_done.wait(self.request_timeout):
+            raise TimeoutError("cancel_recovery_timeout")
+        with callbacks.lock:
+            return order_id not in callbacks.open_orders
 
     def what_if(self, request: BrokerOrderRequest) -> BrokerWhatIf:
         client, callbacks = self._require_connection()
@@ -507,6 +772,22 @@ class OfficialIbapiAdapter:
             callbacks.next_order_id += 1
             return order_id
 
+    def _reserve_summary_request_id(self) -> int:
+        with self._summary_request_lock:
+            self._summary_request_id += 1
+            return self._summary_request_id
+
+    def _selected_account_id(self, callbacks: _IbkrCallbacks) -> str:
+        if not callbacks.accounts_ready.wait(self.request_timeout) or not callbacks.accounts:
+            raise TimeoutError("account_snapshot_timeout")
+        if self.expected_account_id is None:
+            if len(callbacks.accounts) != 1:
+                raise BrokerGatewayUnavailable("multiple_accounts_require_selection")
+            return callbacks.accounts[0]
+        if self.expected_account_id not in callbacks.accounts:
+            raise BrokerGatewayUnavailable("configured_account_not_visible")
+        return self.expected_account_id
+
     @staticmethod
     def _prepare_order_request(callbacks: _IbkrCallbacks, order_id: int) -> threading.Event:
         event = threading.Event()
@@ -538,6 +819,43 @@ class OfficialIbapiAdapter:
         order.transmit = True
         order.orderRef = order_ref
         return contract, order
+
+    @staticmethod
+    def _build_order_command(command: IbkrOrderCommand) -> tuple[Contract, Order]:
+        contract = Contract()
+        contract.symbol = command.symbol
+        contract.secType = "STK"
+        contract.exchange = "SMART"
+        contract.currency = "USD"
+        order = Order()
+        order.account = command.account_id
+        order.action = command.side
+        order.orderType = command.order_type
+        order.totalQuantity = command.quantity
+        order.tif = "DAY"
+        order.outsideRth = command.outside_rth
+        if command.limit_price is not None:
+            order.lmtPrice = float(command.limit_price)
+        if command.stop_price is not None:
+            order.auxPrice = float(command.stop_price)
+        if command.parent_order_id is not None:
+            order.parentId = command.parent_order_id
+        # Modern TWS/Gateway rejects these legacy defaults with 10268/10269.
+        order.eTradeOnly = False
+        order.firmQuoteOnly = False
+        order.transmit = command.transmit
+        order.orderRef = command.order_ref
+        return contract, order
+
+    @staticmethod
+    def _required_decimal(value: object, *, name: str) -> Decimal:
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise RuntimeError(f"IBKR account {name} is unavailable") from exc
+        if not parsed.is_finite() or parsed <= 0:
+            raise RuntimeError(f"IBKR account {name} is unavailable")
+        return parsed
 
     @staticmethod
     def _optional_decimal(value: Any) -> Decimal | None:
@@ -602,8 +920,21 @@ class OfficialIbapiAdapter:
             run_thread.join(self.shutdown_grace)
 
 
+class OfficialIbapiPaperAdapter(OfficialIbapiAdapter):
+    """Official IBKR adapter restricted to the Gateway Paper socket on port 4002.
+
+    This is a distinct adapter rather than a configurable mode on the live adapter so
+    callers cannot redirect a paper workflow to the live listener by changing input.
+    """
+
+    _allowed_port = PAPER_PORT
+
+
 __all__ = [
     "BrokerConnectionTimeout",
     "BrokerGatewayUnavailable",
+    "IbkrAccountValues",
+    "IbkrOrderCommand",
     "OfficialIbapiAdapter",
+    "OfficialIbapiPaperAdapter",
 ]

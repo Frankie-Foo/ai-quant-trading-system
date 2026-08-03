@@ -7,6 +7,7 @@ import {
   evidenceReferenceFromDesk,
   evidenceReferenceKey,
   executionErrorMessage,
+  paperAutopilotErrorMessage,
   loadAssistantHistory,
   normalizeExecutionSnapshot,
   orderPreviewCommand,
@@ -261,5 +262,16 @@ test('IBKR technical failures are rendered as actionable Chinese messages', () =
   assert.equal(
     executionErrorMessage(new Error('execution_failed')),
     '实盘执行失败，结果未被视为成功；请先核对最近订单和 IBKR 状态。',
+  )
+})
+
+test('Paper automated execution failures never instruct the user to check live 4001', () => {
+  assert.match(
+    paperAutopilotErrorMessage(new Error('connection_failed')),
+    /4002/,
+  )
+  assert.match(
+    paperAutopilotErrorMessage(new Error('paper_plan_invalid')),
+    /冻结执行计划/,
   )
 })

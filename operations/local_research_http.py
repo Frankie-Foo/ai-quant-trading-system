@@ -39,6 +39,23 @@ def _safe_execution_error_code(error: Exception) -> str:
     return "execution_failed"
 
 
+def _safe_paper_error_code(error: Exception) -> str:
+    message = str(error).lower()
+    rules = (
+        (("confirmation",), "confirmation_mismatch"),
+        (("timeout",), "connection_timeout"),
+        (("gateway", "connection"), "connection_failed"),
+        (("account",), "account_mismatch"),
+        (("safety",), "paper_safety_envelope_invalid"),
+        (("plan", "config"), "paper_plan_invalid"),
+        (("profile", "configured"), "paper_profile_invalid"),
+    )
+    for needles, code in rules:
+        if any(needle in message for needle in needles):
+            return code
+    return "paper_autopilot_failed"
+
+
 def build_local_research_http_server(
     runtime: LocalResearchRuntime,
     *,
@@ -79,6 +96,9 @@ def build_local_research_http_server(
                 return
             if path == "/v1/execution":
                 self._send(HTTPStatus.OK, runtime.execution_snapshot())
+                return
+            if path == "/v1/paper-autopilot":
+                self._send(HTTPStatus.OK, runtime.paper_autopilot_snapshot())
                 return
             self._send(
                 HTTPStatus.NOT_FOUND,
@@ -162,6 +182,34 @@ def build_local_research_http_server(
                     return
                 except Exception as exc:
                     error_code = _safe_execution_error_code(exc)
+                    self._send(
+                        HTTPStatus.CONFLICT,
+                        {
+                            "error": error_code,
+                            "error_code": error_code,
+                            "orders_authorized": False,
+                        },
+                    )
+                    return
+                self._send(HTTPStatus.OK, result)
+                return
+            if path == "/v1/paper-autopilot/commands":
+                try:
+                    command = self._read_json_object()
+                    result = runtime.handle_paper_autopilot(command)
+                except (KeyError, ValueError) as exc:
+                    error_code = _safe_paper_error_code(exc)
+                    self._send(
+                        HTTPStatus.BAD_REQUEST,
+                        {
+                            "error": error_code,
+                            "error_code": error_code,
+                            "orders_authorized": False,
+                        },
+                    )
+                    return
+                except Exception as exc:
+                    error_code = _safe_paper_error_code(exc)
                     self._send(
                         HTTPStatus.CONFLICT,
                         {

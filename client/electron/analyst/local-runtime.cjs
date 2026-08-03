@@ -146,6 +146,26 @@ function createLocalRuntimeClient({
         body: command,
       })
     },
+    async paperAutopilotSnapshot() {
+      const payload = await request('/v1/paper-autopilot')
+      if (
+        payload?.schema_version !== 'ibkr.paper_autopilot.v1'
+        || payload?.mode !== 'paper'
+        || payload?.port !== 4002
+      ) {
+        throw new Error('IBKR Paper autopilot status is invalid')
+      }
+      return payload
+    },
+    async paperAutopilotCommand(command) {
+      if (!command || typeof command !== 'object' || Array.isArray(command)) {
+        throw new Error('IBKR Paper autopilot command is invalid')
+      }
+      return request('/v1/paper-autopilot/commands', {
+        method: 'POST',
+        body: command,
+      })
+    },
   }
 }
 
@@ -180,6 +200,20 @@ function runtimeLaunch({
     && Number.isFinite(ibkrMaxOrderNotional)
     && ibkrMaxOrderNotional > 0
     && (!ibkrLiveAccount || /^[A-Z0-9-]{4,32}$/.test(ibkrLiveAccount))
+  )
+  const ibkrPaper = ibkr.paper && typeof ibkr.paper === 'object'
+    ? ibkr.paper
+    : {}
+  const ibkrPaperHost = String(ibkrPaper.host || '').trim()
+  const ibkrPaperClientId = Number(ibkrPaper.clientId)
+  const ibkrPaperAccount = String(ibkrPaper.paperAccount || '').trim().toUpperCase()
+  const ibkrPaperConfigured = Boolean(
+    ibkrPaperHost
+    && ibkrPaperHost.length <= 253
+    && !/[\s/:]/.test(ibkrPaperHost)
+    && Number.isInteger(ibkrPaperClientId)
+    && ibkrPaperClientId >= 0
+    && /^DU[A-Z0-9-]{4,30}$/.test(ibkrPaperAccount)
   )
   const sharedArgs = [
     '--host',
@@ -234,6 +268,13 @@ function runtimeLaunch({
           : {}),
       }
     : {}
+  const paperExecutionEnv = ibkrPaperConfigured
+    ? {
+        IBKR_PAPER_HOST: ibkrPaperHost,
+        IBKR_PAPER_CLIENT_ID: String(ibkrPaperClientId),
+        IBKR_PAPER_ACCOUNT: ibkrPaperAccount,
+      }
+    : {}
   if (app.isPackaged) {
     if (!resourcesPath) throw new Error('打包运行时目录不可用')
     const runtimeBinary = platform === 'win32'
@@ -249,7 +290,7 @@ function runtimeLaunch({
       cwd: userData,
       token,
       marketDataEnv,
-      executionEnv,
+      executionEnv: { ...executionEnv, ...paperExecutionEnv },
     }
   }
   const python = process.platform === 'win32'
@@ -261,7 +302,7 @@ function runtimeLaunch({
     cwd: projectRoot,
     token,
     marketDataEnv,
-    executionEnv,
+    executionEnv: { ...executionEnv, ...paperExecutionEnv },
   }
 }
 

@@ -1,7 +1,8 @@
 const fs = require('node:fs')
 const path = require('node:path')
 
-const SETTINGS_SCHEMA = 'desktop-local-research-settings.v6'
+const SETTINGS_SCHEMA = 'desktop-local-research-settings.v7'
+const PREVIOUS_PAPER_SETTINGS_SCHEMA = 'desktop-local-research-settings.v6'
 const PREVIOUS_EXECUTION_SETTINGS_SCHEMA = 'desktop-local-research-settings.v5'
 const RESEARCH_SETTINGS_SCHEMA = 'desktop-local-research-settings.v4'
 const LEGACY_SETTINGS_SCHEMA = 'macos-research-settings.v1'
@@ -100,6 +101,26 @@ function normalizeExecutionCommand(command) {
     }
   }
   throw new Error('未知执行命令')
+}
+
+function normalizePaperAutopilotCommand(command) {
+  if (!command || typeof command !== 'object' || Array.isArray(command)) {
+    throw new Error('模拟盘自动执行命令无效')
+  }
+  const kind = String(command.kind || '')
+  if (['connect', 'disconnect', 'validate_plan', 'stop'].includes(kind)) {
+    return { kind }
+  }
+  if (kind === 'start') {
+    return {
+      kind,
+      confirmation: requiredText(
+        command.confirmation,
+        '模拟盘自动执行确认文字',
+      ),
+    }
+  }
+  throw new Error('未知模拟盘自动执行命令')
 }
 
 function safeResultText(value, maxLength = 500) {
@@ -239,6 +260,9 @@ function emptySettings() {
     encryptedIbkrHost: '',
     encryptedIbkrClientId: '',
     encryptedIbkrLiveAccount: '',
+    encryptedIbkrPaperHost: '',
+    encryptedIbkrPaperClientId: '',
+    encryptedIbkrPaperAccount: '',
     maxOrderNotional: 0,
     models: {},
   }
@@ -287,10 +311,8 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
           models: parsed.models || {},
         }
       }
-      if (parsed.schemaVersion === RESEARCH_SETTINGS_SCHEMA) {
-        return { ...emptySettings(), ...parsed, schemaVersion: SETTINGS_SCHEMA }
-      }
-      if (parsed.schemaVersion === PREVIOUS_EXECUTION_SETTINGS_SCHEMA) {
+      if ([RESEARCH_SETTINGS_SCHEMA, PREVIOUS_EXECUTION_SETTINGS_SCHEMA,
+        PREVIOUS_PAPER_SETTINGS_SCHEMA].includes(parsed.schemaVersion)) {
         return { ...emptySettings(), ...parsed, schemaVersion: SETTINGS_SCHEMA }
       }
       if (parsed.schemaVersion !== SETTINGS_SCHEMA) return emptySettings()
@@ -443,6 +465,28 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
       write({ ...current, encryptedIbkrLiveAccount: '' })
     },
 
+    savePaperExecutionSettings(values) {
+      const current = read()
+      const host = String(values?.host || '').trim()
+      const clientIdText = String(values?.clientId ?? '').trim()
+      const paperAccount = String(values?.paperAccount || '').trim().toUpperCase()
+      if (!host || host.length > 253 || /[\s/:]/.test(host)) {
+        throw new Error('IBKR 模拟盘主机名无效')
+      }
+      if (!/^\d+$/.test(clientIdText) || Number(clientIdText) > 2_147_483_647) {
+        throw new Error('IBKR 模拟盘 Client ID 必须是非负整数')
+      }
+      if (!/^DU[A-Z0-9-]{4,30}$/.test(paperAccount)) {
+        throw new Error('IBKR 模拟盘账户必须是 DU 开头的账户 ID')
+      }
+      write({
+        ...current,
+        encryptedIbkrPaperHost: encrypt(host),
+        encryptedIbkrPaperClientId: encrypt(clientIdText),
+        encryptedIbkrPaperAccount: encrypt(paperAccount),
+      })
+    },
+
     loadPublic() {
       const current = read()
       let models = {}
@@ -483,6 +527,20 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
           ),
           maxOrderNotional: Number(current.maxOrderNotional) || 0,
         },
+        paperExecution: {
+          configured: Boolean(
+            current.encryptedIbkrPaperHost
+            && current.encryptedIbkrPaperClientId
+            && current.encryptedIbkrPaperAccount
+          ),
+          hostConfigured: Boolean(current.encryptedIbkrPaperHost),
+          clientIdConfigured: Boolean(current.encryptedIbkrPaperClientId),
+          accountConfigured: Boolean(current.encryptedIbkrPaperAccount),
+          paperAccountMasked: maskAccount(
+            decrypt(current.encryptedIbkrPaperAccount),
+          ),
+          port: 4002,
+        },
         models,
       }
     },
@@ -509,6 +567,16 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
       }
     },
 
+    loadPaperExecutionSecrets() {
+      const current = read()
+      return {
+        host: decrypt(current.encryptedIbkrPaperHost),
+        clientId: Number(decrypt(current.encryptedIbkrPaperClientId)) || 0,
+        paperAccount: decrypt(current.encryptedIbkrPaperAccount),
+        port: 4002,
+      }
+    },
+
     clear() {
       try {
         fsImpl.unlinkSync(filePath)
@@ -526,6 +594,7 @@ module.exports = {
   SETTINGS_SCHEMA,
   createSecureSettingsStore,
   normalizeExecutionCommand,
+  normalizePaperAutopilotCommand,
   sanitizeExecutionCommandResult,
   normalizeModels,
   parseIbkrProfileText,

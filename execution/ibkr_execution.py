@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 LIVE_PORT = 4001
+PAPER_PORT = 4002
 SCHEMA_VERSION = "ibkr.execution.v1"
 
 
@@ -926,5 +927,6 @@ __all__ = [
     "BrokerWhatIf",
     "ExecutionDesk",
     "LIVE_PORT",
+    "PAPER_PORT",
     "SCHEMA_VERSION",
 ]
