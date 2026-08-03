@@ -85,6 +85,43 @@ def test_unverified_community_source_is_quarantined(tmp_path: Path) -> None:
     assert (path.parent / "manifest.json").exists()
 
 
+def test_persist_snapshot_retries_are_collision_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A same-second retry must not turn a valid run into exit code 1."""
+    import data_plane.storage as storage
+
+    class FixedDatetime:
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            return NOW
+
+    monkeypatch.setattr(storage, "datetime", FixedDatetime)
+    frame = _bars()
+    checks = audit_minute_bars(
+        frame,
+        provenance="test.fixture",
+        expected_symbols=("AAPL",),
+        research_approved=True,
+    )
+    first, first_path = persist_snapshot(
+        frame,
+        root=tmp_path,
+        source="alpaca_proxy.sip.premarket_1m",
+        schema_version=BAR_SCHEMA_VERSION,
+        checks=checks,
+    )
+    second, second_path = persist_snapshot(
+        frame,
+        root=tmp_path,
+        source="alpaca_proxy.sip.premarket_1m",
+        schema_version=BAR_SCHEMA_VERSION,
+        checks=checks,
+    )
+    assert first_path.exists() and second_path.exists()
+    assert first.dataset_id != second.dataset_id
+
+
 def test_duplicate_and_bad_ohlc_are_critical_failures() -> None:
     frame = _bars().with_columns(
         pl.when(pl.int_range(pl.len()) == 1)
