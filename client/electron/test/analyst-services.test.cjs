@@ -3,9 +3,13 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const test = require('node:test')
+const vm = require('node:vm')
 
 const {
   createSecureSettingsStore,
+  normalizeExecutionCommand,
+  parseIbkrProfileText,
+  sanitizeExecutionCommandResult,
 } = require('../analyst/settings.cjs')
 const {
   cleanupOrphanedWindowsRuntimes,
@@ -24,7 +28,6 @@ const {
   compactDeskEvidence,
   evidenceReference,
 } = require('../analyst/prompts.cjs')
-const { createIbkrPaperAdapter } = require('../analyst/ibkr-paper.cjs')
 
 const MODELS = {
   question: 'openai/gpt-4o-mini',
@@ -119,6 +122,309 @@ test('secure settings fail closed when OS encryption is unavailable', () => {
     /不会以明文保存/,
   )
   assert.equal(fs.existsSync(settingsPath), false)
+})
+
+test('IBKR execution settings support first-use account discovery and encrypted binding', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'analyst-execution-settings-'))
+  const settingsPath = path.join(root, 'settings.json')
+  const store = createSecureSettingsStore({
+    filePath: settingsPath,
+    safeStorage: fakeSafeStorage(),
+  })
+
+  store.saveExecutionSettings({
+    host: '127.0.0.1',
+    clientId: 17,
+    liveAccount: 'LOGIN-NAME-MUST-BE-IGNORED',
+    maxOrderNotional: 25000,
+  })
+
+  assert.deepEqual(store.loadExecutionSecrets(), {
+    host: '127.0.0.1',
+    clientId: 17,
+    liveAccount: '',
+    port: 4001,
+    maxOrderNotional: 25000,
+  })
+  assert.deepEqual(store.loadPublic().execution, {
+    configured: true,
+    hostConfigured: true,
+    clientIdConfigured: true,
+    accountBound: false,
+    liveAccountMasked: '',
+    maxOrderNotional: 25000,
+  })
+
+  store.saveBoundExecutionAccount('U7654321')
+  assert.deepEqual(store.loadPublic().execution, {
+    configured: true,
+    hostConfigured: true,
+    clientIdConfigured: true,
+    accountBound: true,
+    liveAccountMasked: 'U***4321',
+    maxOrderNotional: 25000,
+  })
+  assert.throws(
+    () => store.saveBoundExecutionAccount('U0000002'),
+    /already bound|宸茬粦瀹?/
+  )
+
+  const persisted = fs.readFileSync(settingsPath, 'utf8')
+  assert.equal(persisted.includes('127.0.0.1'), false)
+  assert.equal(persisted.includes('U7654321'), false)
+
+  store.clearBoundExecutionAccount()
+  assert.equal(store.loadPublic().execution.accountBound, false)
+  assert.equal(store.loadExecutionSecrets().liveAccount, '')
+})
+
+test('execution IPC accepts only explicit long-only command shapes', () => {
+  assert.deepEqual(normalizeExecutionCommand({
+    kind: 'preview',
+    order: {
+      client_order_id: 'desktop-123',
+      symbol: ' aapl ',
+      security_type: 'STK',
+      exchange: 'SMART',
+      currency: 'USD',
+      action: 'OpenLong',
+      quantity: 25,
+      limit_price: 219.35,
+      order_type: 'LMT',
+      tif: 'DAY',
+    },
+    password: 'must-not-cross-ipc',
+  }), {
+    kind: 'preview',
+    order: {
+      client_order_id: 'desktop-123',
+      symbol: 'AAPL',
+      security_type: 'STK',
+      exchange: 'SMART',
+      currency: 'USD',
+      action: 'OpenLong',
+      quantity: 25,
+      limit_price: 219.35,
+      order_type: 'LMT',
+      tif: 'DAY',
+    },
+  })
+  assert.deepEqual(normalizeExecutionCommand({ kind: 'connect' }), {
+    kind: 'connect',
+  })
+  assert.deepEqual(normalizeExecutionCommand({ kind: 'disconnect' }), {
+    kind: 'disconnect',
+  })
+  assert.deepEqual(normalizeExecutionCommand({
+    kind: 'bind_account',
+    confirmation: '绑定实盘账户 U***4321',
+  }), {
+    kind: 'bind_account',
+    confirmation: '绑定实盘账户 U***4321',
+  })
+  assert.deepEqual(normalizeExecutionCommand({
+    kind: 'arm',
+    confirmation: '启用实盘 U***4321',
+  }), { kind: 'arm', confirmation: '启用实盘 U***4321' })
+  assert.deepEqual(normalizeExecutionCommand({ kind: 'disarm' }), {
+    kind: 'disarm',
+  })
+  assert.deepEqual(normalizeExecutionCommand({ kind: 'recover' }), {
+    kind: 'recover',
+  })
+  assert.deepEqual(normalizeExecutionCommand({
+    kind: 'submit',
+    preview_id: 'preview-123',
+    confirmation: '确认提交 AAPL 25',
+    order: {
+      client_order_id: 'desktop-123',
+      symbol: 'AAPL',
+      security_type: 'STK',
+      exchange: 'SMART',
+      currency: 'USD',
+      action: 'OpenLong',
+      quantity: 25,
+      limit_price: 219.35,
+      order_type: 'LMT',
+      tif: 'DAY',
+    },
+  }), {
+    kind: 'submit',
+    preview_id: 'preview-123',
+    confirmation: '确认提交 AAPL 25',
+    order: {
+      client_order_id: 'desktop-123',
+      symbol: 'AAPL',
+      security_type: 'STK',
+      exchange: 'SMART',
+      currency: 'USD',
+      action: 'OpenLong',
+      quantity: 25,
+      limit_price: 219.35,
+      order_type: 'LMT',
+      tif: 'DAY',
+    },
+  })
+  assert.throws(
+    () => normalizeExecutionCommand({
+      kind: 'preview',
+      order: {
+        client_order_id: 'desktop-124',
+        symbol: 'AAPL',
+        security_type: 'STK',
+        exchange: 'SMART',
+        currency: 'USD',
+        action: 'SellShort',
+        quantity: 1,
+        limit_price: 200,
+        order_type: 'LMT',
+        tif: 'DAY',
+      },
+    }),
+    /OpenLong.*ReduceLong/,
+  )
+})
+
+test('execution receipts never expose full accounts or broker order refs to renderer', () => {
+  const safe = sanitizeExecutionCommandResult('submit', {
+    schema_version: 'ibkr.execution.v1',
+    kind: 'execution_receipt',
+    status: 'filled',
+    client_order_id: 'desktop-123',
+    broker_order_id: 91,
+    perm_id: 456,
+    account_masked: 'U***4321',
+    order_ref: 'vq:live:U7654321:17:desktop-123',
+    actual_account_id: 'U7654321',
+    account_id: 'U7654321',
+    post_submit_snapshot_refreshed: true,
+    snapshot_refresh_error: null,
+    extra: 'must-not-cross-ipc',
+  })
+
+  assert.equal(safe.status, 'filled')
+  assert.equal(safe.broker_order_id, 91)
+  const serialized = JSON.stringify(safe)
+  assert.equal(serialized.includes('U7654321'), false)
+  assert.equal(serialized.includes('order_ref'), false)
+  assert.equal(serialized.includes('must-not-cross-ipc'), false)
+})
+
+test('execution preview keeps bounded What-If evidence and warning confirmation hash', () => {
+  const safe = sanitizeExecutionCommandResult('preview', {
+    schema_version: 'ibkr.execution.v1',
+    kind: 'execution_preview',
+    status: 'previewed',
+    preview_id: 'preview-abc',
+    mode: 'live',
+    account_masked: 'U***4321',
+    intent: {
+      client_order_id: 'desktop-123',
+      symbol: 'AAPL',
+      security_type: 'STK',
+      exchange: 'SMART',
+      currency: 'USD',
+      action: 'OpenLong',
+      quantity: 2,
+      limit_price: '200.00',
+      order_type: 'LMT',
+      tif: 'DAY',
+      notional: '400.00',
+      account_id: 'U7654321',
+    },
+    what_if: {
+      accepted: true,
+      estimated_commission: '1.00',
+      initial_margin_change: '200.00',
+      warning: 'Warning for U7654321',
+    },
+    warning_confirmation_hash: 'A1B2C3D4',
+    confirmation_phrase: '确认实盘下单 U***4321 警告A1B2C3D4',
+    expires_at_utc: '2026-08-03T12:35:00Z',
+    order_ref: 'vq:live:U7654321:17:desktop-123',
+  })
+
+  assert.equal(safe.warning_confirmation_hash, 'A1B2C3D4')
+  assert.equal(safe.what_if.estimated_commission, '1.00')
+  assert.equal(safe.what_if.warning.includes('U7654321'), false)
+  assert.equal(JSON.stringify(safe).includes('order_ref'), false)
+})
+
+test('IBKR profile import ignores login names and only confirms fixed 4001 port', () => {
+  const profile = parseIbkrProfileText([
+    '实盘账号=U7654321',
+    '实盘密码=live-password-must-disappear',
+    '实盘端口=4001',
+    '虚拟账号=DU1234567',
+    '虚拟密码=paper-password-must-disappear',
+    '虚拟端口=4002',
+    '备注=本地 Gateway',
+  ].join('\n'))
+
+  assert.deepEqual(profile, {
+    livePort: 4001,
+    accountDiscoveryRequired: true,
+  })
+  assert.equal(JSON.stringify(profile).includes('password'), false)
+  assert.equal(JSON.stringify(profile).includes('U7654321'), false)
+  assert.equal(JSON.stringify(profile).includes('DU1234567'), false)
+})
+
+test('preload exposes isolated execution IPC and main registers matching handlers', async () => {
+  const invocations = []
+  let exposed
+  const preload = fs.readFileSync(
+    path.join(__dirname, '..', 'analyst-preload.cjs'),
+    'utf8',
+  )
+  const context = {
+    require: (name) => {
+      assert.equal(name, 'electron')
+      return {
+        contextBridge: {
+          exposeInMainWorld: (key, value) => { exposed = { key, value } },
+        },
+        ipcRenderer: {
+          invoke: (...args) => {
+            invocations.push(args)
+            return Promise.resolve({ ok: true })
+          },
+        },
+      }
+    },
+    Object,
+  }
+  vm.runInNewContext(preload, context, { filename: 'analyst-preload.cjs' })
+
+  assert.equal(exposed.key, 'analystDesktop')
+  await exposed.value.execution.snapshot()
+  await exposed.value.execution.command({ kind: 'connect' })
+  await exposed.value.settings.saveExecution({ host: '127.0.0.1' })
+  await exposed.value.settings.importExecutionProfile()
+  await exposed.value.settings.clearExecutionAccountBinding()
+  assert.deepEqual(invocations, [
+    ['analyst:execution:snapshot'],
+    ['analyst:execution:command', { kind: 'connect' }],
+    ['analyst:settings:save-execution', { host: '127.0.0.1' }],
+    ['analyst:settings:import-execution-profile'],
+    ['analyst:settings:clear-execution-account'],
+  ])
+
+  const main = fs.readFileSync(
+    path.join(__dirname, '..', 'analyst-main.cjs'),
+    'utf8',
+  )
+  assert.match(main, /ipcMain\.handle\('analyst:execution:snapshot'/)
+  assert.match(main, /ipcMain\.handle\('analyst:execution:command'/)
+  assert.match(main, /normalizeExecutionCommand\(command\)/)
+  assert.match(main, /saveBoundExecutionAccount/)
+  assert.match(main, /actual_account_id/)
+  assert.match(main, /delete safeReceipt\.actual_account_id/)
+  assert.match(main, /analyst:settings:clear-execution-account/)
+  assert.match(main, /recent_orders: executionRowsForRenderer/)
+  assert.match(main, /account_refreshed_at_utc/)
+  assert.match(main, /execution: sanitizeExecutionSnapshot/)
+  assert.match(main, /sanitizeExecutionCommandResult\(normalized\.kind, result\)/)
 })
 
 test('local runtime handshake accepts only loopback and non-executable mode', () => {
@@ -470,19 +776,6 @@ test('local runtime client rejects remote or executable evidence', async () => {
     client.fetchDesk(),
     /local non-executable/,
   )
-})
-
-test('IBKR Paper seam is present but fail-closed in the research edition', async () => {
-  const adapter = createIbkrPaperAdapter()
-
-  assert.deepEqual(await adapter.status(), {
-    adapter: 'ibkr-paper-reserved.v1',
-    configured: false,
-    connected: false,
-    orderSubmissionEnabled: false,
-  })
-  await assert.rejects(adapter.connect(), /reserved/)
-  await assert.rejects(adapter.placeOrder({ symbol: 'AAPL' }), /disabled/)
 })
 
 test('assistant and agent prompts are evidence bounded and force non-executable context', () => {

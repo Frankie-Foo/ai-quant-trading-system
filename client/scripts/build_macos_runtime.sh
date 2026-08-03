@@ -21,6 +21,10 @@ python -m PyInstaller \
   --add-data "$repo_root/config.yaml:." \
   --add-data "$repo_root/config:config" \
   --hidden-import data_plane.cli \
+  --hidden-import ibapi.client \
+  --hidden-import ibapi.contract \
+  --hidden-import ibapi.order \
+  --hidden-import ibapi.wrapper \
   --hidden-import scripts.backfill_massive_news \
   --hidden-import scripts.backfill_massive_reference_weekly \
   --hidden-import scripts.build_catalyst_snapshot \

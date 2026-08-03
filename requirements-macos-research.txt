@@ -1,5 +1,6 @@
 certifi==2026.7.22
 httpx==0.28.1
+ibapi==9.81.1.post1
 numpy==2.5.1
 pandas==3.0.2
 pandas-market-calendars==5.4.0

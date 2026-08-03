@@ -10,6 +10,15 @@ const bridge = Object.freeze({
     saveModels: (models) => (
       ipcRenderer.invoke('analyst:settings:save-models', models)
     ),
+    saveExecution: (settings) => (
+      ipcRenderer.invoke('analyst:settings:save-execution', settings)
+    ),
+    importExecutionProfile: () => (
+      ipcRenderer.invoke('analyst:settings:import-execution-profile')
+    ),
+    clearExecutionAccountBinding: () => (
+      ipcRenderer.invoke('analyst:settings:clear-execution-account')
+    ),
     clear: () => ipcRenderer.invoke('analyst:settings:clear'),
   }),
   models: Object.freeze({
@@ -34,14 +43,17 @@ const bridge = Object.freeze({
     ),
     stop: () => ipcRenderer.invoke('analyst:monitor:stop'),
   }),
+  execution: Object.freeze({
+    snapshot: () => ipcRenderer.invoke('analyst:execution:snapshot'),
+    command: (command) => (
+      ipcRenderer.invoke('analyst:execution:command', command)
+    ),
+  }),
   assistant: Object.freeze({
     ask: (question) => ipcRenderer.invoke('analyst:assistant:ask', { question }),
   }),
   agents: Object.freeze({
     run: (role) => ipcRenderer.invoke('analyst:agents:run', { role }),
-  }),
-  ibkrPaper: Object.freeze({
-    status: () => ipcRenderer.invoke('analyst:ibkr:status'),
   }),
 })
 

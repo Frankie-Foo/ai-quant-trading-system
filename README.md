@@ -1,10 +1,10 @@
-# Intraday Trading System v2
+# 日内量化交易系统 v2
 
-Deterministic, auditable, long-only U.S. equity intraday research and execution
-kernel. M0 is complete; no strategy performance claim is produced by this
-repository yet.
+这是一个面向美股、只做多、可审计的日内研究系统。仓库包含确定性选股、盘中监控、
+证据答疑、收盘复盘，以及与研究面隔离的人工 IBKR 实盘执行台。当前版本仍处于工程
+验证阶段，不代表策略已经成熟，也不对选股准确率或收益作保证。
 
-## Local verification
+## 本地验证
 
 ```powershell
 .\.venv\Scripts\python -m pytest -v
@@ -13,11 +13,11 @@ repository yet.
   scripts tests
 ```
 
-Secrets belong in `.env`, which is ignored. Never paste credentials into reports or
-commit them to the repository.
+敏感凭据只能放在被忽略的 `.env` 或客户端系统安全存储中，不能写入报告、安装包、
+源码或 Git。
 
-The frozen specification is supplemented by [architecture decisions](docs/ARCHITECTURE.md),
-which map data, model, strategy, trading, and application layers onto this repository.
+冻结规范的补充说明见[架构决策](docs/ARCHITECTURE.md)，其中记录了数据、模型、策略、
+交易与应用层在本仓库中的映射。
 
 ## 本地自主模拟盘
 
@@ -34,61 +34,58 @@ realtime kernel reads the local point-in-time cache and never waits on remote fe
 HTTP. Its separate market collector declares a bounded lease, verifies detailed market
 health, then consumes resumable cloud SSE into the existing local SIP store.
 
-## macOS 本地研究客户端
+## 跨平台本地研究客户端
 
-`feature/macos-research-client` 提供一个与本地模拟盘隔离、但在 Mac 本机运行完整
-研究内核的发行版。它内置 `data_plane/`、`kernel/`、`research/` 和 `schedule/`，
-在用户目录保存 accepted 快照、任务账本和复盘结果；Electron 只负责选股、证据答疑、
-收盘复盘和三个研究 Agent 的交互。首次启动填写用户自己的 OpenRouter Key，以及
-固定 Alpaca SIP 代理的 Key/Secret；四个模型角色可独立选择。
+Windows 与 macOS 发行版使用同一套 Electron 界面和本地 Python sidecar。客户端在
+用户电脑上完成数据增量同步、今日选股、盘中监控、证据答疑、三个研究 Agent 和收盘
+复盘；accepted 快照、任务账本、复盘结果与执行账本都留在本机。内置 bootstrap 只含
+研究数据和哈希清单，不含 API Key。
 
-固定代理地址为 `wss://alpaca-trade-api.vertu.cn/v2/sip`，程序会验证报价、成交和
-分钟线订阅。代理只覆盖实时 SIP，因此历史日线、新闻和财务输入未配置时仍以
-`historical_research_inputs_missing` 阻断完整选股，不使用历史名单伪造今日结果。
-代理凭据由 macOS Keychain 加密保存，不写入源码、安装包或 Git。
-发行包没有 Broker、OMS 或下单 IPC；IBKR Paper 接口预留但连接和下单均为
-fail-closed。完整的本地数据目录、安全 seam、首次使用和双架构打包流程见
-[macOS 研究客户端](docs/MACOS_RESEARCH_CLIENT.md)。
+首次启动需要配置用户自己的 OpenRouter Key、Massive Key、Alpaca SIP 代理
+Key/Secret 和 SEC 联系信息。模型角色可分别选择。行情、新闻或财务证据缺失时，系统
+会明确阻断对应研究流程，不会用旧名单或测试数据冒充今日结果。凭据由 Electron
+`safeStorage` 调用 macOS Keychain 或 Windows 系统安全存储加密，渲染页面只接收
+脱敏状态。
 
-## Windows adaptive decision client
+客户端还提供一个与研究面隔离的“盈透手动执行台”。它只连接已经由用户登录的 TWS
+或 IB Gateway，端口固定为 IBKR 实盘端口 `4001`。研究管线、选股脚本、自动复盘和
+Agent 永远不能调用该执行入口；只有用户在执行页手工输入订单并逐级确认，才可能发送
+实盘委托。研究运行状态中的 `orders_authorized=false` 仍然成立，它描述的是研究面，
+不是对人工执行台的授权。
 
-The desktop client is a read-only operating console over a deterministic adaptive-plan
-engine. It reconciles positions from the Broker, evaluates observed SIP quotes/trades
-and completed 1/5/15-minute bars every 15 seconds, and records only material state
-changes in an append-only SQLite event stream. Soft plan revisions have a three-minute
-cooldown and a per-session cap; hard stops and the UTC time stop remain immediate.
-Neither the client nor its HTTP interface contains an order route.
+人工执行台当前具备以下约束：
 
-To open the evidence-only console without starting market collection or Paper
-monitoring:
+- 每次启动默认关闭，并且写权限默认未解锁；
+- 首次连接只允许单一可见 IBKR 账户，确认后加密绑定，后续连接严格核对；多账户环境
+  在尚未指定并绑定唯一账户时会失败关闭；
+- 只允许 `OpenLong` 和 `ReduceLong`，固定为 `STK / SMART / USD / DAY / LMT`；
+- 预览阶段先调用 IBKR What-If，再要求输入包含账户脱敏值、方向、数量、价格和随机码
+  的动态确认文字；
+- 设有单笔名义金额上限、短时预览、临时写权限、持仓与未完成卖单核对；
+- 本机 SQLite 执行账本使用客户端订单号和 `orderRef` 做幂等；提交结果不确定时进入
+  `recovery_required`，核对完成前禁止新单。
+
+必须注意：关闭实盘开关、退出客户端或清除账户绑定只会禁止新委托并断开 API，**不会
+撤销已经到达 IBKR 的订单**。当前客户端没有撤单功能；已有挂单必须在 TWS / IB
+Gateway 中核对和撤销。
+
+当前人工执行台不支持模拟盘、卖空、市价单、自动下单、括号单、止盈止损联动或客户端
+撤单，也不能替代 TWS 的风控和成交回报。用户名和密码始终只输入 TWS / IB Gateway，
+不会进入本应用。
+
+开发模式启动本地客户端：
 
 ```powershell
 Set-Location client
-npm.cmd run desktop
+npm ci
+npm.cmd run desktop:analyst
 ```
 
-This view remains useful without a registered adaptive plan: it shows the latest
-immutable selection and post-close review, durable job failures, runtime Agent
-availability, and maturity gates, with stale evidence explicitly marked.
-
-Install the JavaScript dependencies once, copy the secret-free example plan, replace
-every placeholder with accepted point-in-time evidence, and start the complete local
-loop:
-
-```powershell
-Set-Location client
-npm install
-Set-Location ..
-Copy-Item config\adaptive_plans.example.json config\adaptive_plans.local.json
-.\scripts\start_adaptive_client.ps1 -Config config\adaptive_plans.local.json
-```
-
-The launcher registers immutable baselines, warms the local store with historical SIP
-observations, starts the licensed event collector and Broker-authoritative plan monitor,
-and opens the Electron client. Closing the client stops only the background processes
-owned by that launch. Full contracts, state transitions, safety boundaries, and VPS
-deployment topology are documented in
-[adaptive desktop client](docs/ADAPTIVE_DESKTOP_CLIENT.md).
+完整使用与安全边界见 [macOS 本地研究客户端](docs/MACOS_RESEARCH_CLIENT.md) 和
+[IBKR 人工实盘执行台](docs/IBKR_LIVE_EXECUTION.md)；跨平台打包步骤见
+[客户端构建说明](docs/CROSS_PLATFORM_DESKTOP_BUILD.md)。原有自适应监控引擎的状态
+契约与部署说明仍见[自适应桌面客户端](docs/ADAPTIVE_DESKTOP_CLIENT.md)，但它本身不能
+越过人工执行台触发订单。
 
 Real-data bootstrap and local credential setup are documented in
 [data access](docs/DATA_ACCESS.md). Community and undocumented feeds are automatically

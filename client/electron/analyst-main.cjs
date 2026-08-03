@@ -1,7 +1,7 @@
-const { app, BrowserWindow, ipcMain, safeStorage } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, safeStorage } = require('electron')
+const fs = require('node:fs')
 const path = require('node:path')
 
-const { createIbkrPaperAdapter } = require('./analyst/ibkr-paper.cjs')
 const { createLocalRuntimeProcess } = require('./analyst/local-runtime.cjs')
 const {
   RESEARCH_QA_MAX_TOKENS,
@@ -15,11 +15,14 @@ const {
 const {
   MODEL_KEYS,
   createSecureSettingsStore,
+  normalizeExecutionCommand,
   normalizeModels,
+  parseIbkrProfileText,
+  safeResultText,
+  sanitizeExecutionCommandResult,
 } = require('./analyst/settings.cjs')
 
 const openRouter = createOpenRouterClient()
-const ibkrPaper = createIbkrPaperAdapter()
 let settingsStore
 let localRuntime
 let projectRoot
@@ -30,6 +33,90 @@ function marketDataFromSecrets(secrets) {
     secret: String(secrets?.marketDataSecret || '').trim(),
     massiveApiKey: String(secrets?.massiveApiKey || '').trim(),
     secUserAgent: String(secrets?.secUserAgent || '').trim(),
+  }
+}
+
+function runtimeConfiguration(connectionSecrets, executionSecrets) {
+  return {
+    ...marketDataFromSecrets(connectionSecrets),
+    ibkr: executionSecrets,
+  }
+}
+
+function executionRowsForRenderer(rows, keys) {
+  if (!Array.isArray(rows)) return []
+  return rows.slice(0, 250).map((row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return {}
+    const safe = {}
+    for (const key of keys) {
+      const value = row[key]
+      if (typeof value === 'string') {
+        safe[key] = safeResultText(value, 500)
+      } else if (['number', 'boolean'].includes(typeof value) || value === null) {
+        safe[key] = value
+      }
+    }
+    return safe
+  })
+}
+
+function sanitizeExecutionSnapshot(snapshot) {
+  const source = snapshot && typeof snapshot === 'object' ? snapshot : {}
+  return {
+    schema_version: String(source.schema_version || 'ibkr.execution.v1'),
+    kind: 'execution_snapshot',
+    mode: source.mode === 'live' ? 'live' : 'live',
+    port: 4001,
+    enabled: source.enabled === true,
+    connected: source.connected === true,
+    account_bound: source.account_bound === true,
+    account_masked: safeResultText(source.account_masked, 80) || '',
+    binding_confirmation_phrase:
+      safeResultText(source.binding_confirmation_phrase, 200),
+    api_read_only: typeof source.api_read_only === 'boolean'
+      ? source.api_read_only
+      : null,
+    writes_armed: source.writes_armed === true,
+    arm_confirmation_phrase:
+      safeResultText(source.arm_confirmation_phrase, 200),
+    recovery_required: source.recovery_required === true,
+    max_order_notional: Number.isFinite(Number(source.max_order_notional))
+      ? Number(source.max_order_notional)
+      : null,
+    positions: executionRowsForRenderer(source.positions, [
+      'symbol',
+      'quantity',
+      'average_cost',
+      'market_price',
+      'unrealized_pnl_percent',
+    ]),
+    open_orders: executionRowsForRenderer(source.open_orders, [
+      'order_id',
+      'client_order_id',
+      'broker_order_id',
+      'symbol',
+      'action',
+      'side',
+      'quantity',
+      'filled_quantity',
+      'limit_price',
+      'status',
+      'updated_at_utc',
+    ]),
+    account_refreshed_at_utc:
+      safeResultText(source.account_refreshed_at_utc, 50),
+    recent_orders: executionRowsForRenderer(source.recent_orders, [
+      'client_order_id',
+      'broker_order_id',
+      'perm_id',
+      'symbol',
+      'action',
+      'quantity',
+      'limit_price',
+      'status',
+      'updated_at_utc',
+    ]),
+    last_error: safeResultText(source.last_error, 500) || '',
   }
 }
 
@@ -76,14 +163,13 @@ function registerHandlers() {
       }
       const models = await openRouter.listModels(candidate.openRouterApiKey)
       const previousSecrets = settingsStore.loadSecrets()
+      const executionSecrets = settingsStore.loadExecutionSecrets()
       let runtime
       try {
-        runtime = await restartLocalRuntime({
-          key: candidate.marketDataKey,
-          secret: candidate.marketDataSecret,
-          massiveApiKey: candidate.massiveApiKey,
-          secUserAgent: candidate.secUserAgent,
-        })
+        runtime = await restartLocalRuntime(runtimeConfiguration(
+          candidate,
+          executionSecrets,
+        ))
         if (runtime?.market_data?.healthy !== true) {
           throw new Error(
             `Alpaca 代理行情验证失败：${runtime?.market_data?.reason || 'unknown'}`,
@@ -91,7 +177,10 @@ function registerHandlers() {
         }
         settingsStore.saveConnectionSecrets(candidate)
       } catch (error) {
-        await restartLocalRuntime(marketDataFromSecrets(previousSecrets))
+        await restartLocalRuntime(runtimeConfiguration(
+          previousSecrets,
+          executionSecrets,
+        ))
         throw error
       }
       return {
@@ -114,6 +203,56 @@ function registerHandlers() {
     }
     settingsStore.saveModels(models)
     return settingsStore.loadPublic()
+  })
+
+  ipcMain.handle('analyst:settings:save-execution', async (_event, values) => {
+    settingsStore.saveExecutionSettings(values)
+    const runtime = await restartLocalRuntime(runtimeConfiguration(
+      settingsStore.loadSecrets(),
+      settingsStore.loadExecutionSecrets(),
+    ))
+    return {
+      settings: settingsStore.loadPublic(),
+      execution: sanitizeExecutionSnapshot(
+        await localRuntime.client.executionSnapshot(),
+      ),
+      runtime,
+    }
+  })
+
+  ipcMain.handle('analyst:settings:import-execution-profile', async () => {
+    const selected = await dialog.showOpenDialog({
+      title: '选择盈透配置文件',
+      properties: ['openFile'],
+      filters: [
+        { name: '配置文件', extensions: ['env', 'txt'] },
+        { name: '所有文件', extensions: ['*'] },
+      ],
+    })
+    if (selected.canceled || !selected.filePaths[0]) return { canceled: true }
+    const filePath = selected.filePaths[0]
+    if (fs.statSync(filePath).size > 64 * 1024) {
+      throw new Error('盈透配置文件过大')
+    }
+    return {
+      canceled: false,
+      profile: parseIbkrProfileText(fs.readFileSync(filePath, 'utf8')),
+    }
+  })
+
+  ipcMain.handle('analyst:settings:clear-execution-account', async () => {
+    settingsStore.clearBoundExecutionAccount()
+    const runtime = await restartLocalRuntime(runtimeConfiguration(
+      settingsStore.loadSecrets(),
+      settingsStore.loadExecutionSecrets(),
+    ))
+    return {
+      settings: settingsStore.loadPublic(),
+      execution: sanitizeExecutionSnapshot(
+        await localRuntime.client.executionSnapshot(),
+      ),
+      runtime,
+    }
   })
 
   ipcMain.handle('analyst:settings:clear', async () => {
@@ -145,6 +284,48 @@ function registerHandlers() {
   ipcMain.handle('analyst:monitor:stop', () => (
     localRuntime.client.stopMonitor()
   ))
+  ipcMain.handle('analyst:execution:snapshot', async () => (
+    sanitizeExecutionSnapshot(await localRuntime.client.executionSnapshot())
+  ))
+  ipcMain.handle('analyst:execution:command', async (_event, command) => {
+    const normalized = normalizeExecutionCommand(command)
+    const result = await localRuntime.client.executionCommand(normalized)
+    if (['connect', 'disconnect', 'arm', 'disarm', 'recover'].includes(
+      normalized.kind,
+    )) {
+      return sanitizeExecutionSnapshot(result)
+    }
+    if (['preview', 'submit'].includes(normalized.kind)) {
+      return sanitizeExecutionCommandResult(normalized.kind, result)
+    }
+    if (normalized.kind !== 'bind_account') {
+      throw new Error('未知的执行结果类型')
+    }
+
+    const actualAccountId = String(result?.actual_account_id || '')
+      .trim()
+      .toUpperCase()
+    settingsStore.saveBoundExecutionAccount(actualAccountId)
+
+    const safeReceipt = { ...result }
+    delete safeReceipt.actual_account_id
+    await restartLocalRuntime(runtimeConfiguration(
+      settingsStore.loadSecrets(),
+      settingsStore.loadExecutionSecrets(),
+    ))
+    const execution = sanitizeExecutionSnapshot(
+      await localRuntime.client.executionSnapshot(),
+    )
+    return {
+      schema_version: String(safeReceipt.schema_version || 'ibkr.execution.v1'),
+      kind: 'account_binding_receipt',
+      account_bound: safeReceipt.account_bound === true,
+      account_masked: safeResultText(safeReceipt.account_masked, 80)
+        || execution.account_masked,
+      settings: settingsStore.loadPublic(),
+      execution,
+    }
+  })
 
   ipcMain.handle('analyst:assistant:ask', async (_event, payload) => {
     const settings = requireConfiguredSettings()
@@ -178,7 +359,6 @@ function registerHandlers() {
     return { ...result, evidence: evidenceReference(desk) }
   })
 
-  ipcMain.handle('analyst:ibkr:status', () => ibkrPaper.status())
 }
 
 async function createWindow() {
@@ -213,7 +393,10 @@ app.whenReady().then(async () => {
     filePath: path.join(app.getPath('userData'), 'research-settings.json'),
     safeStorage,
   })
-  await restartLocalRuntime(marketDataFromSecrets(settingsStore.loadSecrets()))
+  await restartLocalRuntime(runtimeConfiguration(
+    settingsStore.loadSecrets(),
+    settingsStore.loadExecutionSecrets(),
+  ))
   registerHandlers()
   await createWindow()
 }).catch((error) => {

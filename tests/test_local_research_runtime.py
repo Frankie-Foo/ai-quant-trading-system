@@ -38,6 +38,35 @@ class _RecordingPipeline:
         }
 
 
+class _RecordingExecutionDesk:
+    def __init__(self) -> None:
+        self.commands: list[dict[str, object]] = []
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "schema_version": "execution_desk.v1",
+            "mode": "live",
+            "enabled": False,
+            "port": 4001,
+            "connected": False,
+            "writes_armed": False,
+            "orders_submitted": 0,
+        }
+
+    def handle(self, command: dict[str, object]) -> dict[str, object]:
+        self.commands.append(dict(command))
+        if command.get("kind") == "fail_connection":
+            raise ConnectionError(
+                "broker connection failed for a value that must stay hidden"
+            )
+        return {
+            "schema_version": "execution_receipt.v1",
+            "kind": str(command.get("kind") or ""),
+            "accepted": True,
+            "orders_submitted": 0,
+        }
+
+
 def test_unconfigured_local_runtime_is_honest_and_fail_closed(
     tmp_path: Path,
 ) -> None:
@@ -206,11 +235,16 @@ def _http_json(
     *,
     token: str | None = None,
     method: str = "GET",
+    payload: dict[str, object] | None = None,
 ) -> tuple[int, dict[str, object]]:
     headers = {}
     if token is not None:
         headers["Authorization"] = f"Bearer {token}"
-    request = Request(url, headers=headers, method=method)
+    body = None
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        body = json.dumps(payload).encode("utf-8")
+    request = Request(url, headers=headers, data=body, method=method)
     try:
         with urlopen(request, timeout=5) as response:  # noqa: S310
             return response.status, json.loads(response.read())
@@ -274,3 +308,138 @@ def test_local_runtime_http_requires_ephemeral_auth_and_exposes_no_order_route(
     assert order["orders_authorized"] is False
     serialized = json.dumps([missing, health, desk, tick, order])
     assert token not in serialized
+
+
+def test_execution_desk_http_is_authenticated_and_keeps_research_fail_closed(
+    tmp_path: Path,
+) -> None:
+    execution = _RecordingExecutionDesk()
+    runtime = LocalResearchRuntime(
+        data_root=tmp_path / "data",
+        runs_root=tmp_path / "runs",
+        market_data=UnconfiguredMarketDataAdapter(),
+        pipeline=_RecordingPipeline(),
+        execution_desk=execution,
+    )
+    token = "ephemeral-local-runtime-token-1234"
+    server = build_local_research_http_server(
+        runtime,
+        host="127.0.0.1",
+        port=0,
+        bearer_token=token,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        status_code, status = _http_json(
+            f"{base}/v1/execution",
+            token=token,
+        )
+        command_code, receipt = _http_json(
+            f"{base}/v1/execution/commands",
+            token=token,
+            method="POST",
+            payload={"kind": "connect"},
+        )
+        health_code, health = _http_json(
+            f"{base}/v1/health",
+            token=token,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert status_code == 200
+    assert status["mode"] == "live"
+    assert status["port"] == 4001
+    assert status["enabled"] is False
+    assert command_code == 200
+    assert receipt["kind"] == "connect"
+    assert execution.commands == [{"kind": "connect"}]
+    assert health_code == 200
+    assert health["orders_authorized"] is False
+
+
+def test_execution_command_rejects_non_object_json(tmp_path: Path) -> None:
+    runtime = LocalResearchRuntime(
+        data_root=tmp_path / "data",
+        runs_root=tmp_path / "runs",
+        market_data=UnconfiguredMarketDataAdapter(),
+        pipeline=_RecordingPipeline(),
+        execution_desk=_RecordingExecutionDesk(),
+    )
+    token = "ephemeral-local-runtime-token-1234"
+    server = build_local_research_http_server(
+        runtime,
+        host="127.0.0.1",
+        port=0,
+        bearer_token=token,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        request = Request(
+            f"{base}/v1/execution/commands",
+            headers=headers,
+            data=b"[]",
+            method="POST",
+        )
+        try:
+            urlopen(request, timeout=5)  # noqa: S310
+            raise AssertionError("non-object command should not be accepted")
+        except HTTPError as error:
+            status = error.code
+            payload = json.loads(error.read())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert status == 400
+    assert payload["orders_authorized"] is False
+
+
+def test_execution_http_maps_broker_failures_to_safe_codes(tmp_path: Path) -> None:
+    runtime = LocalResearchRuntime(
+        data_root=tmp_path / "data",
+        runs_root=tmp_path / "runs",
+        market_data=UnconfiguredMarketDataAdapter(),
+        pipeline=_RecordingPipeline(),
+        execution_desk=_RecordingExecutionDesk(),
+    )
+    token = "ephemeral-local-runtime-token-1234"
+    server = build_local_research_http_server(
+        runtime,
+        host="127.0.0.1",
+        port=0,
+        bearer_token=token,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        status, payload = _http_json(
+            f"{base}/v1/execution/commands",
+            token=token,
+            method="POST",
+            payload={"kind": "fail_connection"},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert status == 409
+    assert payload == {
+        "error": "connection_failed",
+        "error_code": "connection_failed",
+        "orders_authorized": False,
+    }
+    assert "hidden" not in json.dumps(payload)

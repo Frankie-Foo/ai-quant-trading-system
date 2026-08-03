@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Activity,
   AlertTriangle,
+  ArrowLeftRight,
   Bot,
   BrainCircuit,
   CheckCircle2,
@@ -21,7 +22,10 @@ import {
   booleanLabel,
   evidenceReferenceFromDesk,
   evidenceReferenceKey,
+  executionErrorMessage,
   loadAssistantHistory,
+  normalizeExecutionSnapshot,
+  orderPreviewCommand,
   saveAssistantHistory,
 } from './client-state'
 
@@ -30,6 +34,7 @@ const bridge = window.analystDesktop
 const PAGES = [
   { id: 'today', label: '选股', icon: Radar },
   { id: 'data', label: '数据', icon: Database },
+  { id: 'execution', label: '交易', icon: ArrowLeftRight },
   { id: 'assistant', label: '答疑', icon: MessageSquareText },
   { id: 'review', label: '复盘', icon: BrainCircuit },
   { id: 'agents', label: 'Agent', icon: Bot },
@@ -80,6 +85,16 @@ const percent = (value, digits = 2) => (
 
 const number = (value, digits = 1) => (
   value == null ? 'N/A' : Number(value).toFixed(digits)
+)
+
+const currency = (value) => (
+  value == null || !Number.isFinite(Number(value))
+    ? 'N/A'
+    : new Intl.NumberFormat('en-US', {
+        style: 'currency',
+        currency: 'USD',
+        maximumFractionDigits: 2,
+      }).format(Number(value))
 )
 
 const localTime = (value) => {
@@ -152,7 +167,7 @@ function ConnectionSetup({ busy, error, runtimeStatus, onValidated }) {
           <label>
             <span>Massive API Key</span>
             <input type="password" value={massiveApiKey} onChange={(event) => setMassiveApiKey(event.target.value)} autoComplete="new-password" required />
-            <small>用于历史日线、分钟线、新闻和参考数据。</small>
+            <small>用于历史日线、新闻和证券参考数据；盘前分钟历史由 Alpaca 代理在选股时按候选补齐并缓存。</small>
           </label>
           <label>
             <span>Alpaca 代理行情 Key</span>
@@ -309,7 +324,7 @@ function TodayPage({
 function DataPage({ workflowStatus, onSyncData }) {
   const inventory = workflowStatus?.data_inventory || {}
   const active = workflowStatus?.active_job
-  return <div className="analyst-page-stack"><header className="analyst-page-header"><div><span className="eyebrow">LOCAL DATA PLANE</span><h2>数据与同步</h2></div><button type="button" disabled={Boolean(active)} onClick={onSyncData}><RefreshCw size={15} />同步缺失增量</button></header><div className="review-summary"><article><span>日线快照</span><strong>{inventory.grouped_daily || 0}</strong><small>Massive</small></article><article><span>参考数据</span><strong>{inventory.reference || 0}</strong><small>证券身份</small></article><article><span>新闻分区</span><strong>{inventory.news || 0}</strong><small>催化剂历史</small></article><article><span>选股准备</span><strong>{inventory.ready_for_selection ? '已就绪' : '未就绪'}</strong><small>仅补缺失日期</small></article></div>{active?.action === 'sync_data' && <section className="panel workflow-progress-panel"><header><div><span className="eyebrow">SYNC PROGRESS</span><h3>正在同步数据</h3></div><strong>{(active.overall_progress_percent || 0).toFixed(1)}%</strong></header><div className="workflow-progress-track"><i style={{ width: `${active.overall_progress_percent || 0}%` }} /></div><div className="workflow-progress-meta"><span>{active.completed_steps}/{active.total_steps}</span><span>{active.current_step}</span><span>{active.step_progress_current || 0}/{active.step_progress_total || 0}</span><span>{active.progress_detail || ''}</span></div></section>}</div>
+  return <div className="analyst-page-stack"><header className="analyst-page-header"><div><span className="eyebrow">LOCAL DATA PLANE</span><h2>数据与同步</h2></div><button type="button" disabled={Boolean(active)} onClick={onSyncData}><RefreshCw size={15} />同步缺失增量</button></header><div className="review-summary"><article><span>日线快照</span><strong>{inventory.grouped_daily || 0}</strong><small>安装包预置 + 增量</small></article><article><span>参考数据</span><strong>{inventory.reference || 0}</strong><small>安装包预置 + 增量</small></article><article><span>新闻分区</span><strong>{inventory.news || 0}</strong><small>安装包预置 + 增量</small></article><article><span>选股准备</span><strong>{inventory.ready_for_selection ? '已就绪' : '未就绪'}</strong><small>从最新日线续传，已有快照复用</small></article></div><section className="panel boundary-note"><Database size={15} /><span>盘前分钟历史不在存量包中；今日选股时只按锁定候选及最近 20 个历史会话下载，下载后保存在本机缓存。</span></section>{active?.action === 'sync_data' && <section className="panel workflow-progress-panel"><header><div><span className="eyebrow">SYNC PROGRESS</span><h3>正在同步数据</h3></div><strong>{(active.overall_progress_percent || 0).toFixed(1)}%</strong></header><div className="workflow-progress-track"><i style={{ width: `${active.overall_progress_percent || 0}%` }} /></div><div className="workflow-progress-meta"><span>{active.completed_steps}/{active.total_steps}</span><span>{active.current_step}</span><span>{active.step_progress_current || 0}/{active.step_progress_total || 0}</span><span>{active.progress_detail || ''}</span></div></section>}</div>
 }
 
 function AssistantPage({ desk, model, messages, setMessages }) {
@@ -449,16 +464,271 @@ function AgentsPage({ settings, desk }) {
   )
 }
 
-function SettingsPage({ settings, models, runtimeStatus, workflowStatus, ibkrStatus, busy, error, onLoadModels, onSaveModels, onReset }) {
+function ExecutionPage({ snapshot, settings, error, onRefresh, onCommand }) {
+  const execution = normalizeExecutionSnapshot(snapshot)
+  const [busy, setBusy] = useState(false)
+  const [localError, setLocalError] = useState('')
+  const [statusMessage, setStatusMessage] = useState('')
+  const [bindingConfirmation, setBindingConfirmation] = useState('')
+  const [armConfirmation, setArmConfirmation] = useState('')
+  const [draft, setDraft] = useState({
+    symbol: '',
+    action: 'OpenLong',
+    quantity: '',
+    limitPrice: '',
+  })
+  const [preview, setPreview] = useState(null)
+  const [submitConfirmation, setSubmitConfirmation] = useState('')
+  const [warningAcknowledged, setWarningAcknowledged] = useState(false)
+  const armPhrase = execution.armConfirmationPhrase
+    || `启用实盘 ${execution.accountMasked || '当前账户'}`
+  const bindingPhrase = execution.bindingConfirmationPhrase
+  const executionError = localError
+    || (error ? executionErrorMessage(error) : '')
+    || (execution.lastError ? executionErrorMessage(execution.lastError) : '')
+
+  const runCommand = async (command, successMessage = '') => {
+    setBusy(true)
+    setLocalError('')
+    setStatusMessage('')
+    try {
+      const result = await onCommand(command)
+      if (successMessage) setStatusMessage(successMessage)
+      return result
+    } catch (caught) {
+      setLocalError(executionErrorMessage(caught))
+      return null
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const toggleConnection = async () => {
+    setPreview(null)
+    setBindingConfirmation('')
+    setArmConfirmation('')
+    setSubmitConfirmation('')
+    setWarningAcknowledged(false)
+    const command = execution.enabled
+      ? { kind: 'disconnect' }
+      : { kind: 'connect' }
+    await runCommand(
+      command,
+      execution.enabled
+        ? '实盘执行已关闭；仅禁止新单，不会撤销 IBKR 已有挂单，请继续在最近订单中核对状态。'
+        : '实盘执行已开启连接；已连接不等于可以下单。',
+    )
+  }
+
+  const bindAccount = async () => {
+    if (!bindingPhrase || bindingConfirmation !== bindingPhrase) {
+      setLocalError('账户绑定确认文字不匹配，未保存任何账户信息。')
+      return
+    }
+    const result = await runCommand({
+      kind: 'bind_account',
+      confirmation: bindingConfirmation,
+    })
+    if (!result) return
+    setBindingConfirmation('')
+    setStatusMessage('实盘账户已安全绑定；连接已自动关闭，请重新开启后再单独解锁下单权限。')
+  }
+
+  const toggleArm = async () => {
+    if (execution.writesArmed) {
+      await runCommand({ kind: 'disarm' }, '手动下单权限已关闭。')
+      setArmConfirmation('')
+      setPreview(null)
+      return
+    }
+    if (armConfirmation !== armPhrase) {
+      setLocalError('实盘确认文字不匹配，未启用下单权限。')
+      return
+    }
+    await runCommand(
+      { kind: 'arm', confirmation: armConfirmation },
+      '实盘手动下单权限已临时启用。',
+    )
+  }
+
+  const recoverOrders = async () => {
+    const result = await runCommand({ kind: 'recover' })
+    if (!result) return
+    const count = Number.isFinite(Number(result.reconciled_count))
+      ? `，已核对 ${Number(result.reconciled_count)} 笔`
+      : ''
+    setStatusMessage(`券商订单状态核对已完成${count}；请查看“最近提交订单”和恢复状态。`)
+  }
+
+  const updateDraft = (key, value) => {
+    setDraft((current) => ({ ...current, [key]: value }))
+    setPreview(null)
+    setSubmitConfirmation('')
+    setWarningAcknowledged(false)
+  }
+
+  const createPreview = async (event) => {
+    event.preventDefault()
+    let command
+    try {
+      const id = globalThis.crypto?.randomUUID?.() || `${Date.now()}`
+      command = orderPreviewCommand(draft, `desktop-${id}`)
+    } catch (caught) {
+      setLocalError(caught.message)
+      return
+    }
+    const result = await runCommand(command)
+    const nextPreview = result?.preview || result
+    if (nextPreview?.preview_id) {
+      setPreview({ ...nextPreview, order: command.order })
+      setWarningAcknowledged(false)
+      setStatusMessage('订单预览已生成，尚未提交。')
+    } else if (result) {
+      setLocalError('执行内核没有返回有效的订单预览。')
+    }
+  }
+
+  const submitOrder = async () => {
+    if (!preview?.preview_id) return
+    const result = await runCommand({
+      kind: 'submit',
+      preview_id: preview.preview_id,
+      confirmation: submitConfirmation,
+      order: preview.order,
+    })
+    if (!result) return
+    setStatusMessage(
+      result.status === 'unknown'
+        ? '订单状态未知，禁止重复提交；请先完成券商对账。'
+        : `订单已交给 IBKR：${result.broker_order_id || result.status || '已受理'}`,
+    )
+    setPreview(null)
+    setSubmitConfirmation('')
+    setWarningAcknowledged(false)
+  }
+
+  return (
+    <div className="analyst-page-stack execution-page">
+      <header className="analyst-page-header">
+        <div><span className="eyebrow">ISOLATED MANUAL EXECUTION</span><h2>盈透手动执行台</h2></div>
+        <button type="button" disabled={busy} onClick={onRefresh}><RefreshCw size={15} />刷新账户</button>
+      </header>
+      <div className="execution-safety-note">
+        <ShieldCheck size={17} />
+        <div><strong>研究内核永远不能下单</strong><span>这里只接受你手动输入的 DAY 限价单；仅允许开多和减多，不支持卖空。</span></div>
+      </div>
+      {execution.enabled && <div className="execution-live-warning" role="alert"><AlertTriangle size={17} /><strong>实盘执行已开启（固定端口 4001）</strong><span>已连接 ≠ 可下单；仍需单独解锁、预览并输入动态确认文字。重启后总开关默认关闭。</span></div>}
+      {execution.recoveryRequired && <div className="analyst-warning execution-recovery-warning" role="alert"><AlertTriangle size={16} /><span>存在状态未知的实盘订单；核对完成前禁止提交新订单。</span><button type="button" disabled={busy || !execution.connected} onClick={recoverOrders}>核对未知订单</button></div>}
+      {executionError && <div className="analyst-warning" role="alert"><AlertTriangle size={16} />{executionError}</div>}
+      <div className="execution-status-grid" aria-live="polite">
+        <article><span>实盘执行</span><strong className={execution.enabled ? 'danger-text' : ''}>{execution.enabled ? '已开启' : '已关闭'}</strong><small>固定端口 {execution.port}</small></article>
+        <article><span>IBKR 连接</span><strong>{execution.connected ? '已连接' : '未连接'}</strong><small>{execution.accountMasked || '等待连接后自动识别账户'}</small></article>
+        <article><span>账户绑定</span><strong>{execution.accountBound ? '已绑定' : '未绑定'}</strong><small>{execution.accountBound ? '后续连接将严格核对账户' : '绑定前禁止解锁和下单'}</small></article>
+        <article><span>API 写入配置</span><strong>{execution.apiReadOnly == null ? '未知' : execution.apiReadOnly ? '只读' : '请求写入'}</strong><small>未实际探测；What-If / 提交时由 IBKR 验证</small></article>
+        <article><span>手动下单</span><strong>{execution.writesArmed ? '已临时启用' : '关闭'}</strong><small>断开连接或重启后自动关闭</small></article>
+      </div>
+      <section className="panel execution-control-panel">
+        <div className="execution-master-control"><div><strong>实盘执行总开关</strong><small>关闭只会断开连接并禁止新单，不会撤销 IBKR 已有挂单；最近订单记录仍会保留。</small></div><button type="button" role="switch" aria-checked={execution.enabled} className={execution.enabled ? 'danger-button' : ''} disabled={busy || (!execution.enabled && !settings?.execution?.configured)} onClick={toggleConnection}>{execution.enabled ? '关闭实盘执行' : '开启实盘执行'}</button></div>
+        {execution.enabled && execution.connected && !execution.accountBound && <div className="execution-binding-control">
+          <div><strong>首次绑定实盘账户</strong><small>账户由 TWS 自动检测。客户端只显示脱敏值；完整账户 ID 仅由主进程加密保存。</small></div>
+          <label><span>输入“{bindingPhrase || '等待 TWS 返回确认文字'}”</span><input value={bindingConfirmation} onChange={(event) => setBindingConfirmation(event.target.value)} autoComplete="off" /></label>
+          <button type="button" className="danger-button" disabled={busy || !bindingPhrase || bindingConfirmation !== bindingPhrase} onClick={bindAccount}>确认绑定此实盘账户</button>
+        </div>}
+        <div className="execution-arm-control">
+          <div><strong>写权限闸门</strong><small>研究选股和 Agent 无法触发；必须由你输入动态文字解锁。</small></div>
+          {!execution.writesArmed && <label><span>输入“{armPhrase}”</span><input value={armConfirmation} onChange={(event) => setArmConfirmation(event.target.value)} autoComplete="off" /></label>}
+          <button type="button" className={execution.writesArmed ? 'danger-button' : ''} disabled={busy || !execution.enabled || !execution.connected || !execution.accountBound || execution.apiReadOnly !== false || execution.recoveryRequired || (!execution.writesArmed && armConfirmation !== armPhrase)} onClick={toggleArm}>
+            {execution.writesArmed ? '立即关闭下单权限' : '确认启用实盘下单'}
+          </button>
+        </div>
+      </section>
+      <section className="panel execution-order-panel">
+        <header className="analyst-panel-header"><div><span className="eyebrow">LIMIT DAY ORDER</span><h3>手动订单</h3></div><span>单笔最大新增开仓金额（仅 OpenLong） {currency(execution.maxOrderNotional || settings?.execution?.maxOrderNotional)}</span></header>
+        <form className="execution-order-form" onSubmit={createPreview}>
+          <label><span>股票代码</span><input value={draft.symbol} onChange={(event) => updateDraft('symbol', event.target.value.toUpperCase())} placeholder="AAPL" autoComplete="off" required /></label>
+          <label><span>操作</span><select value={draft.action} onChange={(event) => updateDraft('action', event.target.value)}><option value="OpenLong">开多</option><option value="ReduceLong">减多 / 平多</option></select></label>
+          <label><span>股数</span><input type="number" min="1" step="1" value={draft.quantity} onChange={(event) => updateDraft('quantity', event.target.value)} required /></label>
+          <label><span>限价（USD）</span><input type="number" min="0.01" step="0.01" value={draft.limitPrice} onChange={(event) => updateDraft('limitPrice', event.target.value)} required /></label>
+          <button type="submit" disabled={busy || !execution.canPreview}>生成预览</button>
+        </form>
+        {preview && <div className="execution-preview" aria-live="polite">
+          <div><span>待提交</span><strong>{preview.order?.symbol || draft.symbol} · {preview.order?.action || draft.action} · {preview.order?.quantity || draft.quantity} 股 @ {currency(preview.order?.limit_price || draft.limitPrice)}</strong><small>预览编号 {preview.preview_id}</small></div>
+          <div className="execution-what-if"><span>IBKR What-If</span><strong>预计佣金 {currency(preview.what_if?.estimated_commission)} · 初始保证金变化 {currency(preview.what_if?.initial_margin_change)}</strong>{preview.what_if?.warning && <p role="alert">IBKR 警告：{preview.what_if.warning}</p>}{preview.warning_confirmation_hash && <small>警告确认码 {preview.warning_confirmation_hash} 已写入下方动态确认短语；提交时 IBKR 警告若发生变化，订单会被拒绝并要求重新预览。</small>}{preview.what_if?.warning && <label className="execution-warning-ack"><input type="checkbox" checked={warningAcknowledged} onChange={(event) => setWarningAcknowledged(event.target.checked)} /><span>我已阅读并接受上述 IBKR 警告</span></label>}</div>
+          <label><span>输入“{preview.confirmation_phrase}”确认提交</span><input value={submitConfirmation} onChange={(event) => setSubmitConfirmation(event.target.value)} autoComplete="off" /></label>
+          <button type="button" disabled={busy || !execution.canPreview || !preview.confirmation_phrase || submitConfirmation !== preview.confirmation_phrase || (Boolean(preview.what_if?.warning) && !warningAcknowledged)} onClick={submitOrder}>提交到实盘</button>
+        </div>}
+        {statusMessage && <p className="execution-status-message" aria-live="polite">{statusMessage}</p>}
+      </section>
+      <div className="execution-ledger-grid">
+        <section className="panel execution-ledger"><header className="analyst-panel-header"><h3>当前持仓</h3><span>{execution.positions.length} 项</span></header><div className="execution-table-wrap"><table><thead><tr><th>标的</th><th>股数</th><th>成本</th><th>现价</th><th>浮盈亏</th></tr></thead><tbody>{execution.positions.map((position) => <tr key={position.symbol}><td>{position.symbol || 'N/A'}</td><td>{position.quantity ?? 'N/A'}</td><td>{currency(position.average_cost)}</td><td>{currency(position.market_price)}</td><td>{percent(position.unrealized_pnl_percent)}</td></tr>)}</tbody></table>{!execution.positions.length && <p className="table-empty">暂无持仓。</p>}</div></section>
+        <section className="panel execution-ledger"><header className="analyst-panel-header"><h3>未完成订单</h3><span>{execution.openOrders.length} 笔</span></header><div className="execution-table-wrap"><table><thead><tr><th>标的</th><th>操作</th><th>数量</th><th>限价</th><th>状态</th></tr></thead><tbody>{execution.openOrders.map((order) => <tr key={order.order_id || order.client_order_id}><td>{order.symbol || 'N/A'}</td><td>{order.action || order.side || 'N/A'}</td><td>{order.quantity ?? 'N/A'}</td><td>{currency(order.limit_price)}</td><td>{order.status || 'N/A'}</td></tr>)}</tbody></table>{!execution.openOrders.length && <p className="table-empty">暂无未完成订单。</p>}</div></section>
+      </div>
+      <section className="panel execution-ledger execution-recent-orders">
+        <header className="analyst-panel-header"><div><h3>最近提交订单</h3><small>包括已成交、已取消及瞬时离开挂单列表的订单，避免重复提交。</small></div><span>账户数据刷新：{localTime(execution.accountRefreshedAtUtc)}</span></header>
+        <div className="execution-table-wrap"><table><thead><tr><th>更新时间</th><th>标的</th><th>方向</th><th>数量</th><th>限价</th><th>状态</th><th>券商 ID</th></tr></thead><tbody>{execution.recentOrders.map((order) => <tr key={order.client_order_id || `${order.broker_order_id}-${order.updated_at_utc}`}><td>{localTime(order.updated_at_utc)}</td><td>{order.symbol || 'N/A'}</td><td>{order.action || 'N/A'}</td><td>{order.quantity ?? 'N/A'}</td><td>{currency(order.limit_price)}</td><td>{order.status || 'N/A'}</td><td>{order.broker_order_id ?? order.perm_id ?? 'N/A'}</td></tr>)}</tbody></table>{!execution.recentOrders.length && <p className="table-empty">暂无本机提交记录。</p>}</div>
+      </section>
+    </div>
+  )
+}
+
+function ExecutionSettingsForm({ settings, busy, error, onImport, onSave, onClearBinding }) {
+  const configured = settings.execution?.configured === true
+  const accountBound = settings.execution?.accountBound === true
+  const [importing, setImporting] = useState(false)
+  const [importResult, setImportResult] = useState('')
+  const [importError, setImportError] = useState('')
+  const [values, setValues] = useState({
+    host: '',
+    clientId: '',
+    maxOrderNotional: settings.execution?.maxOrderNotional || 25000,
+  })
+  const update = (key, value) => setValues((current) => ({ ...current, [key]: value }))
+  const importProfile = async () => {
+    setImporting(true)
+    setImportError('')
+    setImportResult('')
+    try {
+      const result = await onImport()
+      if (result?.canceled) return
+      const profile = result?.profile || {}
+      setImportResult(`已确认固定实盘端口 ${profile.livePort}；登录名、密码及虚拟盘字段均已忽略。账户 ID 将在首次连接后由 TWS 自动检测。`)
+    } catch (caught) {
+      setImportError(caught.message || '无法导入盈透配置文件')
+    } finally {
+      setImporting(false)
+    }
+  }
+  return (
+    <section className="panel execution-settings-panel">
+      <header className="analyst-panel-header"><div><span className="eyebrow">IBKR TWS API</span><h3>盈透执行连接</h3></div><span>不需要、也不会保存盈透用户名或密码</span></header>
+      <div className="execution-import-row"><button type="button" disabled={busy || importing} onClick={importProfile}>{importing ? <LoaderCircle className="spin" size={15} /> : <Database size={15} />}从 quan.env / 文本导入</button><span>只确认固定实盘端口 4001；登录名不是账户 ID，因此不会导入，密码与虚拟盘字段也会直接忽略。</span></div>
+      <form onSubmit={(event) => { event.preventDefault(); onSave(values) }}>
+        <label><span>主机</span><input value={values.host} onChange={(event) => update('host', event.target.value)} placeholder={settings.execution?.hostConfigured ? '已安全保存；留空保持不变' : '127.0.0.1'} required={!configured} /></label>
+        <label><span>Client ID</span><input type="number" min="0" step="1" value={values.clientId} onChange={(event) => update('clientId', event.target.value)} placeholder={settings.execution?.clientIdConfigured ? '已安全保存；留空保持不变' : '17'} required={!configured} /></label>
+        <div className="execution-bound-account"><span>安全绑定账户</span><strong>{accountBound ? settings.execution?.liveAccountMasked : '尚未绑定'}</strong><small>{accountBound ? '连接时将严格核对此账户' : '保存连接配置后，在交易页首次连接并确认自动检测结果'}</small></div>
+        <label><span>单笔最大新增开仓金额（仅 OpenLong，USD）</span><input type="number" min="1" step="1" value={values.maxOrderNotional} onChange={(event) => update('maxOrderNotional', event.target.value)} required /></label>
+        <button type="submit" disabled={busy}>{busy ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}{configured ? '更新执行配置' : '保存执行配置'}</button>
+      </form>
+      {accountBound && <button type="button" className="secondary-danger" disabled={busy} onClick={onClearBinding}>清除账户绑定并重新检测</button>}
+      {(error || importError) && <div className="inline-error" role="alert"><AlertTriangle size={15} />{importError || error}</div>}
+      {importResult && <div className="execution-import-result" aria-live="polite">{importResult}</div>}
+      <p>只连接实盘端口 4001，不提供模拟盘切换。请在 TWS 或 IB Gateway 中启用 Socket API；交易密码只用于登录官方客户端，不能填写到这里。</p>
+    </section>
+  )
+}
+
+function SettingsPage({ settings, models, runtimeStatus, workflowStatus, executionSnapshot, busy, error, onLoadModels, onSaveModels, onImportExecution, onSaveExecution, onClearExecutionBinding, onReset }) {
   const [editingModels, setEditingModels] = useState(false)
+  const execution = normalizeExecutionSnapshot(executionSnapshot)
   return (
     <div className="analyst-page-stack">
       <header className="analyst-page-header"><div><span className="eyebrow">SECURITY & PROVIDERS</span><h2>设置</h2></div><p>凭据不显示、不导出、不进入 Git；AI 请求会发送最小化研究证据至 OpenRouter</p></header>
       <div className="settings-grid">
         <section className="panel settings-card"><KeyRound size={20} /><h3>安全凭据</h3><div><span>OpenRouter</span><strong>{settings.openRouterKeyConfigured ? '已安全保存' : '未配置'}</strong></div><div><span>Massive</span><strong>{settings.massiveConfigured ? '已安全保存' : '未配置'}</strong></div><div><span>Alpaca SIP</span><strong>{settings.marketDataConfigured ? '已安全保存' : '未配置'}</strong></div><div><span>SEC</span><strong>{settings.secConfigured ? '已安全保存' : '未配置'}</strong></div></section>
         <section className="panel settings-card"><ShieldCheck size={20} /><h3>数据源状态</h3><div><span>执行位置</span><strong>{runtimeStatus?.local_execution ? '本机' : '不可用'}</strong></div><div><span>实时行情</span><strong>{runtimeStatus?.market_data?.realtime_ready ? 'Alpaca SIP 已连接' : '不可用'}</strong></div><div><span>Massive 日线</span><strong>{workflowStatus?.data_inventory?.grouped_daily || 0} 个快照</strong></div><div><span>选股准备</span><strong>{workflowStatus?.data_inventory?.ready_for_selection ? '已就绪' : '等待首次同步'}</strong></div></section>
-        <section className="panel settings-card"><Clock3 size={20} /><h3>IBKR Paper 预留</h3><div><span>适配器</span><strong>{ibkrStatus?.adapter || 'N/A'}</strong></div><div><span>连接</span><strong>{ibkrStatus?.connected ? '已连接' : '未配置'}</strong></div><div><span>下单</span><strong>{ibkrStatus?.orderSubmissionEnabled ? '启用' : '强制关闭'}</strong></div></section>
+        <section className="panel settings-card"><Clock3 size={20} /><h3>IBKR 实盘执行</h3><div><span>连接配置</span><strong>{settings.execution?.configured ? '已安全保存' : '未配置'}</strong></div><div><span>账户绑定</span><strong>{settings.execution?.accountBound ? settings.execution?.liveAccountMasked : '未绑定'}</strong></div><div><span>总开关</span><strong>{execution.enabled ? '开启' : '关闭'}</strong></div><div><span>连接</span><strong>{execution.connected ? '已连接' : '未连接'}</strong></div><div><span>下单</span><strong>{execution.writesArmed ? '临时启用' : '关闭'}</strong></div></section>
       </div>
+      <ExecutionSettingsForm settings={settings} busy={busy} error={error} onImport={onImportExecution} onSave={onSaveExecution} onClearBinding={onClearExecutionBinding} />
       {!editingModels ? (
         <section className="panel current-models">
           <header className="analyst-panel-header"><div><span className="eyebrow">MODEL ROUTING</span><h3>当前模型</h3></div><button type="button" onClick={async () => { await onLoadModels(); setEditingModels(true) }}>更改模型</button></header>
@@ -467,7 +737,7 @@ function SettingsPage({ settings, models, runtimeStatus, workflowStatus, ibkrSta
       ) : (
         <ModelSetup models={models} initialValues={settings.models} busy={busy} error={error} embedded onSave={async (values) => { if (await onSaveModels(values)) setEditingModels(false) }} />
       )}
-      <section className="panel reset-zone"><div><h3>重新配置连接</h3><p>清除本机安全存储中的 OpenRouter、行情凭据和模型选择。</p></div><button type="button" onClick={onReset}>清除并重新配置</button></section>
+      <section className="panel reset-zone"><div><h3>重新配置连接</h3><p>清除本机安全存储中的 OpenRouter、行情、IBKR 执行配置和模型选择。</p></div><button type="button" onClick={onReset}>清除并重新配置</button></section>
     </div>
   )
 }
@@ -476,7 +746,8 @@ export default function AnalystApp() {
   const [settings, setSettings] = useState(null)
   const [models, setModels] = useState([])
   const [desk, setDesk] = useState(null)
-  const [ibkrStatus, setIbkrStatus] = useState(null)
+  const [executionSnapshot, setExecutionSnapshot] = useState(null)
+  const [executionError, setExecutionError] = useState('')
   const [runtimeStatus, setRuntimeStatus] = useState(null)
   const [workflowStatus, setWorkflowStatus] = useState(null)
   const [page, setPage] = useState('today')
@@ -534,6 +805,18 @@ export default function AnalystApp() {
     }
   }, [])
 
+  const refreshExecution = useCallback(async () => {
+    try {
+      const snapshot = await bridge.execution.snapshot()
+      setExecutionSnapshot(snapshot)
+      setExecutionError('')
+      return snapshot
+    } catch (caught) {
+      setExecutionError(caught.message || '盈透执行服务不可用')
+      return null
+    }
+  }, [])
+
   const loadModels = useCallback(async () => {
     setBusy(true)
     setActionError('')
@@ -587,15 +870,11 @@ export default function AnalystApp() {
           }
           if (!cancelled) setOnboarding('models')
         } else {
-          await Promise.all([refreshDesk(), refreshWorkflows()])
-          try {
-            const status = await bridge.ibkrPaper.status()
-            if (!cancelled) setIbkrStatus(status)
-          } catch (caught) {
-            if (!cancelled) {
-              setActionError(caught.message || 'IBKR Paper 状态不可用')
-            }
-          }
+          await Promise.all([
+            refreshDesk(),
+            refreshWorkflows(),
+            refreshExecution(),
+          ])
         }
       } catch (caught) {
         if (!cancelled) setActionError(caught.message || '客户端初始化失败')
@@ -605,7 +884,7 @@ export default function AnalystApp() {
     }
     initialize()
     return () => { cancelled = true }
-  }, [refreshDesk, refreshWorkflows])
+  }, [refreshDesk, refreshExecution, refreshWorkflows])
 
   useEffect(() => {
     if (!settings?.configured || onboarding) return undefined
@@ -613,9 +892,10 @@ export default function AnalystApp() {
       refreshDesk()
       refreshRuntime()
       refreshWorkflows()
+      refreshExecution()
     }, 5_000)
     return () => window.clearInterval(timer)
-  }, [onboarding, refreshDesk, refreshRuntime, refreshWorkflows, settings?.configured])
+  }, [onboarding, refreshDesk, refreshExecution, refreshRuntime, refreshWorkflows, settings?.configured])
 
   const validateConnection = async (connection) => {
     setBusy(true)
@@ -643,7 +923,7 @@ export default function AnalystApp() {
       await Promise.all([
         refreshDesk(),
         refreshWorkflows(),
-        bridge.ibkrPaper.status().then(setIbkrStatus),
+        refreshExecution(),
       ])
       return true
     } catch (caught) {
@@ -655,7 +935,7 @@ export default function AnalystApp() {
   }
 
   const reset = async () => {
-    if (!window.confirm('确认清除本机安全存储中的所有模型与行情凭据？')) return
+    if (!window.confirm('确认清除本机安全存储中的模型、行情与 IBKR 执行配置？')) return
     setBusy(true)
     setActionError('')
     try {
@@ -665,6 +945,8 @@ export default function AnalystApp() {
       setModels([])
       setRuntimeStatus(null)
       setWorkflowStatus(null)
+      setExecutionSnapshot(null)
+      setExecutionError('')
       setRuntimeError('')
       setDeskError('')
       setWorkflowError('')
@@ -720,6 +1002,51 @@ export default function AnalystApp() {
     }
   }
 
+  const saveExecution = async (values) => {
+    setBusy(true)
+    setActionError('')
+    try {
+      const result = await bridge.settings.saveExecution(values)
+      setSettings(result.settings)
+      setRuntimeStatus(result.runtime)
+      setExecutionSnapshot(result.execution)
+      setExecutionError('')
+      return true
+    } catch (caught) {
+      setActionError(caught.message || '盈透执行配置保存失败')
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const clearExecutionBinding = async () => {
+    if (!window.confirm('确认清除当前实盘账户绑定？这会立即断开执行连接并禁止新单，但不会撤销 IBKR 已有挂单；下次连接需重新检测并确认账户。')) return false
+    setBusy(true)
+    setActionError('')
+    try {
+      const result = await bridge.settings.clearExecutionAccountBinding()
+      setSettings(result.settings)
+      setRuntimeStatus(result.runtime)
+      setExecutionSnapshot(result.execution)
+      setExecutionError('')
+      return true
+    } catch (caught) {
+      setActionError(caught.message || '无法清除实盘账户绑定')
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const sendExecutionCommand = async (command) => {
+    const result = await bridge.execution.command(command)
+    if (result?.settings) setSettings(result.settings)
+    if (result?.execution) setExecutionSnapshot(result.execution)
+    else await refreshExecution()
+    return result
+  }
+
   const activeCandidates = desk?.selection?.candidates || []
   const navCount = useMemo(() => ({
     today: activeCandidates.length,
@@ -744,22 +1071,27 @@ export default function AnalystApp() {
     ? <TodayPage desk={desk} workflowStatus={workflowStatus} runBusy={selectionBusy} runResult={selectionRun} onRunSelection={runSelection} onToggleMonitor={toggleMonitor} />
     : page === 'data'
       ? <DataPage workflowStatus={workflowStatus} onSyncData={() => startWorkflow('sync_data')} />
-    : page === 'assistant'
-      ? <AssistantPage desk={desk} model={settings.models.question} messages={assistantHistory} setMessages={setAssistantHistory} />
-      : page === 'review'
-        ? <ReviewPage desk={desk} workflowStatus={workflowStatus} onRunReview={() => startWorkflow('run_review')} />
-        : page === 'agents'
-          ? <AgentsPage settings={settings} desk={desk} />
-          : <SettingsPage settings={settings} models={models} runtimeStatus={runtimeStatus} workflowStatus={workflowStatus} ibkrStatus={ibkrStatus} busy={busy} error={error} onLoadModels={loadModels} onSaveModels={saveModels} onReset={reset} />
+      : page === 'execution'
+        ? <ExecutionPage snapshot={executionSnapshot} settings={settings} error={executionError} onRefresh={refreshExecution} onCommand={sendExecutionCommand} />
+        : page === 'assistant'
+          ? <AssistantPage desk={desk} model={settings.models.question} messages={assistantHistory} setMessages={setAssistantHistory} />
+          : page === 'review'
+            ? <ReviewPage desk={desk} workflowStatus={workflowStatus} onRunReview={() => startWorkflow('run_review')} />
+            : page === 'agents'
+              ? <AgentsPage settings={settings} desk={desk} />
+              : <SettingsPage settings={settings} models={models} runtimeStatus={runtimeStatus} workflowStatus={workflowStatus} executionSnapshot={executionSnapshot} busy={busy} error={actionError} onLoadModels={loadModels} onSaveModels={saveModels} onImportExecution={() => bridge.settings.importExecutionProfile()} onSaveExecution={saveExecution} onClearExecutionBinding={clearExecutionBinding} onReset={reset} />
 
   return (
     <main className="analyst-app">
       <header className="analyst-topbar">
         <div className="analyst-brand"><span><Activity size={21} /></span><div><strong>AI 量化研究台</strong><small>DESKTOP RESEARCH EDITION</small></div></div>
         <div className="analyst-connection"><i className={connectionError ? 'bad' : ''} /><span>{connectionError ? '本地研究服务异常' : '本地研究内核在线'}</span></div>
-        <button type="button" onClick={() => Promise.all([refreshDesk(), refreshRuntime(), refreshWorkflows()])}><RefreshCw size={15} />刷新全部</button>
+        <button type="button" onClick={() => Promise.all([refreshDesk(), refreshRuntime(), refreshWorkflows(), refreshExecution()])}><RefreshCw size={15} />刷新全部</button>
       </header>
-      <section className="analyst-boundary"><ShieldCheck size={17} /><div><strong>本地研究版 · 无交易能力</strong><span>选股、因子、复盘在本机执行；AI 答疑会把最小化证据发送至 OpenRouter；IBKR Paper 仅预留接口。</span></div><b>LOCAL · NO ORDERS</b></section>
+      <div className="analyst-boundary-stack">
+        <section className="analyst-boundary"><ShieldCheck size={17} /><div><strong>研究内核 · orders_authorized=false</strong><span>选股、因子、复盘和 Agent 永远只读，不能调用订单接口。</span></div><b>RESEARCH ONLY</b></section>
+        <section className={`analyst-boundary manual ${normalizeExecutionSnapshot(executionSnapshot).enabled ? 'live' : ''}`}><ArrowLeftRight size={17} /><div><strong>手动执行台 · 仅实盘 4001</strong><span>隔离的人工订单入口；实盘总开关与写权限分离，重启默认全部关闭。</span></div><b>{normalizeExecutionSnapshot(executionSnapshot).writesArmed ? 'ARMED' : normalizeExecutionSnapshot(executionSnapshot).enabled ? 'CONNECTED' : 'OFF'}</b></section>
+      </div>
       {error && <div className="analyst-global-error"><AlertTriangle size={16} />{error}。保留最后一次已知证据，不生成新的确定性结论。</div>}
       <div className="analyst-workspace">
         <nav className="analyst-nav">
@@ -771,7 +1103,7 @@ export default function AnalystApp() {
         </nav>
         <section className="analyst-content">{pageContent}</section>
       </div>
-      <footer className="analyst-footer"><span><Database size={13} />本地不可变研究证据</span><span><KeyRound size={13} />凭据：系统安全存储 · AI 证据：最小化后外发</span><span>行情源：Alpaca SIP 代理 · 模拟盘：无 · 订单：禁止</span></footer>
+      <footer className="analyst-footer"><span><Database size={13} />本地不可变研究证据</span><span><KeyRound size={13} />凭据：系统安全存储 · AI 证据：最小化后外发</span><span>研究内核：只读 · 实盘执行：{normalizeExecutionSnapshot(executionSnapshot).enabled ? '连接开启' : '关闭'} / 下单{normalizeExecutionSnapshot(executionSnapshot).writesArmed ? '已解锁' : '锁定'}</span></footer>
     </main>
   )
 }

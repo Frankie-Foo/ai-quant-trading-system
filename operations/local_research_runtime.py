@@ -49,6 +49,39 @@ class ResearchPipeline(Protocol):
     ) -> dict[str, object]: ...
 
 
+class ExecutionDesk(Protocol):
+    """Manual broker command plane, isolated from research authorization."""
+
+    def snapshot(self) -> dict[str, object]: ...
+
+    def handle(self, command: dict[str, object]) -> dict[str, object]: ...
+
+
+class DisabledExecutionDesk:
+    """Default manual execution adapter: visible, honest, and fail-closed."""
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "schema_version": "execution_desk.v1",
+            "provider_id": "unconfigured",
+            "mode": "live",
+            "enabled": False,
+            "port": 4001,
+            "configured": False,
+            "connected": False,
+            "api_read_only": True,
+            "writes_armed": False,
+            "recovery_required": False,
+            "positions": [],
+            "open_orders": [],
+            "orders_submitted": 0,
+        }
+
+    def handle(self, command: dict[str, object]) -> dict[str, object]:
+        del command
+        raise RuntimeError("IBKR execution desk is not configured")
+
+
 class UnconfiguredMarketDataAdapter:
     """Default adapter: no source, no download, and no invented fallback."""
 
@@ -316,6 +349,7 @@ class LocalResearchRuntime:
         pipeline: ResearchPipeline | None = None,
         workflows: DesktopWorkflowManager | None = None,
         bootstrap_status: dict[str, object] | None = None,
+        execution_desk: ExecutionDesk | None = None,
     ):
         self.data_root = data_root
         self.runs_root = runs_root
@@ -326,6 +360,7 @@ class LocalResearchRuntime:
             runs_root=self.runs_root,
         )
         self.bootstrap_status = bootstrap_status or {"status": "not_configured"}
+        self.execution_desk = execution_desk or DisabledExecutionDesk()
         self.data_root.mkdir(parents=True, exist_ok=True)
         self.runs_root.mkdir(parents=True, exist_ok=True)
         self._desk = TradingDeskEvidence(
@@ -348,6 +383,7 @@ class LocalResearchRuntime:
             "orders_authorized": False,
             "paper_runtime_authorized": False,
             "live_trading_authorized": False,
+            "manual_execution": self.execution_desk.snapshot(),
         }
 
     def snapshot(self, observed_at_utc: datetime | None = None) -> dict[str, object]:
@@ -434,6 +470,14 @@ class LocalResearchRuntime:
 
     def stop_monitor(self) -> dict[str, object]:
         return self.workflows.stop_monitor()
+
+    def execution_snapshot(self) -> dict[str, object]:
+        return self.execution_desk.snapshot()
+
+    def handle_execution(
+        self, command: dict[str, object]
+    ) -> dict[str, object]:
+        return self.execution_desk.handle(command)
 
 
 def _require_utc(value: datetime) -> None:

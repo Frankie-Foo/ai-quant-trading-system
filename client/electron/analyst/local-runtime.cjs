@@ -39,15 +39,18 @@ function createLocalRuntimeClient({
 } = {}) {
   let connection = null
 
-  async function request(route, { method = 'GET' } = {}) {
+  async function request(route, { method = 'GET', body } = {}) {
     if (!connection) throw new Error('本地研究内核尚未连接')
-    const response = await fetchImpl(`${connection.url}${route}`, {
-      method,
-      headers: {
+    const headers = {
         Accept: 'application/json',
         Authorization: `Bearer ${connection.token}`,
         'Cache-Control': 'no-store',
-      },
+    }
+    if (body !== undefined) headers['Content-Type'] = 'application/json'
+    const response = await fetchImpl(`${connection.url}${route}`, {
+      method,
+      headers,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(timeoutMs),
     })
     let payload
@@ -57,6 +60,11 @@ function createLocalRuntimeClient({
       throw new Error(`本地研究内核返回了无效响应（HTTP ${response.status}）`)
     }
     if (!response.ok) {
+      const safeCode = typeof payload?.error_code === 'string'
+        && /^[a-z0-9_]{3,80}$/.test(payload.error_code)
+        ? payload.error_code
+        : null
+      if (safeCode) throw new Error(safeCode)
       throw new Error(`本地研究内核不可用（HTTP ${response.status}）`)
     }
     return payload
@@ -116,6 +124,28 @@ function createLocalRuntimeClient({
       { method: 'POST' },
     ),
     stopMonitor: () => request('/v1/monitor/stop', { method: 'POST' }),
+    async executionSnapshot() {
+      const payload = await request('/v1/execution')
+      if (
+        !['ibkr.execution.v1', 'execution_desk.v1'].includes(
+          payload?.schema_version,
+        )
+        || payload?.mode !== 'live'
+        || payload?.port !== 4001
+      ) {
+        throw new Error('IBKR live execution status is invalid')
+      }
+      return payload
+    },
+    async executionCommand(command) {
+      if (!command || typeof command !== 'object' || Array.isArray(command)) {
+        throw new Error('IBKR live execution command is invalid')
+      }
+      return request('/v1/execution/commands', {
+        method: 'POST',
+        body: command,
+      })
+    },
   }
 }
 
@@ -135,6 +165,21 @@ function runtimeLaunch({
   const realtimeConfigured = Boolean(marketDataKey && marketDataSecret)
   const standaloneConfigured = Boolean(
     realtimeConfigured && massiveApiKey && secUserAgent,
+  )
+  const ibkr = marketData.ibkr && typeof marketData.ibkr === 'object'
+    ? marketData.ibkr
+    : {}
+  const ibkrHost = String(ibkr.host || '').trim()
+  const ibkrClientId = Number(ibkr.clientId)
+  const ibkrLiveAccount = String(ibkr.liveAccount || '').trim().toUpperCase()
+  const ibkrMaxOrderNotional = Number(ibkr.maxOrderNotional)
+  const ibkrConfigured = Boolean(
+    ibkrHost
+    && Number.isInteger(ibkrClientId)
+    && ibkrClientId >= 0
+    && Number.isFinite(ibkrMaxOrderNotional)
+    && ibkrMaxOrderNotional > 0
+    && (!ibkrLiveAccount || /^[A-Z0-9-]{4,32}$/.test(ibkrLiveAccount))
   )
   const sharedArgs = [
     '--host',
@@ -179,6 +224,16 @@ function runtimeLaunch({
           : {}),
       }
     : {}
+  const executionEnv = ibkrConfigured
+    ? {
+        IBKR_HOST: ibkrHost,
+        IBKR_CLIENT_ID: String(ibkrClientId),
+        IBKR_MAX_ORDER_NOTIONAL: String(ibkrMaxOrderNotional),
+        ...(ibkrLiveAccount
+          ? { IBKR_LIVE_ACCOUNT: ibkrLiveAccount }
+          : {}),
+      }
+    : {}
   if (app.isPackaged) {
     if (!resourcesPath) throw new Error('打包运行时目录不可用')
     const runtimeBinary = platform === 'win32'
@@ -194,6 +249,7 @@ function runtimeLaunch({
       cwd: userData,
       token,
       marketDataEnv,
+      executionEnv,
     }
   }
   const python = process.platform === 'win32'
@@ -205,6 +261,7 @@ function runtimeLaunch({
     cwd: projectRoot,
     token,
     marketDataEnv,
+    executionEnv,
   }
 }
 
@@ -286,6 +343,7 @@ function createLocalRuntimeProcess({
         env: {
           ...process.env,
           ...launch.marketDataEnv,
+          ...launch.executionEnv,
           MACOS_RESEARCH_RUNTIME_TOKEN: token,
         },
         stdio: ['ignore', 'pipe', 'pipe'],

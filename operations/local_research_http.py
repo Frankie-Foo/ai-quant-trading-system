@@ -13,6 +13,32 @@ from urllib.parse import parse_qs, urlparse
 from operations.local_research_runtime import LocalResearchRuntime
 
 
+def _safe_execution_error_code(error: Exception) -> str:
+    message = str(error).lower()
+    rules = (
+        (("multiple_accounts_require_selection",), "multiple_accounts_require_selection"),
+        (("configured_account_not_visible",), "account_mismatch"),
+        (("account_mismatch", "does not match"), "account_mismatch"),
+        (("not bound",), "account_not_bound"),
+        (("connection_timeout", "timed out", "timeout"), "connection_timeout"),
+        (("gateway", "not connected", "connection"), "connection_failed"),
+        (("read-only", "read only"), "api_read_only"),
+        (("confirmation",), "confirmation_mismatch"),
+        (("preview expired",), "preview_expired"),
+        (("warning changed",), "preview_changed"),
+        (("matching preview",), "preview_required"),
+        (("recovery", "status unknown", "unknown order"), "recovery_required"),
+        (("max_notional", "max order notional"), "max_notional_exceeded"),
+        (("long position",), "reduce_long_exceeds_position"),
+        (("duplicate", "active buy"), "duplicate_exposure"),
+        (("rejected", "ibkr_error_"), "broker_rejected"),
+    )
+    for needles, code in rules:
+        if any(needle in message for needle in needles):
+            return code
+    return "execution_failed"
+
+
 def build_local_research_http_server(
     runtime: LocalResearchRuntime,
     *,
@@ -20,7 +46,7 @@ def build_local_research_http_server(
     port: int,
     bearer_token: str,
 ) -> ThreadingHTTPServer:
-    """Build a loopback-only, non-executable runtime interface."""
+    """Build the authenticated loopback research and manual-execution interface."""
 
     if host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("macOS local research runtime must bind loopback")
@@ -50,6 +76,9 @@ def build_local_research_http_server(
                 return
             if path == "/v1/workflows":
                 self._send(HTTPStatus.OK, runtime.workflow_status())
+                return
+            if path == "/v1/execution":
+                self._send(HTTPStatus.OK, runtime.execution_snapshot())
                 return
             self._send(
                 HTTPStatus.NOT_FOUND,
@@ -104,6 +133,46 @@ def build_local_research_http_server(
                     return
                 self._send(HTTPStatus.ACCEPTED, runtime.start_monitor(trade_date))
                 return
+            if path == "/v1/execution/commands":
+                try:
+                    command = self._read_json_object()
+                    result = runtime.handle_execution(command)
+                except KeyError:
+                    self._send(
+                        HTTPStatus.BAD_REQUEST,
+                        {
+                            "error": "invalid_execution_command",
+                            "error_code": "invalid_execution_command",
+                            "orders_authorized": False,
+                        },
+                    )
+                    return
+                except ValueError as exc:
+                    error_code = _safe_execution_error_code(exc)
+                    if error_code == "execution_failed":
+                        error_code = "invalid_execution_command"
+                    self._send(
+                        HTTPStatus.BAD_REQUEST,
+                        {
+                            "error": error_code,
+                            "error_code": error_code,
+                            "orders_authorized": False,
+                        },
+                    )
+                    return
+                except Exception as exc:
+                    error_code = _safe_execution_error_code(exc)
+                    self._send(
+                        HTTPStatus.CONFLICT,
+                        {
+                            "error": error_code,
+                            "error_code": error_code,
+                            "orders_authorized": False,
+                        },
+                    )
+                    return
+                self._send(HTTPStatus.OK, result)
+                return
             self._send(
                 HTTPStatus.NOT_FOUND,
                 {"error": "route not found", "orders_authorized": False},
@@ -116,6 +185,22 @@ def build_local_research_http_server(
                 header[len(prefix) :],
                 bearer_token,
             )
+
+        def _read_json_object(self) -> dict[str, object]:
+            raw_length = self.headers.get("Content-Length", "")
+            try:
+                length = int(raw_length)
+            except ValueError as exc:
+                raise ValueError("request body length is invalid") from exc
+            if length <= 0 or length > 65_536:
+                raise ValueError("request body length is invalid")
+            try:
+                payload = json.loads(self.rfile.read(length))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError("request body must be valid JSON") from exc
+            if not isinstance(payload, dict):
+                raise ValueError("execution command must be a JSON object")
+            return {str(key): value for key, value in payload.items()}
 
         def _send(self, status: int, payload: dict[str, object]) -> None:
             body = json.dumps(

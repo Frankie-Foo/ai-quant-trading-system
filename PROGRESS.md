@@ -963,3 +963,36 @@ macOS client's fixed realtime market-data endpoint without committing credential
   strict mypy success across 253 source files, ten Electron tests passed, Vite
   production build succeeded, and tracked-file scans found zero supplied-key or
   supplied-secret matches.
+
+## M33 guarded IBKR live execution and Windows 0.2.0 package - 2026-08-03
+
+Status: implemented as an isolated, human-authorized live execution desk on the
+cross-platform research-client branch. Research, Agents, monitoring, and scheduled
+workflows still have no order authority.
+
+- Added an official `ibapi` adapter and a deep `ExecutionDesk` boundary restricted to
+  IBKR live port 4001, `STK/SMART/USD`, long-only `DAY LMT` orders, and a securely
+  bound single managed account. IBKR login, password, and MFA remain entirely inside
+  TWS / IB Gateway.
+- Added a fail-closed human workflow: live master switch, first-use masked account
+  binding, five-minute write arming, fresh position/open-order checks, broker What-If,
+  warning-bound dynamic confirmation, one-order-one-arm, persistent SQLite idempotency,
+  and explicit recovery for uncertain submissions. Disabling the local switch does
+  not cancel orders already held by IBKR.
+- A real read-only handshake to the configured Gateway on port 4001 succeeded. A real
+  AAPL one-share, one-dollar limit What-If request was accepted after normalizing the
+  current IB API order fields; write authority was never armed and no live order was
+  submitted.
+- IBKR information code 2107 is treated as a non-fatal historical-data-farm standby
+  notice. It means the broker channel reconnects when a historical request is made;
+  it is separate from the client's bundled Massive history and incremental sync.
+- Built the self-contained Windows 0.2.0 installer with a verified 1,771-dataset
+  bootstrap archive. The packaged runtime and bootstrap hashes match their build
+  outputs, and packaged-resource scans found no `.env`, imported profile, deprecated
+  paper module, username, or password file.
+- Repository acceptance: 512 Python tests passed, Ruff clean, strict mypy success
+  across 261 source files, 27 Electron tests passed, 11 UI tests passed, and the Vite
+  production build and Windows installer build succeeded.
+- Honest remaining production gaps: unique `conId` / primary-exchange contract
+  resolution, in-client cancel/modify commands, and continuous broker fill/order
+  reconciliation. Those gaps prevent calling this execution module fully mature.

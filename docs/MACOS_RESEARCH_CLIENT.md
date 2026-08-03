@@ -1,200 +1,175 @@
-# macOS 本地研究版客户端
+# macOS 本地研究客户端
 
 ## 定位
 
-这个发行版复制主系统的本地研究模式，而不是远程选股结果查看器。
+macOS 版与 Windows 版使用同一套研究与交互代码，不是远程结果查看器。Mac 本机负责：
 
-Mac 本机负责：
+- 增量同步 Massive、Alpaca SIP 和 SEC 研究输入；
+- 运行催化剂、纯因子、订单流、统一仲裁与确定性选股；
+- 运行盘中监控、证据答疑、三个只读研究 Agent 和收盘复盘；
+- 保存 accepted 快照、任务账本、复盘记录和执行账本；
+- 在独立页面提供人工 IBKR 实盘执行台。
 
-- 运行 `trading-system-v2` 的确定性选股内核；
-- 运行催化剂、纯因子、订单流与统一仲裁研究管线；
-- 保存不可变 accepted 数据快照、任务账本和复盘结果；
-- 运行收盘漏选归因与结构化复盘；
-- 调用用户自己的 OpenRouter Key 完成答疑和三个只读 Agent。
+这仍是工程验证版本，不应称为已经完全成熟的交易产品。研究结果不构成收益保证，用户
+仍需在 TWS / IB Gateway 中独立核对账户、挂单和成交。
 
-它明确不包含：
-
-- Alpaca Paper 或其他模拟盘；
-- 持仓、买入、卖出、止盈、止损和急停按钮；
-- 实盘连接或订单路由。
-
-IBKR Paper 只保留 fail-closed 的 Adapter 位置。实时行情使用固定 Alpaca SIP
-代理；历史日线、新闻和财务研究输入仍是独立能力。只有实时流时会明确显示
-`historical_research_inputs_missing`，不会用历史名单或测试数据伪造今日选股。
-
-## 架构
+## 两个严格隔离的平面
 
 ```mermaid
 flowchart LR
-    A["Electron macOS 客户端"] --> B["本机 PyInstaller Research Runtime"]
-    B --> C["kernel / research / schedule"]
-    C --> D["本机 accepted 快照"]
-    C --> E["本机任务账本与自动复盘"]
-    F["固定 Alpaca SIP 代理"] --> B
-    I["历史 / 新闻 / 财务 Adapter"] -. "待配置" .-> C
-    G["用户自己的 OpenRouter Key"] --> A
-    H["IBKR Paper Adapter"] -. "预留且禁止下单" .-> A
+    A["Electron 客户端"] --> B["本机 Python sidecar"]
+    B --> C["研究面：data_plane / kernel / research / schedule"]
+    C --> D["accepted 快照、任务账本与复盘"]
+    E["Massive / Alpaca SIP / SEC"] --> C
+    F["OpenRouter"] --> A
+
+    A -->|"仅用户手工操作"| G["隔离的 IBKR 人工执行台"]
+    G -->|"固定 4001"| H["已登录的 TWS / IB Gateway 实盘会话"]
+    C -. "没有调用权限" .-> G
 ```
 
-Electron 启动时会拉起随 App 分发的原生 Python sidecar。sidecar 只绑定随机
-loopback 端口，Electron 为每次启动生成 256-bit 临时令牌；令牌不落盘、不进日志。
-本地接口只提供：
+研究面始终保持 `orders_authorized=false`。选股、监控、自动复盘、答疑和 Agent 只能
+生成研究证据，不能构造或提交 IBKR 指令。人工执行台使用独立命令入口、独立状态机和
+SQLite 幂等账本；它不会被定时任务、研究结果或模型输出自动触发。
 
-- `GET /v1/health`
-- `GET /v1/desk`
-- `POST /v1/run-due`
+## 研究能力与数据
 
-其他 POST 路由统一返回 404，不存在订单端点。
+固定 Alpaca SIP 代理提供实时 quote、trade 和 minute bar。Massive 提供历史日线与
+新闻，SEC 联系信息用于合规访问公开申报数据。缺少历史、新闻、财务或实时证据时，
+对应流程会显示明确阻断原因，不会用旧名单、测试数据或补值生成新的确定性结论。
 
-## 本地文件
-
-App 的用户目录内维护两个互相分离的目录：
-
-```text
-~/Library/Application Support/AI量化研究台/
-├── research-data/       # accepted / quarantined 快照
-├── research-runs/       # jobs.sqlite3、锁、复盘与成熟度证据
-└── research-settings.json
-```
-
-`research-settings.json` 只保存模型 ID 和密文。OpenRouter Key、代理行情 Key
-和 Secret 由 Electron `safeStorage` 使用 macOS Keychain 加密；渲染进程只能
-看到“已配置”状态。
+发行包必须携带经过哈希校验的 `research-bootstrap.zip`。首次运行会把 bootstrap 中的
+accepted 存量快照复制到用户数据目录，之后只同步增量。bootstrap 不包含 API Key，
+缺失或校验失败会让打包过程直接停止。盘前分钟历史不在 bootstrap 中；今日选股会按
+锁定候选和最近 20 个历史会话从 Alpaca 代理下载，并复用本机缓存。
 
 ## 首次启动
 
-首次打开分两步：
+1. 打开安装后的 App，填写自己的 OpenRouter Key、Massive Key、Alpaca SIP 代理
+   Key/Secret 和 SEC 联系信息。
+2. 完成连接验证，为研究答疑、催化剂、红队和证据监督角色选择模型。
+3. 在“数据源状态”确认 bootstrap 已加载，再运行“同步数据”。
+4. 点击“运行今日选股”；流程会先增量同步，再构建选股快照，并在满足条件时启动盘中
+   监控。
+5. 收盘后运行复盘；答疑和 Agent 只引用带时间、日期和过期标记的本机证据。
 
-1. 本地研究内核启动自检，用户填写自己的 OpenRouter API Key 和代理行情凭据；
-2. 分别为答疑、催化剂 Agent、红队 Agent和证据审计 Agent 选择模型。
+OpenRouter Key 只负责模型调用，不能替代行情或研究数据。所有凭据均由 Electron 主
+进程读取，不会写死在源码或安装包中。
 
-不再要求公网选股服务地址或数据访问令牌。
+## 人工 IBKR 实盘执行
 
-OpenRouter Key 只负责模型调用，不能替代行情源。代理行情凭据验证通过后：
+人工执行台只连接已经登录的 TWS 或 IB Gateway，端口固定为实盘 `4001`。应用不接收
+也不保存 IBKR 用户名和密码。
 
-- 固定连接 `wss://alpaca-trade-api.vertu.cn/v2/sip`；
-- 验证 AAPL 的 quote、trade 与 minute bar 订阅；
-- 实时盯盘能力标记为 ready；
-- 历史、新闻或财务输入未齐全时，完整选股仍固定为阻断；
-- 复盘只展示本机已有、可验证且带日期的 accepted 证据；
-- 三个 Agent 必须说明行情缺失，不能产生买卖建议或虚构今日名单。
+首次使用：
 
-## 行情 Adapter seam
+1. 在 TWS / IB Gateway 中启用 Socket API，确认实盘 API 端口为 `4001`。
+2. 在客户端设置页填写主机、Client ID 和单笔最大名义金额；通常主机为
+   `127.0.0.1`。
+3. 打开交易页的实盘总开关。启动或重启客户端后该开关始终默认为关闭。
+4. 首次连接时，程序读取 TWS 可见账户。只有一个账户可见时才能进入首次绑定；多个
+   账户会失败关闭，不能自动挑选其中一个。
+5. 核对脱敏账户并输入绑定确认文字。完整账户 ID 由主进程通过系统安全存储加密保存，
+   后续连接必须严格匹配。
+6. 重新连接，输入临时写权限确认文字；写权限有短时有效期，并在提交一次、断开或重启
+   后关闭。
+7. 手工填写股票、方向、股数和限价，生成预览。预览会先调用 IBKR What-If，并显示
+   佣金、保证金变化和警告。
+8. 再次核对 `OpenLong` 或 `ReduceLong`、股数、限价和账户脱敏值，输入动态确认文字
+   后才可提交。
 
-代码 seam 位于：
+执行台只接受：
 
-- `operations/local_research_runtime.py`
-- `MarketDataAdapter`
+- `OpenLong`：开多；
+- `ReduceLong`：减多或平多，且会核对当前多头持仓及未完成卖单；
+- `STK / SMART / USD`；
+- `DAY LMT` 限价单。
 
-现有三个 Adapter：
+每次预览和提交都会重新核对账户证据。单笔名义金额超过配置上限时失败关闭；同一标的
+已有活动买单时不会继续创建第二笔开多。客户端订单号、IBKR `orderRef` 和本机 SQLite
+账本共同提供幂等保护。若提交响应超时或状态无法确定，记录会进入 `unknown`，整个新单
+流程进入 `recovery_required`；用户必须先运行“核对未知订单”，系统不会盲目重发。
 
-1. `UnconfiguredMarketDataAdapter`：默认启用，永远 fail-closed；
-2. `EnvironmentMarketDataAdapter`：兼容当前 Massive 加云行情管线，但发行版
-   尚未提供配置入口，也不会自动启用；
-3. `AlpacaProxyMarketDataAdapter`：使用固定代理地址，真实探测认证和三类 SIP
-   订阅，只声明实时能力，不冒充完整研究数据源。底层
-   `AlpacaProxySipStream.events()` 持续输出系统已有的 `SipQuote`、`SipTrade`
-   和 `SipBar` 类型，可直接接现有 SIP store 与盘中监控。
+详细边界和排错见 [IBKR 人工实盘执行台](IBKR_LIVE_EXECUTION.md)。
 
-以后补 Massive、IBKR 或团队历史数据接口时，只需新增/启用 Adapter；
-Electron、选股内核、复盘和 Agent 界面无需重写。
+## 必须知道的限制
 
-当前兼容 Adapter 要求：
+当前客户端不支持：
+
+- IBKR 模拟盘或端口 `4002`；
+- 卖空、期权、期货、外汇或其他资产；
+- 市价单、盘前盘后单、GTC、括号单和自动止盈止损；
+- 由选股、Agent、监控或复盘自动下单；
+- 在客户端修改或撤销已经提交的订单；
+- 自动处理多个 IBKR 账户。
+
+关闭实盘总开关、退出客户端、修改配置或清除账户绑定，只会禁止新委托并断开 API。
+这些操作**不会撤销已经到达 IBKR 的订单**。提交过订单后，必须在 TWS / IB Gateway
+核对其最终状态；需要撤单时也必须在官方客户端完成。
+
+## 本地文件与安全
 
 ```text
-MASSIVE_API_KEY
-CLOUD_PLATFORM_BASE_URL
-CLOUD_MARKET_DATA_API_TOKEN
-SEC_USER_AGENT
+~/Library/Application Support/AI量化研究台/
+├── research-data/          # accepted / quarantined 快照
+├── research-runs/          # jobs.sqlite3、执行账本、锁、复盘与成熟度证据
+└── research-settings.json  # 模型 ID、公开状态和系统安全存储密文
 ```
 
-固定实时代理 Adapter 从 Electron 的安全存储注入：
+OpenRouter、Massive、Alpaca 和 IBKR 账户绑定信息由 Electron `safeStorage` 使用
+macOS Keychain 加密。渲染进程只能接收白名单字段和脱敏账户值。本地 sidecar 只绑定
+随机 loopback 端口，并使用每次启动重新生成、不会落盘的临时 Bearer Token。
 
-```text
-ALPACA_PROXY_KEY
-ALPACA_PROXY_SECRET
-```
+研究 HTTP 路由与人工执行路由共用本地 sidecar，但权限边界不同。执行相关接口只有：
 
-代理 URL 写死在程序中，Key/Secret 不写死。把凭据直接编译进公开安装包等同于
-公开凭据，因此客户端只允许 Keychain 解密后通过子进程环境传递。
+- `GET /v1/execution`：读取脱敏执行状态；
+- `POST /v1/execution/commands`：接受经过主进程白名单校验的人工命令。
 
-状态接口只返回缺少的变量名称，永远不返回变量值。
+不能把 `.env`、`quant.env`、Key、`research-settings.json` 或包含账户信息的执行数据库
+提交到 Git 或打进公开安装包。
 
-## 自动执行
+## 常见连接问题
 
-sidecar 每 60 秒调用一次深模块 `ScheduledResearchPipeline.run_due()`。
-这个接口隐藏完整的盘前与盘后 DAG，内部复用：
-
-- `schedule.premarket`
-- `schedule.postmarket`
-- 既有 `data_plane/`、`kernel/`、`research/` 和 `scripts/`
-
-任务账本、进程锁和 accepted 快照保证重复轮询幂等。只有实时 SIP 而缺少完整
-研究输入时，调用在进入选股 DAG 前被阻断，`orders_submitted` 始终为 0。
-
-## OpenRouter 与三个 Agent
-
-四个模型角色相互独立：
-
-- 研究答疑；
-- 催化剂 Agent；
-- 红队 Agent；
-- 证据审计 Agent。
-
-模型目录来自 OpenRouter 官方
-`GET /api/v1/models?output_modalities=text`，回答使用
-`POST /api/v1/chat/completions`。所有模型请求都由 Electron 主进程发出。
-
-官方资料：
-
-- <https://openrouter.ai/docs/api/api-reference/models/get-models>
-- <https://openrouter.ai/docs/api/api-reference/chat/send-chat-completion-request>
-
-## IBKR Paper 预留
-
-预留代码位于：
-
-`client/electron/analyst/ibkr-paper.cjs`
-
-`connect()` 与 `placeOrder()` 当前都会失败。后续接入必须单独完成账户核对、
-幂等订单、成交对账、断线恢复和 Paper 前向验收，验收前研究版 UI 不出现订单控件。
-
-IBKR 官方资料：
-
-- <https://ibkrcampus.com/campus/ibkr-api-page/cpapi-v1/>
-- <https://ibkrcampus.com/campus/ibkr-api-page/twsapi-doc/>
+- 连接 `4001` 失败：确认打开的是实盘 TWS / IB Gateway、Socket API 已启用、端口确实
+  为 `4001`，主机和 Client ID 正确，并检查防火墙与 TWS 的受信任 IP 设置。
+- `502`：通常表示无法连接 TWS / IB Gateway。先确认官方客户端已登录并完成所有弹窗，
+  再核对端口和 API 设置；不要反复点击提交。
+- `2107`：表示 IBKR 历史数据通道正在待命，发起历史请求时会自动连接。它与安装包预置
+  的 Massive 本地历史库是两条独立链路；适配器把它视为信息，不等于缺少历史数据或
+  订单被拒绝。仍应结合连接状态和后续明确错误判断。
+- `multiple_accounts_require_selection`：TWS 暴露了多个账户，当前版本会失败关闭；请勿
+  猜测或让程序自动选第一个账户。
+- `recovery_required`：存在提交结果不确定的订单。先在 TWS 核对，再使用客户端恢复
+  功能；不要创建新客户端订单号绕过。
 
 ## 本地开发
 
-```powershell
-Set-Location client
+```bash
+cd client
 npm ci
 npm run test:electron
+npm run test:ui
 npm run desktop:analyst
 ```
 
-开发模式使用仓库 `.venv`。Electron 启动和关闭时会共同管理本地 sidecar，
-不会启动 Paper 监控。
+开发模式使用仓库 `.venv`。Electron 启动和关闭时管理本地 sidecar，但关闭 sidecar
+不会撤销券商挂单。
 
-## macOS 自包含构建
+## Apple Silicon 自包含构建
 
-CI 在 ARM64 与 Intel 原生 runner 上分别构建 PyInstaller sidecar，再由
-Electron Builder 生成对应架构的 DMG/ZIP：
+当前发布流程只构建 Apple Silicon（M 系列）版本。构建前必须准备 bootstrap：
 
 ```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
 python -m pip install -r requirements-macos-research.txt
 cd client
 npm ci
-npm run build
-npm run test:electron
-npm run icon:mac
-npm run runtime:mac
-npx electron-builder --config electron-builder.analyst.yml --mac dmg zip --arm64
+BOOTSTRAP_ARCHIVE=/absolute/path/research-bootstrap.zip \
+  npm run dist:mac:analyst -- --arm64
 ```
 
-GitHub workflow：
-
-`.github/workflows/macos-research-client.yml`
-
-默认 CI 产物未签名，只用于工程验收。正式交付仍需要 Developer ID Application
-签名、notarization、stapling 和另一台干净 Mac 的 Gatekeeper 验收。
+输出位于 `client/release-macos-analyst/`。测试产物默认未做 Developer ID 签名、
+notarization 和 stapling，只适合工程验收；正式分发前仍需完成签名、公证和另一台干净
+Mac 的 Gatekeeper 验收。跨平台完整命令见
+[客户端构建说明](CROSS_PLATFORM_DESKTOP_BUILD.md)。

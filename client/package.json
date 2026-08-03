@@ -1,8 +1,8 @@
 {
   "name": "adaptive-trading-client",
   "private": true,
-  "version": "0.1.5",
-  "description": "Read-only evidence-backed U.S. equity research desktop",
+  "version": "0.2.0",
+  "description": "Evidence-backed U.S. equity research desktop with isolated manual IBKR live execution",
   "author": "Trading System v2",
   "type": "module",
   "main": "electron/main.cjs",
