@@ -423,6 +423,33 @@ class PaperResponsiveClient(ResponsiveClient):
         ]
 
 
+class SingleArgumentCancelPaperClient(PaperResponsiveClient):
+    def cancelOrder(self, order_id: int) -> None:  # type: ignore[override]
+        self.live_orders = [
+            item for item in self.live_orders if item[0] != order_id
+        ]
+
+
+class CancelledEchoPaperClient(PaperResponsiveClient):
+    def cancelOrder(self, order_id: int, manual_cancel_time: str) -> None:
+        assert manual_cancel_time == ""
+        self.live_orders = [
+            (
+                existing_id,
+                contract,
+                order,
+                SimpleNamespace(
+                    commission=1.1,
+                    initMarginChange="400",
+                    warningText="",
+                    status="Cancelled",
+                ),
+            )
+            for existing_id, contract, order, _state in self.live_orders
+            if existing_id == order_id
+        ]
+
+
 def test_official_paper_adapter_returns_account_values_and_submits_only_to_paper() -> None:
     clients: list[PaperResponsiveClient] = []
 
@@ -461,6 +488,68 @@ def test_official_paper_adapter_returns_account_values_and_submits_only_to_paper
     assert sent.outsideRth is True
     assert sent.orderType == "LMT"
     assert sent.eTradeOnly is False
+    assert adapter.cancel_order(submitted.order_id) is True
+    adapter.disconnect()
+
+
+def test_official_paper_adapter_supports_one_argument_cancel_order_clients() -> None:
+    clients: list[SingleArgumentCancelPaperClient] = []
+
+    def factory(wrapper: Any) -> SingleArgumentCancelPaperClient:
+        client = SingleArgumentCancelPaperClient(wrapper)
+        clients.append(client)
+        return client
+
+    adapter = OfficialIbapiPaperAdapter(
+        connect_timeout=0.2,
+        request_timeout=0.2,
+        expected_account_id="DU7654321",
+        client_factory=factory,
+    )
+    adapter.connect(host="127.0.0.1", port=4002, client_id=91)
+    submitted = adapter.submit_order_command(
+        IbkrOrderCommand(
+            account_id="DU7654321",
+            symbol="AAPL",
+            side="BUY",
+            quantity=1,
+            order_type="LMT",
+            limit_price=Decimal("1"),
+            order_ref="aiq-paper-one-argument-cancel",
+        )
+    )
+
+    assert adapter.cancel_order(submitted.order_id) is True
+    adapter.disconnect()
+
+
+def test_cancelled_terminal_echo_confirms_cancellation() -> None:
+    clients: list[CancelledEchoPaperClient] = []
+
+    def factory(wrapper: Any) -> CancelledEchoPaperClient:
+        client = CancelledEchoPaperClient(wrapper)
+        clients.append(client)
+        return client
+
+    adapter = OfficialIbapiPaperAdapter(
+        connect_timeout=0.2,
+        request_timeout=0.2,
+        expected_account_id="DU7654321",
+        client_factory=factory,
+    )
+    adapter.connect(host="127.0.0.1", port=4002, client_id=91)
+    submitted = adapter.submit_order_command(
+        IbkrOrderCommand(
+            account_id="DU7654321",
+            symbol="AAPL",
+            side="BUY",
+            quantity=1,
+            order_type="LMT",
+            limit_price=Decimal("1"),
+            order_ref="aiq-paper-cancelled-echo",
+        )
+    )
+
     assert adapter.cancel_order(submitted.order_id) is True
     adapter.disconnect()
 

@@ -615,7 +615,23 @@ class OfficialIbapiAdapter:
         if order_id <= 0:
             raise ValueError("IBKR order id must be positive")
         client, callbacks = self._require_connection()
-        self._call_bounded("cancel_order_send", client.cancelOrder, order_id, "")
+        try:
+            self._call_bounded(
+                "cancel_order_send",
+                client.cancelOrder,
+                order_id,
+                "",
+            )
+        except TypeError:
+            # The installed official ``ibapi`` package exposes either the
+            # documented two-argument signature or the older one-argument
+            # signature.  Both cancel the same API-owned order; no fallback
+            # can submit or mutate another order ID.
+            self._call_bounded(
+                "cancel_order_send_legacy",
+                client.cancelOrder,
+                order_id,
+            )
         with callbacks.lock:
             callbacks.open_orders = {}
             callbacks.open_orders_done.clear()
@@ -623,7 +639,17 @@ class OfficialIbapiAdapter:
         if not callbacks.open_orders_done.wait(self.request_timeout):
             raise TimeoutError("cancel_recovery_timeout")
         with callbacks.lock:
-            return order_id not in callbacks.open_orders
+            state = callbacks.open_orders.get(order_id)
+        if state is None:
+            return True
+        # Some TWS/Gateway versions echo a terminal order in the response to
+        # ``reqAllOpenOrders`` immediately after cancellation.  A terminal echo
+        # is confirmation, whereas a pending/unknown state must remain false.
+        return self._normalize_status(str(state.get("status", ""))) in {
+            "cancelled",
+            "filled",
+            "rejected",
+        }
 
     def what_if(self, request: BrokerOrderRequest) -> BrokerWhatIf:
         client, callbacks = self._require_connection()
