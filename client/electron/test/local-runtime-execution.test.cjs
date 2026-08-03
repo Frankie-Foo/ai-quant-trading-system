@@ -1,9 +1,11 @@
 const assert = require('node:assert/strict')
+const { EventEmitter } = require('node:events')
 const path = require('node:path')
 const test = require('node:test')
 
 const {
   createLocalRuntimeClient,
+  createLocalRuntimeProcess,
   runtimeLaunch,
 } = require('../analyst/local-runtime.cjs')
 
@@ -14,6 +16,47 @@ function jsonResponse(payload, status = 200) {
     json: async () => payload,
   }
 }
+
+test('local runtime respawns after its child exits', async () => {
+  let spawns = 0
+  let latestChild
+  const client = {
+    connect: () => {},
+    status: async () => ({ local_execution: true }),
+  }
+  const runtime = createLocalRuntimeProcess({
+    app: {
+      isPackaged: false,
+      getPath: () => 'C:\\Users\\research\\AppData\\Roaming\\AIQuant',
+    },
+    projectRoot: 'C:\\project',
+    client,
+    spawnImpl: () => {
+      const child = new EventEmitter()
+      child.stdout = new EventEmitter()
+      child.stderr = new EventEmitter()
+      child.killed = false
+      child.kill = () => { child.killed = true }
+      latestChild = child
+      spawns += 1
+      queueMicrotask(() => {
+        child.stdout.emit('data', Buffer.from(JSON.stringify({
+          schema_version: 'macos_local_research_handshake.v1',
+          url: `http://127.0.0.1:${54000 + spawns}`,
+          local_execution: true,
+          orders_authorized: false,
+        }) + '\n'))
+      })
+      return child
+    },
+  })
+
+  await runtime.start()
+  latestChild.emit('exit', 1)
+  await runtime.start()
+
+  assert.equal(spawns, 2)
+})
 
 test('local runtime client sends authenticated JSON execution commands', async () => {
   const requests = []

@@ -1080,3 +1080,22 @@ the automation never falls back to live 4001.
 - Windows packaging uses the project virtual environment explicitly, not a caller’s
   system Python. A local unsigned 0.2.1 installer is built after this milestone;
   its bundled runtime hash is checked against the source runtime before handoff.
+
+## M37 desktop exchange-clock routing and runtime recovery - 2026-08-03
+
+Status: the desktop now separates selection from review by the XNYS clock and
+keeps an old review from being mistaken for current selection evidence.
+
+- Selection is the only runnable workflow from Beijing 20:00 (US Eastern 08:00)
+  through the current XNYS close. Post-close review opens 20 minutes after close.
+  Other times are waiting states; the client disables the wrong button and states
+  the next allowed workflow.
+- Scheduler dispatches exactly one due stage. It no longer starts both the
+  premarket and postmarket DAGs on each 15-second tick. A review receives the
+  completed session date, never the next selection date.
+- Read-only desktop status calls recover a stopped local runtime once, with one
+  shared restart. Order, execution, and automatic-trading commands are never retried.
+  A child-process exit clears its stale handle so the next start spawns a fresh runtime.
+- Acceptance: 539 Python tests passed in 39.29 seconds; Ruff clean; strict mypy
+  passed across 193 production source files; 33 Electron tests, 12 UI tests, and
+  Vite production build passed. No Paper or live order was submitted.

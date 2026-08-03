@@ -12,7 +12,7 @@ from typing import Protocol
 from pydantic import SecretStr
 
 from data_plane.providers.alpaca_proxy import probe_alpaca_proxy_sip
-from operations.client_desk import TradingDeskEvidence
+from operations.client_desk import TradingDeskEvidence, market_phase
 from operations.desktop_workflows import DesktopWorkflowManager
 
 MARKET_DATA_REQUIREMENTS = (
@@ -344,30 +344,47 @@ class ScheduledResearchPipeline:
             "--state-db",
             str(runs_root / "jobs.sqlite3"),
         ]
-        premarket_code = run_premarket(
-            [
-                *shared,
-                "--lock-file",
-                str(runs_root / "premarket.lock"),
-            ],
-            now_utc=now_utc,
+        phase = market_phase(now_utc)
+        if phase["kind"] == "selection":
+            premarket_code = run_premarket(
+                [
+                    *shared,
+                    "--lock-file",
+                    str(runs_root / "premarket.lock"),
+                ],
+                now_utc=now_utc,
+            )
+            postmarket_code: int | None = None
+        elif phase["kind"] == "post_close_review":
+            trade_date = str(phase["trade_date"])
+            premarket_code = None
+            postmarket_code = run_postmarket(
+                [
+                    *shared,
+                    "--lock-file",
+                    str(runs_root / "postmarket.lock"),
+                    "--llm-mode",
+                    "off",
+                    "--trade-date",
+                    trade_date,
+                ]
+            )
+        else:
+            premarket_code = None
+            postmarket_code = None
+        codes = [code for code in (premarket_code, postmarket_code) if code is not None]
+        status = (
+            "waiting"
+            if not codes
+            else "complete" if all(code == 0 for code in codes) else "failed"
         )
-        postmarket_code = run_postmarket(
-            [
-                *shared,
-                "--lock-file",
-                str(runs_root / "postmarket.lock"),
-                "--llm-mode",
-                "off",
-            ]
-        )
-        status = "complete" if premarket_code == 0 and postmarket_code == 0 else "failed"
         return {
             "schema_version": "macos_local_research_tick.v1",
             "status": status,
             "observed_at_utc": now_utc.isoformat(),
             "premarket_exit_code": premarket_code,
             "postmarket_exit_code": postmarket_code,
+            "market_phase": phase,
             "orders_submitted": 0,
         }
 
@@ -416,6 +433,7 @@ class LocalResearchRuntime:
             "research_kernel": "trading-system-v2",
             "market_data": self.market_data.status(),
             "workflows": self.workflows.status(),
+            "market_phase": market_phase(observed_at),
             "bootstrap": dict(self.bootstrap_status),
             "orders_authorized": False,
             "paper_runtime_authorized": False,
@@ -472,7 +490,37 @@ class LocalResearchRuntime:
     def workflow_status(self) -> dict[str, object]:
         return self.workflows.status()
 
-    def submit_workflow(self, action: str, trade_date: date) -> dict[str, object]:
+    def submit_workflow(
+        self,
+        action: str,
+        trade_date: date,
+        observed_at_utc: datetime | None = None,
+    ) -> dict[str, object]:
+        observed_at = observed_at_utc or datetime.now(UTC)
+        _require_utc(observed_at)
+        phase = market_phase(observed_at)
+        if action in {"run_selection", "run_today"} and phase["kind"] != "selection":
+            return {
+                "accepted": False,
+                "reason": "selection_not_open",
+                "market_phase": phase,
+                "orders_submitted": 0,
+            }
+        if action == "run_review" and phase["kind"] != "post_close_review":
+            return {
+                "accepted": False,
+                "reason": "review_not_open",
+                "market_phase": phase,
+                "orders_submitted": 0,
+            }
+        phase_date = phase.get("trade_date")
+        if phase_date is not None and trade_date.isoformat() != phase_date:
+            return {
+                "accepted": False,
+                "reason": "workflow_trade_date_mismatch",
+                "market_phase": phase,
+                "orders_submitted": 0,
+            }
         market_data = self.market_data.status()
         if market_data.get("can_run_pipeline") is not True:
             return {
@@ -494,7 +542,7 @@ class LocalResearchRuntime:
                 "data_inventory": inventory,
                 "orders_submitted": 0,
             }
-        return self.workflows.submit(action, trade_date=trade_date)
+        return {**self.workflows.submit(action, trade_date=trade_date), "market_phase": phase}
 
     def start_monitor(self, trade_date: date) -> dict[str, object]:
         market_data = self.market_data.status()

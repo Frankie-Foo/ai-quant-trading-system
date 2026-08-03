@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import json
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import cast
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+import pytest
+
+from operations.client_desk import market_phase
+from operations.desktop_workflows import DesktopWorkflowManager
 from operations.local_research_http import build_local_research_http_server
 from operations.local_research_runtime import (
     AlpacaProxyMarketDataAdapter,
     EnvironmentMarketDataAdapter,
     LocalResearchRuntime,
+    ScheduledResearchPipeline,
     StandaloneMarketDataAdapter,
     UnconfiguredMarketDataAdapter,
 )
@@ -86,6 +92,21 @@ class _RecordingPaperAutopilot:
     def handle(self, command: dict[str, object]) -> dict[str, object]:
         self.commands.append(dict(command))
         return {**self.snapshot(), "connected": command.get("kind") == "connect"}
+
+
+class _ReadyWorkflows:
+    def __init__(self) -> None:
+        self.submissions: list[tuple[str, date]] = []
+
+    def status(self) -> dict[str, object]:
+        return {}
+
+    def data_inventory(self) -> dict[str, object]:
+        return {"ready_for_selection": True}
+
+    def submit(self, action: str, *, trade_date: date) -> dict[str, object]:
+        self.submissions.append((action, trade_date))
+        return {"accepted": True, "orders_submitted": 0}
 
 
 def test_unconfigured_local_runtime_is_honest_and_fail_closed(
@@ -249,6 +270,106 @@ def test_configured_local_runtime_delegates_once_to_pipeline(
     assert result["status"] == "complete"
     assert result["orders_submitted"] == 0
     assert pipeline.calls == 1
+
+
+def test_market_phase_separates_selection_review_and_waiting() -> None:
+    selection = market_phase(datetime(2026, 8, 3, 12, 5, tzinfo=UTC))
+    review = market_phase(datetime(2026, 7, 31, 20, 21, tzinfo=UTC))
+    waiting = market_phase(datetime(2026, 8, 3, 11, 30, tzinfo=UTC))
+
+    assert selection["kind"] == "selection"
+    assert selection["trade_date"] == "2026-08-03"
+    assert review["kind"] == "post_close_review"
+    assert review["trade_date"] == "2026-07-31"
+    assert waiting["kind"] == "waiting"
+
+
+def test_scheduler_runs_only_one_exchange_clock_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import schedule.postmarket as postmarket
+    import schedule.premarket as premarket
+
+    calls: list[tuple[str, list[str]]] = []
+
+    def run_selection(argv: list[str], *, now_utc: datetime) -> int:
+        del now_utc
+        calls.append(("selection", argv))
+        return 0
+
+    def run_review(argv: list[str]) -> int:
+        calls.append(("review", argv))
+        return 0
+
+    monkeypatch.setattr(
+        premarket,
+        "run",
+        run_selection,
+    )
+    monkeypatch.setattr(
+        postmarket,
+        "run",
+        run_review,
+    )
+    pipeline = ScheduledResearchPipeline()
+
+    selection = pipeline.run_due(
+        now_utc=datetime(2026, 8, 3, 12, 5, tzinfo=UTC),
+        data_root=tmp_path / "data",
+        runs_root=tmp_path / "runs",
+    )
+    review = pipeline.run_due(
+        now_utc=datetime(2026, 7, 31, 20, 21, tzinfo=UTC),
+        data_root=tmp_path / "data",
+        runs_root=tmp_path / "runs",
+    )
+
+    selection_phase = selection["market_phase"]
+    assert isinstance(selection_phase, dict)
+    assert selection_phase["kind"] == "selection"
+    assert selection["premarket_exit_code"] == 0
+    assert selection["postmarket_exit_code"] is None
+    review_phase = review["market_phase"]
+    assert isinstance(review_phase, dict)
+    assert review_phase["kind"] == "post_close_review"
+    assert review["premarket_exit_code"] is None
+    assert review["postmarket_exit_code"] == 0
+    assert [name for name, _ in calls] == ["selection", "review"]
+    assert "2026-07-31" in calls[-1][1]
+
+
+def test_runtime_rejects_selection_outside_its_exchange_window(tmp_path: Path) -> None:
+    workflows = _ReadyWorkflows()
+    runtime = LocalResearchRuntime(
+        data_root=tmp_path / "data",
+        runs_root=tmp_path / "runs",
+        market_data=EnvironmentMarketDataAdapter(
+            environ={
+                "MASSIVE_API_KEY": "configured",
+                "CLOUD_PLATFORM_BASE_URL": "https://market.example.com",
+                "CLOUD_MARKET_DATA_API_TOKEN": "configured",
+                "SEC_USER_AGENT": "Research User research@example.com",
+            }
+        ),
+        workflows=cast(DesktopWorkflowManager, workflows),
+    )
+
+    blocked = runtime.submit_workflow(
+        "run_today",
+        date(2026, 8, 3),
+        datetime(2026, 8, 3, 11, 30, tzinfo=UTC),
+    )
+    accepted = runtime.submit_workflow(
+        "run_today",
+        date(2026, 8, 3),
+        datetime(2026, 8, 3, 12, 5, tzinfo=UTC),
+    )
+
+    assert blocked["accepted"] is False
+    assert blocked["reason"] == "selection_not_open"
+    assert accepted["accepted"] is True
+    assert workflows.submissions == [("run_today", date(2026, 8, 3))]
 
 
 def _http_json(

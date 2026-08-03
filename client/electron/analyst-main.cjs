@@ -27,6 +27,7 @@ const openRouter = createOpenRouterClient()
 let settingsStore
 let localRuntime
 let projectRoot
+let runtimeRecovery
 
 function marketDataFromSecrets(secrets) {
   return {
@@ -199,13 +200,41 @@ async function restartLocalRuntime(marketData = {}) {
   return localRuntime.start()
 }
 
+function runtimeUnavailable(error) {
+  const message = String(error?.message || '')
+  return error?.name === 'TimeoutError'
+    || message === 'fetch failed'
+    || message.includes('operation was aborted due to timeout')
+}
+
+async function recoverLocalRuntime() {
+  if (!runtimeRecovery) {
+    runtimeRecovery = restartLocalRuntime(runtimeConfiguration(
+      settingsStore.loadSecrets(),
+      settingsStore.loadExecutionSecrets(),
+      settingsStore.loadPaperExecutionSecrets(),
+    )).finally(() => { runtimeRecovery = null })
+  }
+  return runtimeRecovery
+}
+
+async function readLocalRuntime(read) {
+  try {
+    return await read(localRuntime.client)
+  } catch (error) {
+    if (!runtimeUnavailable(error)) throw error
+    await recoverLocalRuntime()
+    return read(localRuntime.client)
+  }
+}
+
 function requireConfiguredSettings() {
   const settings = settingsStore.loadPublic()
   if (!settings.configured) throw new Error('请先完成首次配置')
   return settings
 }
 
-const fetchDesk = () => localRuntime.client.fetchDesk()
+const fetchDesk = () => readLocalRuntime((client) => client.fetchDesk())
 
 function registerHandlers() {
   ipcMain.handle('analyst:settings:get', () => settingsStore.loadPublic())
@@ -352,10 +381,12 @@ function registerHandlers() {
   })
 
   ipcMain.handle('analyst:desk:get', () => fetchDesk())
-  ipcMain.handle('analyst:runtime:status', () => localRuntime.client.status())
+  ipcMain.handle('analyst:runtime:status', () => (
+    readLocalRuntime((client) => client.status())
+  ))
   ipcMain.handle('analyst:runtime:run-due', () => localRuntime.client.runDue())
   ipcMain.handle('analyst:workflows:status', () => (
-    localRuntime.client.workflowStatus()
+    readLocalRuntime((client) => client.workflowStatus())
   ))
   ipcMain.handle('analyst:workflows:start', (_event, payload) => (
     localRuntime.client.startWorkflow(
@@ -370,7 +401,9 @@ function registerHandlers() {
     localRuntime.client.stopMonitor()
   ))
   ipcMain.handle('analyst:execution:snapshot', async () => (
-    sanitizeExecutionSnapshot(await localRuntime.client.executionSnapshot())
+    sanitizeExecutionSnapshot(
+      await readLocalRuntime((client) => client.executionSnapshot()),
+    )
   ))
   ipcMain.handle('analyst:execution:command', async (_event, command) => {
     const normalized = normalizeExecutionCommand(command)
@@ -415,7 +448,7 @@ function registerHandlers() {
 
   ipcMain.handle('analyst:paper-autopilot:snapshot', async () => (
     sanitizePaperAutopilotSnapshot(
-      await localRuntime.client.paperAutopilotSnapshot(),
+      await readLocalRuntime((client) => client.paperAutopilotSnapshot()),
     )
   ))
   ipcMain.handle('analyst:paper-autopilot:command', async (_event, command) => {

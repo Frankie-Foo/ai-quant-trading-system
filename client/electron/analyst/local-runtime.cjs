@@ -394,7 +394,14 @@ function createLocalRuntimeProcess({
     client,
 
     async start() {
-      if (child) return client.status()
+      if (child) {
+        try {
+          return await client.status()
+        } catch {
+          terminateRuntimeProcess(child, { platform, spawnSyncImpl })
+          child = null
+        }
+      }
       cleanupOrphanedWindowsRuntimes({
         platform,
         packaged: app.isPackaged,
@@ -408,7 +415,7 @@ function createLocalRuntimeProcess({
         marketData,
         platform,
       })
-      child = spawnImpl(launch.command, launch.args, {
+      const launchedChild = spawnImpl(launch.command, launch.args, {
         cwd: launch.cwd,
         env: {
           ...process.env,
@@ -418,6 +425,13 @@ function createLocalRuntimeProcess({
         },
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
+      })
+      child = launchedChild
+      launchedChild.on('error', () => {
+        if (child === launchedChild) child = null
+      })
+      launchedChild.on('exit', () => {
+        if (child === launchedChild) child = null
       })
       const handshake = await new Promise((resolve, reject) => {
         let stdout = ''
@@ -429,14 +443,14 @@ function createLocalRuntimeProcess({
           clearTimeout(timer)
           reject(error)
         }
-        child.once('error', fail)
-        child.once('exit', (code) => {
+        launchedChild.once('error', fail)
+        launchedChild.once('exit', (code) => {
           fail(new Error(`本地研究内核提前退出（${code ?? 'unknown'}）`))
         })
-        child.stderr.on('data', (chunk) => {
+        launchedChild.stderr.on('data', (chunk) => {
           if (stderr.length < 2_000) stderr += chunk.toString('utf8')
         })
-        child.stdout.on('data', (chunk) => {
+        launchedChild.stdout.on('data', (chunk) => {
           stdout += chunk.toString('utf8')
           const newline = stdout.indexOf('\n')
           if (newline < 0) return

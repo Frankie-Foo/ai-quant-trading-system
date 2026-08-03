@@ -276,6 +276,7 @@ function TodayPage({
   onToggleMonitor,
 }) {
   const selection = desk?.selection || {}
+  const phase = desk?.market_phase || {}
   const candidates = selection.candidates || []
   const top = candidates[0]
   const activeJob = workflowStatus?.active_job
@@ -288,19 +289,32 @@ function TodayPage({
     ?? (activeJob?.total_steps
       ? activeJob.completed_steps / activeJob.total_steps * 100
       : 0)
+  const selectionOpen = phase.kind === 'selection'
+  const phaseLabel = phase.kind === 'selection'
+    ? '选股窗口：美东 08:00 至收盘'
+    : phase.kind === 'post_close_review'
+      ? '收盘复盘窗口：请前往复盘页'
+      : '等待下一选股窗口'
+  const buttonLabel = runBusy
+    ? '正在运行'
+    : selectionOpen
+      ? '运行今日选股'
+      : phase.kind === 'post_close_review'
+        ? '收盘后仅复盘'
+        : '等待选股窗口'
   return (
     <div className="analyst-page-stack">
       <section className={`panel analyst-selection ${selection.stale || selection.status === 'blocked' ? 'warn' : ''}`}>
         <div><span className="eyebrow">POINT-IN-TIME SELECTION</span><h2>{SELECTION_STATUS[selection.status] || '正在读取'}</h2><p>目标 {selection.target_trade_date || desk?.target_trade_date || 'N/A'} · 证据 {selection.session_date || 'N/A'}{selection.stale ? ' · 历史快照，不构成今日建议' : ''}</p></div>
         <div className="selection-actions">
           <div className="selection-count"><strong>{selection.pass_count ?? 0}</strong><span>硬闸通过</span></div>
-          <button type="button" disabled={runBusy} onClick={onRunSelection}>
+          <button type="button" disabled={runBusy || !selectionOpen} onClick={onRunSelection}>
             {runBusy ? <LoaderCircle className="spin" size={15} /> : <Radar size={15} />}
-            {runBusy ? '正在运行' : '开始今日流程'}
+            {buttonLabel}
           </button>
         </div>
       </section>
-      <section className="panel today-flow-card"><div><strong>今日流程</strong><span>增量同步 → 今日选股 → 成功后自动启动盘中监控</span></div><div><span>监控：{monitor.status || 'stopped'} · {monitor.events_stored || 0} 条</span>{monitor.status === 'running' && <button type="button" onClick={onToggleMonitor}>停止监控</button>}</div></section>
+      <section className="panel today-flow-card"><div><strong>{phaseLabel}</strong><span>选股：增量同步 → 今日选股 → 成功后自动启动盘中监控。复盘：仅美股收盘后 20 分钟起运行。</span></div><div><span>监控：{monitor.status || 'stopped'} · {monitor.events_stored || 0} 条</span>{monitor.status === 'running' && <button type="button" onClick={onToggleMonitor}>停止监控</button>}</div></section>
       {activeJob && <section className="panel workflow-progress-panel">
         <header><div><span className="eyebrow">BACKGROUND WORKFLOW</span><h3>{activeJob.action === 'sync_data' ? '正在同步数据' : activeJob.action === 'run_selection' ? '正在运行今日选股' : '正在生成收盘复盘'}</h3></div><strong>{progressPercent.toFixed(1)}%</strong></header>
         <div className="workflow-progress-track"><i style={{ width: `${Math.max(0, Math.min(100, progressPercent))}%` }} /></div>
@@ -387,13 +401,15 @@ function AssistantPage({ desk, model, messages, setMessages }) {
 
 function ReviewPage({ desk, workflowStatus, onRunReview }) {
   const review = desk?.review || {}
+  const phase = desk?.market_phase || {}
   const opportunities = review.opportunities || []
   const reviewJobs = (workflowStatus?.jobs || [])
     .filter((job) => job.action === 'run_review')
   const reviewSnapshotCount = workflowStatus?.data_inventory?.reviews || 0
+  const reviewOpen = phase.kind === 'post_close_review'
   return (
     <div className="analyst-page-stack">
-      <header className="analyst-page-header"><div><span className="eyebrow">POST-CLOSE ATTRIBUTION</span><h2>自动复盘</h2></div><button type="button" disabled={Boolean(workflowStatus?.active_job)} onClick={onRunReview}><BrainCircuit size={15} />运行收盘复盘</button></header>
+      <header className="analyst-page-header"><div><span className="eyebrow">POST-CLOSE ATTRIBUTION</span><h2>自动复盘</h2><p>{reviewOpen ? '当前处于收盘复盘窗口。' : '复盘仅在美股收盘后 20 分钟起开放；历史记录不影响今日选股。'}</p></div><button type="button" disabled={Boolean(workflowStatus?.active_job) || !reviewOpen} onClick={onRunReview}><BrainCircuit size={15} />{reviewOpen ? '运行收盘复盘' : '收盘后可运行'}</button></header>
       <div className="review-summary">
         <article><span>覆盖机会</span><strong>{review.opportunity_count ?? 0}</strong><small>全市场强势股</small></article>
         <article><span>证据状态</span><strong>{review.status === 'ready' ? '可追溯' : '不可用'}</strong><small>不可变快照</small></article>
@@ -1064,7 +1080,7 @@ export default function AnalystApp() {
     setSelectionRun(null)
     setActionError('')
     try {
-      const tradeDate = desk?.target_trade_date || new Date().toISOString().slice(0, 10)
+      const tradeDate = desk?.market_phase?.trade_date || desk?.target_trade_date || new Date().toISOString().slice(0, 10)
       const result = await bridge.workflows.start('run_today', tradeDate)
       setSelectionRun(result.accepted ? { ...result, status: 'running' } : result)
       await Promise.all([refreshDesk(), refreshRuntime(), refreshWorkflows()])
@@ -1076,7 +1092,7 @@ export default function AnalystApp() {
   }
 
   const startWorkflow = async (action) => {
-    const tradeDate = desk?.target_trade_date || new Date().toISOString().slice(0, 10)
+    const tradeDate = desk?.market_phase?.trade_date || desk?.target_trade_date || new Date().toISOString().slice(0, 10)
     setActionError('')
     try {
       await bridge.workflows.start(action, tradeDate)

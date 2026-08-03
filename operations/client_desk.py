@@ -64,6 +64,10 @@ class TradingDeskEvidence:
         observed_at = observed_at_utc or datetime.now(UTC)
         _require_utc(observed_at)
         target_date = _target_session(observed_at)
+        phase = market_phase(
+            observed_at,
+            selection_time_beijing=self.selection_time_beijing,
+        )
         jobs = self._jobs(target_date)
         selection = self._selection(
             target_date=target_date,
@@ -75,6 +79,7 @@ class TradingDeskEvidence:
             "schema_version": "trading_desk_evidence.v1",
             "observed_at_utc": observed_at.isoformat(),
             "target_trade_date": target_date.isoformat(),
+            "market_phase": phase,
             "stage": "research_only",
             "pipeline_status": pipeline_status,
             "orders_authorized": False,
@@ -416,6 +421,82 @@ def _selection_candidates(frame: pl.DataFrame) -> list[dict[str, object]]:
             }
         )
     return output
+
+
+def market_phase(
+    observed_at_utc: datetime,
+    *,
+    selection_time_beijing: time = time(20, 0),
+    postmarket_data_grace_minutes: int = 20,
+) -> dict[str, object]:
+    """Return the one desktop action allowed by the exchange-clock window."""
+
+    _require_utc(observed_at_utc)
+    if postmarket_data_grace_minutes < 0:
+        raise ValueError("postmarket_data_grace_minutes must not be negative")
+    local_date = observed_at_utc.astimezone(BEIJING).date()
+    schedule = build_xnys_schedule(
+        local_date - timedelta(days=7),
+        local_date + timedelta(days=10),
+    )
+    rows = list(schedule.iter_rows(named=True))
+    upcoming = next(
+        (
+            row
+            for row in rows
+            if isinstance(row.get("trade_date"), date)
+            and isinstance(row.get("market_close_utc"), datetime)
+            and observed_at_utc <= row["market_close_utc"]
+        ),
+        None,
+    )
+    completed = [
+        row
+        for row in rows
+        if isinstance(row.get("trade_date"), date)
+        and isinstance(row.get("market_close_utc"), datetime)
+        and row["market_close_utc"] < observed_at_utc
+    ]
+    previous = completed[-1] if completed else None
+    if upcoming is None:
+        return {"kind": "waiting", "trade_date": None, "next_at_utc": None}
+
+    trade_date = upcoming["trade_date"]
+    close = upcoming["market_close_utc"]
+    assert isinstance(trade_date, date)
+    assert isinstance(close, datetime)
+    selection_at = datetime.combine(
+        trade_date, selection_time_beijing, BEIJING
+    ).astimezone(UTC)
+    if selection_at <= observed_at_utc <= close:
+        return {
+            "kind": "selection",
+            "trade_date": trade_date.isoformat(),
+            "next_at_utc": close.isoformat(),
+        }
+
+    if previous is not None:
+        review_date = previous["trade_date"]
+        review_close = previous["market_close_utc"]
+        assert isinstance(review_date, date)
+        assert isinstance(review_close, datetime)
+        review_at = review_close + timedelta(minutes=postmarket_data_grace_minutes)
+        review_ends = min(
+            selection_at,
+            review_close + timedelta(hours=6),
+        )
+        if review_at <= observed_at_utc < review_ends:
+            return {
+                "kind": "post_close_review",
+                "trade_date": review_date.isoformat(),
+                "next_at_utc": review_ends.isoformat(),
+            }
+
+    return {
+        "kind": "waiting",
+        "trade_date": trade_date.isoformat(),
+        "next_at_utc": selection_at.isoformat(),
+    }
 
 
 def _target_session(observed_at_utc: datetime) -> date:
