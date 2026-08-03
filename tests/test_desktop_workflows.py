@@ -208,6 +208,7 @@ def test_selection_monitor_does_not_cancel_a_slow_pending_quote(
             "ALPACA_PROXY_SECRET": "market-secret",
         },
         stream_factory=lambda **_kwargs: _DelayedStream(),
+        historical_bars_fetcher=lambda _symbols, _start, _end: pl.DataFrame(),
     )
 
     result = monitor.run(
@@ -218,6 +219,8 @@ def test_selection_monitor_does_not_cancel_a_slow_pending_quote(
     )
 
     assert result["events_stored"] == 1
+    assert result["historical_events_stored"] == 0
+    assert result["symbols"] == ["BRKR", "SPY"]
     assert SipEventStore(tmp_path / "runs" / "sip-stream.sqlite3").counts()[
         "quote_seconds"
     ] == 1

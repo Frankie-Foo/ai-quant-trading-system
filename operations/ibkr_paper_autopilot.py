@@ -49,6 +49,7 @@ from operations.autonomous_paper_runtime import (
     AutonomousPaperRuntime,
     AutonomousRuntimeOutcome,
 )
+from operations.autonomous_plan_compiler import compile_autonomous_paper_plan
 from operations.autonomous_policy_adapter import load_runtime_safety_envelope
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -282,6 +283,7 @@ class PaperAutopilot:
                 "arm_confirmation_phrase": self._arm_phrase(),
                 "plan_status": self._plan_status,
                 "plan_error": self._plan_error,
+                "plan_symbol": self._plan_symbol(),
                 "last_tick_at_utc": self._last_tick_at_utc,
                 "last_outcomes": [dict(item) for item in self._last_outcomes],
                 "last_error": self._last_error,
@@ -308,6 +310,8 @@ class PaperAutopilot:
         if kind == "validate_plan":
             self._validate_plan()
             return self.snapshot()
+        if kind == "prepare_plan":
+            return self.prepare_plan()
         if kind == "start":
             confirmation = str(command.get("confirmation", ""))
             return self.start(confirmation=confirmation)
@@ -316,6 +320,50 @@ class PaperAutopilot:
         if kind == "audit_history":
             return {"events": list(self.audit_history())}
         raise ValueError("unknown_paper_autopilot_command")
+
+    def prepare_plan(self) -> dict[str, object]:
+        """Freeze current rank-one selection; safety evidence is still required."""
+
+        with self._lock:
+            if self._running:
+                raise RuntimeError("paper_autopilot_running")
+            trade_date = self._now().astimezone(NEW_YORK).date()
+            try:
+                prepared = compile_autonomous_paper_plan(
+                    data_root=self.data_root,
+                    trade_date=trade_date,
+                    output_path=self.plan_path,
+                )
+            except Exception as exc:
+                self._ensure_audit_run()
+                self._record_audit(
+                    "autopilot_plan_prepare_failed",
+                    {
+                        "trade_date": trade_date.isoformat(),
+                        "error": _safe_error_code(exc),
+                    },
+                )
+                self._plan_status = "invalid"
+                self._plan_error = "paper_plan_invalid"
+                raise RuntimeError("paper_plan_invalid") from exc
+            self._ensure_audit_run()
+            self._record_audit(
+                "autopilot_plan_prepared",
+                {
+                    "trade_date": prepared.trade_date.isoformat(),
+                    "symbol": prepared.symbol,
+                    "plan_id": prepared.plan_id,
+                    "selection_snapshot_id": prepared.selection_snapshot_id,
+                    "config_sha256": _file_sha256(prepared.output_path),
+                    "hard_stop_fraction": "0.02",
+                    "max_notional_fraction": "0.10",
+                    "full_risk_fraction": "0.0035",
+                },
+            )
+            self._plan_status = "prepared"
+            self._plan_error = "paper_safety_envelope_missing"
+            self._last_error = ""
+            return self.snapshot()
 
     def connect(self) -> dict[str, object]:
         with self._lock:
@@ -539,6 +587,15 @@ class PaperAutopilot:
         self._plan_status = "valid"
         self._plan_error = ""
         return config
+
+    def _plan_symbol(self) -> str:
+        if not self.plan_path.is_file():
+            return ""
+        try:
+            config = load_autonomous_paper_config(self.plan_path)
+        except (OSError, ValueError):
+            return ""
+        return config.plans[0].plan.symbol if len(config.plans) == 1 else ""
 
     def _profile(self) -> tuple[str, int, str]:
         error = self._profile_error()

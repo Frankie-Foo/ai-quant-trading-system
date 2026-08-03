@@ -159,9 +159,13 @@ function sanitizePaperAutopilotSnapshot(snapshot) {
       safeResultText(source.arm_confirmation_phrase, 200) || '',
     plan_status: safeResultText(source.plan_status, 40) || 'missing',
     plan_error: safeResultText(source.plan_error, 200) || '',
+    plan_symbol: safeResultText(source.plan_symbol, 15) || '',
     last_tick_at_utc: safeResultText(source.last_tick_at_utc, 50) || '',
     last_outcomes: outcomes,
     last_error: safeResultText(source.last_error, 200) || '',
+    audit_event_count: Number.isSafeInteger(source.audit_event_count)
+      ? source.audit_event_count
+      : 0,
     root_research_orders_authorized: false,
   }
 }

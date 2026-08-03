@@ -1019,3 +1019,31 @@ current safety envelope, and broker-account risk baseline are all available.
   passed for all changed execution, autopilot, and test modules. A live read-only
   Paper probe remains blocked by IBKR status 2110 (TWS-to-server connection
   interrupted); no Paper order was submitted.
+
+## M35 current-selection Paper plan preparation - 2026-08-03
+
+Status: the local client can now prepare one bounded, immutable Paper plan from
+today's accepted selection without giving an LLM authority over price or orders.
+
+- Added a deterministic plan compiler. It accepts only the current usable
+  `selection_gates.v2` snapshot, uses rank one only, rechecks RVOL, directional
+  volume, premarket-VWAP confirmation, finite price facts, and timestamps, then
+  atomically writes exactly one secret-free Paper config. Missing or stale facts
+  produce no plan.
+- The compiler sets a mechanical 2% hard stop, 10% maximum notional, 0.35%
+  account-risk ceiling, 2.5R first target, and 3.0R weighted floor. These are
+  conservative Paper defaults, recorded in plan provenance; the deterministic
+  intraday policy still requires current technical facts, fresh safety envelope,
+  live agent health, push health, and broker checks before any entry.
+- Added an explicit client action, “从今日选股生成计划”. It only creates the
+  frozen plan and adds a hash-chained audit record; it cannot connect IBKR,
+  arm writes, or start execution. A separate Paper connection, safety validation,
+  and typed start confirmation remain mandatory.
+- Intraday monitoring now also subscribes to SPY and preloads recent SIP minute
+  bars for the leading twelve candidates plus SPY. The warmup is append-only and
+  idempotent; a retrieval or quality failure stops monitoring rather than
+  manufacturing technical history.
+- Acceptance: 14 focused Python tests passed, 31 Electron tests passed, 12 UI
+  tests passed, Ruff clean, strict mypy passed for touched modules, and Vite
+  production build succeeded. IBKR Paper status 2110 remains an upstream gateway
+  blocker; no automated or manual Paper order was sent in this milestone.

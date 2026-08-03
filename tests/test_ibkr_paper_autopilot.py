@@ -5,8 +5,10 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import polars as pl
 import pytest
 
+from data_plane.storage import persist_snapshot
 from execution.alpaca_paper import (
     BrokerOrder,
     PaperAccount,
@@ -148,6 +150,30 @@ def _write_current_paper_plan(runs_root: Path, now: datetime) -> None:
     )
 
 
+def _write_selection(data_root: Path, trade_date: datetime) -> None:
+    persist_snapshot(
+        pl.DataFrame(
+            {
+                "symbol": ["AAPL"],
+                "session_date": [trade_date.date()],
+                "selection_rank": [1],
+                "pass_gate": [True],
+                "rvol": [8.0],
+                "price": [100.0],
+                "premarket_close": [102.0],
+                "premarket_above_vwap": [True],
+                "directional_volume_confirmed": [True],
+                "earnings_intensity_score": [80.0],
+                "gate_asof_utc": [trade_date - timedelta(minutes=2)],
+            }
+        ),
+        root=data_root,
+        source="kernel.universe.selection_gates",
+        schema_version="selection_gates.v2",
+        checks=(),
+    )
+
+
 def test_paper_autopilot_connects_only_with_a_paper_profile_and_never_arms_without_a_plan(
     tmp_path: Path,
 ) -> None:
@@ -221,6 +247,34 @@ def test_paper_autopilot_rejects_non_du_accounts_before_any_connection(
     with pytest.raises(ValueError, match="paper_profile_invalid"):
         autopilot.handle({"kind": "connect"})
     assert called is False
+
+
+def test_paper_autopilot_prepares_auditable_plan_from_current_selection(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 3, 14, 0, tzinfo=UTC)
+    _write_selection(tmp_path / "data", now)
+    autopilot = PaperAutopilot(
+        data_root=tmp_path / "data",
+        runs_root=tmp_path / "runs",
+        environ={},
+        now=lambda: now,
+    )
+
+    prepared = autopilot.handle({"kind": "prepare_plan"})
+
+    assert prepared["running"] is False
+    assert prepared["plan_status"] == "prepared"
+    assert prepared["plan_error"] == "paper_safety_envelope_missing"
+    assert prepared["plan_symbol"] == "AAPL"
+    events = autopilot.audit_history()
+    assert [event["event_type"] for event in events] == [
+        "autopilot_plan_prepared"
+    ]
+    payload = events[0]["payload"]
+    assert isinstance(payload, dict)
+    assert payload["symbol"] == "AAPL"
+    assert (tmp_path / "runs" / "paper-autopilot" / "approved-autonomous-paper.json").is_file()
 
 
 def test_paper_autopilot_persists_every_tick_boundary_before_execution(

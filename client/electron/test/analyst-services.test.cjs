@@ -340,6 +340,9 @@ test('Paper autopilot IPC accepts only its fixed lifecycle commands', () => {
   assert.deepEqual(normalizePaperAutopilotCommand({ kind: 'validate_plan' }), {
     kind: 'validate_plan',
   })
+  assert.deepEqual(normalizePaperAutopilotCommand({ kind: 'prepare_plan' }), {
+    kind: 'prepare_plan',
+  })
   assert.deepEqual(normalizePaperAutopilotCommand({
     kind: 'start',
     confirmation: '启用模拟盘自动执行 DU***4321',

@@ -389,6 +389,9 @@ export function normalizePaperAutopilotSnapshot(snapshot) {
     planError: typeof source.plan_error === 'string'
       ? source.plan_error.slice(0, 200)
       : '',
+    planSymbol: typeof source.plan_symbol === 'string'
+      ? source.plan_symbol.slice(0, 15)
+      : '',
     lastTickAtUtc: typeof source.last_tick_at_utc === 'string'
       ? source.last_tick_at_utc.slice(0, 50)
       : '',

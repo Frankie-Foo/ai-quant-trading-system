@@ -108,7 +108,7 @@ function normalizePaperAutopilotCommand(command) {
     throw new Error('模拟盘自动执行命令无效')
   }
   const kind = String(command.kind || '')
-  if (['connect', 'disconnect', 'validate_plan', 'stop'].includes(kind)) {
+  if (['connect', 'disconnect', 'prepare_plan', 'validate_plan', 'stop'].includes(kind)) {
     return { kind }
   }
   if (kind === 'start') {

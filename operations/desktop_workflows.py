@@ -23,9 +23,11 @@ from data_plane.calendar import build_xnys_schedule
 from data_plane.providers.alpaca_proxy import (
     AlpacaProxySipStream,
     AlpacaProxyStreamError,
+    fetch_alpaca_proxy_bars,
 )
 from execution.alpaca_sip_stream import SipEvent
 from execution.sip_store import SipEventStore
+from operations.adaptive_sip_warmup import build_warmup_events
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -104,9 +106,13 @@ class SelectionSipMonitor:
         *,
         environ: Mapping[str, str] | None = None,
         stream_factory: Callable[..., SipStreamLike] = AlpacaProxySipStream,
+        historical_bars_fetcher: Callable[
+            [tuple[str, ...], datetime, datetime], pl.DataFrame
+        ] = fetch_alpaca_proxy_bars,
     ):
         self._environ = os.environ if environ is None else environ
         self._stream_factory = stream_factory
+        self._historical_bars_fetcher = historical_bars_fetcher
 
     def run(
         self,
@@ -127,20 +133,29 @@ class SelectionSipMonitor:
             raise FileNotFoundError("selection snapshot is required before monitoring")
         _, path = max(candidates)
         frame = pl.read_parquet(path)
-        symbols = tuple(
-            frame.filter(pl.col("pass_gate"))
-            .get_column("symbol")
-            .unique()
-            .sort()
-            .to_list()
-        )
-        if not symbols:
+        passing = frame.filter(pl.col("pass_gate"))
+        if passing.is_empty():
             raise ValueError("selection snapshot has no passing symbols")
+        ranked = (
+            passing.sort("selection_rank", "symbol")
+            if "selection_rank" in passing.columns
+            else passing.sort("symbol")
+        )
+        selection_symbols = tuple(
+            str(symbol).strip().upper()
+            for symbol in ranked.get_column("symbol").unique(maintain_order=True)
+        )
+        symbols = tuple(sorted({*selection_symbols, "SPY"}))
         key = str(self._environ.get("ALPACA_PROXY_KEY", "")).strip()
         secret = str(self._environ.get("ALPACA_PROXY_SECRET", "")).strip()
         if not key or not secret:
             raise RuntimeError("Alpaca proxy credentials are missing")
         store = SipEventStore(runs_root / "sip-stream.sqlite3")
+        historical_events = self._warm_history(
+            store=store,
+            trade_date=trade_date,
+            symbols=tuple(sorted({*selection_symbols[:12], "SPY"})),
+        )
 
         async def consume() -> int:
             count = 0
@@ -179,7 +194,40 @@ class SelectionSipMonitor:
         return {
             "events_stored": asyncio.run(consume()),
             "symbols": list(symbols),
+            "historical_events_stored": historical_events,
         }
+
+    def _warm_history(
+        self,
+        *,
+        store: SipEventStore,
+        trade_date: date,
+        symbols: tuple[str, ...],
+    ) -> int:
+        schedule = build_xnys_schedule(
+            trade_date - timedelta(days=10),
+            trade_date,
+        )
+        if schedule.is_empty():
+            raise RuntimeError("SIP warmup schedule is unavailable")
+        first_open = schedule.get_column("market_open_utc")[0]
+        current = schedule.filter(pl.col("trade_date") == trade_date)
+        if current.height != 1 or not isinstance(first_open, datetime):
+            raise RuntimeError("SIP warmup schedule is invalid")
+        market_close = current.get_column("market_close_utc")[0]
+        if not isinstance(market_close, datetime):
+            raise RuntimeError("SIP warmup market close is invalid")
+        end_utc = min(datetime.now(UTC).replace(second=0, microsecond=0), market_close)
+        if end_utc <= first_open:
+            return 0
+        bars = self._historical_bars_fetcher(symbols, first_open, end_utc)
+        events = build_warmup_events(
+            bars=bars,
+            quotes=pl.DataFrame(),
+            trades=pl.DataFrame(),
+        )
+        store.append_many(events)
+        return len(events)
 
 
 class DesktopWorkflowManager:
