@@ -996,3 +996,26 @@ workflows still have no order authority.
 - Honest remaining production gaps: unique `conId` / primary-exchange contract
   resolution, in-client cancel/modify commands, and continuous broker fill/order
   reconciliation. Those gaps prevent calling this execution module fully mature.
+
+## M34 IBKR Paper automatic-execution audit boundary - 2026-08-03
+
+Status: the Paper-only automatic execution path now records every executable
+boundary before it can reach IBKR. It remains off until a current frozen plan,
+current safety envelope, and broker-account risk baseline are all available.
+
+- Added an append-only SQLite audit chain to the existing Paper session ledger.
+  Each record has UTC time, canonical payload, previous hash, and event hash;
+  credentials are rejected from audit payloads.
+- Paper start records its frozen plan, policy evidence, source snapshot IDs and
+  SHA-256 hashes. Every tick records broker account/positions/orders reads,
+  exact SIP fact reads or failures, policy result, and every broker command
+  request before the broker call plus its result or failure.
+- Any audit-write failure blocks a new broker command. Existing durable command
+  state remains the recovery source, so restart cannot issue a duplicate order.
+- Account-summary compatibility now accepts either official prior-day-equity tag,
+  while still failing closed if neither is returned. Security-definition-farm
+  status 2157 no longer incorrectly rejects an otherwise established API socket.
+- Acceptance: 51 targeted Paper/IBKR tests passed, Ruff clean, and strict mypy
+  passed for all changed execution, autopilot, and test modules. A live read-only
+  Paper probe remains blocked by IBKR status 2110 (TWS-to-server connection
+  interrupted); no Paper order was submitted.

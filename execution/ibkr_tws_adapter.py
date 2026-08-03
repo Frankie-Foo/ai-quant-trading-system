@@ -160,7 +160,7 @@ class _IbkrCallbacks(EWrapper):  # type: ignore[misc]
         del advancedOrderRejectJson
         if errorCode in {2104, 2106, 2107, 2108, 2119, 2158}:
             self.information.append((errorCode, errorString))
-        elif errorCode in {399, 2103, 2105}:
+        elif errorCode in {399, 2103, 2105, 2157}:
             self.warnings.append((errorCode, errorString))
             if errorCode == 399:
                 self.warnings_by_request.setdefault(reqId, []).append(
@@ -465,7 +465,8 @@ class OfficialIbapiAdapter:
             callbacks.account_summary_events[request_id] = event
             callbacks.errors_by_request.pop(request_id, None)
         tags = (
-            "NetLiquidation,PreviousDayEquityWithLoanValue,BuyingPower"
+            "NetLiquidation,PreviousDayEquityWithLoanValue,"
+            "PreviousEquityWithLoanValue,BuyingPower"
         )
         try:
             self._call_bounded(
@@ -494,7 +495,8 @@ class OfficialIbapiAdapter:
                     name="NetLiquidation",
                 ),
                 previous_equity=self._required_decimal(
-                    values.get("PreviousDayEquityWithLoanValue"),
+                    values.get("PreviousDayEquityWithLoanValue")
+                    or values.get("PreviousEquityWithLoanValue"),
                     name="PreviousDayEquityWithLoanValue",
                 ),
                 buying_power=self._required_decimal(

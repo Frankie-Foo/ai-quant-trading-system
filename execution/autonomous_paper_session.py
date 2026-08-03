@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal, InvalidOperation
-from enum import StrEnum
+from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -264,6 +266,17 @@ class PaperSessionLedger:
                     last_observed_at_utc TEXT NOT NULL,
                     order_flow_below_active INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS paper_autopilot_audit_events (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    occurred_at_utc TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    previous_hash TEXT NOT NULL,
+                    event_hash TEXT NOT NULL UNIQUE
+                );
+                CREATE INDEX IF NOT EXISTS idx_paper_autopilot_audit_run_sequence
+                    ON paper_autopilot_audit_events (run_id, sequence);
                 """
             )
 
@@ -300,6 +313,109 @@ class PaperSessionLedger:
                 """,
                 (trade_date.isoformat(), reason, at_utc.isoformat()),
             )
+
+    def record_audit_event(
+        self,
+        *,
+        run_id: str,
+        event_type: str,
+        at_utc: datetime,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        """Append one durable, secret-free event to the Paper audit chain."""
+
+        _require_utc(at_utc)
+        if not run_id.strip() or not event_type.strip():
+            raise ValueError("Paper audit identity is required")
+        _reject_audit_secrets(payload)
+        try:
+            payload_json = json.dumps(
+                _audit_json_safe(payload),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Paper audit payload is not JSON-safe") from exc
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            prior = connection.execute(
+                """
+                SELECT event_hash FROM paper_autopilot_audit_events
+                ORDER BY sequence DESC LIMIT 1
+                """
+            ).fetchone()
+            previous_hash = "GENESIS" if prior is None else str(prior["event_hash"])
+            event_hash = hashlib.sha256(
+                "|".join(
+                    (
+                        previous_hash,
+                        run_id,
+                        event_type,
+                        at_utc.isoformat(),
+                        payload_json,
+                    )
+                ).encode("utf-8")
+            ).hexdigest()
+            cursor = connection.execute(
+                """
+                INSERT INTO paper_autopilot_audit_events (
+                    run_id, event_type, occurred_at_utc, payload_json,
+                    previous_hash, event_hash
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    event_type,
+                    at_utc.isoformat(),
+                    payload_json,
+                    previous_hash,
+                    event_hash,
+                ),
+            )
+            if cursor.lastrowid is None:
+                raise RuntimeError("Paper audit insert did not return a sequence")
+            sequence = int(cursor.lastrowid)
+        return {
+            "sequence": sequence,
+            "run_id": run_id,
+            "event_type": event_type,
+            "occurred_at_utc": at_utc.isoformat(),
+            "payload": json.loads(payload_json),
+            "previous_hash": previous_hash,
+            "event_hash": event_hash,
+        }
+
+    def audit_events(self, *, run_id: str, limit: int = 1_000) -> tuple[dict[str, object], ...]:
+        if not run_id.strip():
+            raise ValueError("Paper audit run ID is required")
+        if limit < 1 or limit > 10_000:
+            raise ValueError("Paper audit limit must be in [1, 10000]")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT sequence, run_id, event_type, occurred_at_utc, payload_json,
+                       previous_hash, event_hash
+                FROM paper_autopilot_audit_events
+                WHERE run_id=?
+                ORDER BY sequence
+                LIMIT ?
+                """,
+                (run_id, limit),
+            ).fetchall()
+        return tuple(
+            {
+                "sequence": int(row["sequence"]),
+                "run_id": str(row["run_id"]),
+                "event_type": str(row["event_type"]),
+                "occurred_at_utc": str(row["occurred_at_utc"]),
+                "payload": json.loads(str(row["payload_json"])),
+                "previous_hash": str(row["previous_hash"]),
+                "event_hash": str(row["event_hash"]),
+            }
+            for row in rows
+        )
 
     def ensure_command(
         self,
@@ -1838,6 +1954,65 @@ def _positive_decimal(value: str, *, name: str) -> Decimal:
     if not parsed.is_finite() or parsed <= 0:
         raise ValueError(f"Paper account {name} must be finite and positive")
     return parsed
+
+
+def _reject_audit_secrets(value: object, *, key: str = "") -> None:
+    """Keep process evidence complete without persisting credentials."""
+
+    normalized_key = key.lower().replace("-", "_")
+    sensitive_fragments = (
+        "secret",
+        "password",
+        "token",
+        "api_key",
+        "apikey",
+        "authorization",
+        "credential",
+    )
+    if any(fragment in normalized_key for fragment in sensitive_fragments):
+        raise ValueError("Paper audit payload must not contain secrets")
+    if isinstance(value, Mapping):
+        for child_key, child_value in value.items():
+            if not isinstance(child_key, str):
+                raise ValueError("Paper audit payload keys must be strings")
+            _reject_audit_secrets(child_value, key=child_key)
+    elif isinstance(value, (list, tuple)):
+        for child_value in value:
+            _reject_audit_secrets(child_value, key=key)
+
+
+def _audit_json_safe(value: object) -> object:
+    """Normalize exact execution evidence into a deterministic JSON value."""
+
+    if value is None or isinstance(value, (bool, str, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("Paper audit float must be finite")
+        return value
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ValueError("Paper audit decimal must be finite")
+        return str(value)
+    if isinstance(value, datetime):
+        _require_utc(value)
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Enum):
+        return _audit_json_safe(value.value)
+    if isinstance(value, Mapping):
+        normalized: dict[str, object] = {}
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise ValueError("Paper audit payload keys must be strings")
+            normalized[key] = _audit_json_safe(child)
+        return normalized
+    if isinstance(value, (list, tuple)):
+        return [_audit_json_safe(child) for child in value]
+    raise ValueError("Paper audit payload contains an unsupported value")
 
 
 def _whole_long_quantity(position: PaperPosition) -> int:

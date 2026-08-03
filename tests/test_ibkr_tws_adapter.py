@@ -130,6 +130,7 @@ class ResponsiveClient:
         self.wrapper.error(-1, 2119, "Market data farm is inactive but available")
         self.wrapper.error(-1, 2103, "Market data farm connection is broken")
         self.wrapper.error(-1, 2105, "HMDS data farm connection is broken")
+        self.wrapper.error(-1, 2157, "Sec-def data farm connection is broken")
         self.wrapper.managedAccounts("U7654321")
         self.wrapper.nextValidId(8100)
 
@@ -423,6 +424,35 @@ class PaperResponsiveClient(ResponsiveClient):
         ]
 
 
+class LegacyPreviousEquityPaperClient(PaperResponsiveClient):
+    def reqAccountSummary(self, request_id: int, group: str, tags: str) -> None:
+        assert group == "All"
+        assert "PreviousDayEquityWithLoanValue" in tags
+        assert "PreviousEquityWithLoanValue" in tags
+        self.wrapper.accountSummary(
+            request_id,
+            "DU7654321",
+            "NetLiquidation",
+            "100000",
+            "USD",
+        )
+        self.wrapper.accountSummary(
+            request_id,
+            "DU7654321",
+            "PreviousEquityWithLoanValue",
+            "101000",
+            "USD",
+        )
+        self.wrapper.accountSummary(
+            request_id,
+            "DU7654321",
+            "BuyingPower",
+            "400000",
+            "USD",
+        )
+        self.wrapper.accountSummaryEnd(request_id)
+
+
 class SingleArgumentCancelPaperClient(PaperResponsiveClient):
     def cancelOrder(self, order_id: int) -> None:  # type: ignore[override]
         self.live_orders = [
@@ -489,6 +519,21 @@ def test_official_paper_adapter_returns_account_values_and_submits_only_to_paper
     assert sent.orderType == "LMT"
     assert sent.eTradeOnly is False
     assert adapter.cancel_order(submitted.order_id) is True
+    adapter.disconnect()
+
+
+def test_official_paper_adapter_accepts_legacy_previous_equity_tag() -> None:
+    adapter = OfficialIbapiPaperAdapter(
+        connect_timeout=0.2,
+        request_timeout=0.2,
+        expected_account_id="DU7654321",
+        client_factory=lambda wrapper: LegacyPreviousEquityPaperClient(wrapper),
+    )
+
+    adapter.connect(host="127.0.0.1", port=4002, client_id=91)
+    values = adapter.account_values()
+
+    assert values.previous_equity == Decimal("101000")
     adapter.disconnect()
 
 

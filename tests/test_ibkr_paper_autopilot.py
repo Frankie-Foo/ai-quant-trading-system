@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import json
+import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,10 @@ from execution.alpaca_paper import (
     PaperOrderRequest,
     PaperPosition,
     PaperStopRequest,
+)
+from operations.autonomous_policy_adapter import (
+    RuntimeSafetyEnvelope,
+    write_runtime_safety_envelope,
 )
 from operations.ibkr_paper_autopilot import PaperAutopilot
 
@@ -69,6 +75,79 @@ class _Broker:
         raise AssertionError("must not submit")
 
 
+def _write_current_paper_plan(runs_root: Path, now: datetime) -> None:
+    plan_dir = runs_root / "paper-autopilot"
+    safety_path = plan_dir / "AAPL-safety.json"
+    plan_dir.mkdir(parents=True)
+    write_runtime_safety_envelope(
+        safety_path,
+        RuntimeSafetyEnvelope(
+            trade_date=now.date(),
+            symbol="AAPL",
+            generated_at_utc=now - timedelta(minutes=1),
+            expires_at_utc=now + timedelta(minutes=1),
+            negative_news_clear=True,
+            material_negative=False,
+            agents_healthy=True,
+            push_healthy=True,
+            source_snapshot_ids=("selection-20260803",),
+            provenance="test.paper-safety.v1",
+        ),
+    )
+    payload = {
+        "schema_version": "autonomous_paper_config.v1",
+        "poll_seconds": 1,
+        "plans": [
+            {
+                "plan": {
+                    "plan_id": "auto-20260803-AAPL",
+                    "symbol": "AAPL",
+                    "trade_date": now.date().isoformat(),
+                    "reference_price": "100.00",
+                    "hard_stop": "98.00",
+                    "max_notional_fraction": "0.20",
+                    "full_risk_fraction": "0.0035",
+                    "max_spread_ratio": "0.0025",
+                    "source_snapshot_ids": ["selection-20260803"],
+                    "provenance": "test.paper-plan.v1",
+                },
+                "policy_evidence": {
+                    "route": "catalyst",
+                    "catalyst": {
+                        "value": 90.0,
+                        "asof_utc": (now - timedelta(minutes=2)).isoformat(),
+                        "provenance": "test.catalyst.v1",
+                    },
+                    "factor": {
+                        "value": 80.0,
+                        "asof_utc": (now - timedelta(minutes=2)).isoformat(),
+                        "provenance": "test.factor.v1",
+                    },
+                    "right_tail": {
+                        "value": 70.0,
+                        "asof_utc": (now - timedelta(minutes=2)).isoformat(),
+                        "provenance": "test.tail.v1",
+                    },
+                    "first_target_reward_r": 2.5,
+                    "weighted_expected_reward_r": 3.0,
+                    "reward_risk_provenance": "test.risk-reward.v1",
+                    "a_plus_plus_approved": False,
+                },
+                "market_context": {
+                    "benchmark_symbol": "SPY",
+                    "sector_symbol": "XLK",
+                    "provenance": "test.market-context.v1",
+                },
+                "safety_envelope": "AAPL-safety.json",
+            }
+        ],
+    }
+    (plan_dir / "approved-autonomous-paper.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+
+
 def test_paper_autopilot_connects_only_with_a_paper_profile_and_never_arms_without_a_plan(
     tmp_path: Path,
 ) -> None:
@@ -97,6 +176,14 @@ def test_paper_autopilot_connects_only_with_a_paper_profile_and_never_arms_witho
     assert connected["connected"] is True
     assert connected["paper_writes_armed"] is False
     assert connected["account_masked"] == "DU***4321"
+    assert connected["audit_event_count"] == 1
+    audit = autopilot.audit_history()
+    assert [event["event_type"] for event in audit] == ["autopilot_connected"]
+    payload = audit[0]["payload"]
+    assert isinstance(payload, dict)
+    account = payload["account"]
+    assert isinstance(account, dict)
+    assert account["equity"] == "100000"
     assert created[0].writes_enabled is False
     assert created[0].connect_calls == [("192.0.2.44", 91)]
     with pytest.raises(RuntimeError, match="paper_plan_invalid"):
@@ -134,3 +221,42 @@ def test_paper_autopilot_rejects_non_du_accounts_before_any_connection(
     with pytest.raises(ValueError, match="paper_profile_invalid"):
         autopilot.handle({"kind": "connect"})
     assert called is False
+
+
+def test_paper_autopilot_persists_every_tick_boundary_before_execution(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 3, 14, 0, tzinfo=UTC)
+    _write_current_paper_plan(tmp_path / "runs", now)
+    autopilot = PaperAutopilot(
+        data_root=tmp_path / "data",
+        runs_root=tmp_path / "runs",
+        environ={
+            "IBKR_PAPER_HOST": "192.0.2.44",
+            "IBKR_PAPER_CLIENT_ID": "91",
+            "IBKR_PAPER_ACCOUNT": "DU7654321",
+        },
+        broker_factory=lambda writes_enabled, account: _Broker(writes_enabled, account),
+        now=lambda: now,
+    )
+
+    autopilot.start(confirmation=str(autopilot.snapshot()["arm_confirmation_phrase"]))
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        event_types = [event["event_type"] for event in autopilot.audit_history()]
+        if "tick_open" in event_types and "tick_result" in event_types:
+            break
+        time.sleep(0.02)
+    autopilot.stop()
+
+    events = autopilot.audit_history()
+    event_types = [event["event_type"] for event in events]
+    assert "autopilot_plan_validated" in event_types
+    assert "autopilot_started" in event_types
+    assert "tick_open" in event_types
+    assert "broker_positions_read" in event_types
+    assert "broker_account_read" in event_types
+    assert "market_facts_read_requested" in event_types
+    assert "market_facts_read_failed" in event_types
+    assert "tick_result" in event_types
+    assert events[-1]["event_hash"]
