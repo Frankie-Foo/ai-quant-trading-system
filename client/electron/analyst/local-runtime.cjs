@@ -1,6 +1,6 @@
 const crypto = require('node:crypto')
 const path = require('node:path')
-const { spawn } = require('node:child_process')
+const { spawn, spawnSync } = require('node:child_process')
 
 function validateRuntimeHandshake(payload) {
   if (
@@ -208,10 +208,55 @@ function runtimeLaunch({
   }
 }
 
+function taskkill(spawnSyncImpl, args) {
+  try {
+    return spawnSyncImpl('taskkill.exe', args, {
+      windowsHide: true,
+      stdio: 'ignore',
+      timeout: 5_000,
+    })
+  } catch {
+    return { status: null }
+  }
+}
+
+function cleanupOrphanedWindowsRuntimes({
+  platform = process.platform,
+  packaged = false,
+  spawnSyncImpl = spawnSync,
+} = {}) {
+  if (platform !== 'win32' || !packaged) return false
+  const result = taskkill(spawnSyncImpl, [
+    '/IM',
+    'windows-research-runtime.exe',
+    '/T',
+    '/F',
+  ])
+  return result?.status === 0
+}
+
+function terminateRuntimeProcess(child, {
+  platform = process.platform,
+  spawnSyncImpl = spawnSync,
+} = {}) {
+  if (!child) return
+  if (platform === 'win32' && Number.isInteger(child.pid)) {
+    const result = taskkill(spawnSyncImpl, [
+      '/PID',
+      String(child.pid),
+      '/T',
+      '/F',
+    ])
+    if (result?.status === 0) return
+  }
+  if (!child.killed) child.kill()
+}
 function createLocalRuntimeProcess({
   app,
   projectRoot,
   spawnImpl = spawn,
+  spawnSyncImpl = spawnSync,
+  platform = process.platform,
   client = createLocalRuntimeClient(),
   startupTimeoutMs = 45_000,
   marketData = {},
@@ -223,8 +268,19 @@ function createLocalRuntimeProcess({
 
     async start() {
       if (child) return client.status()
+      cleanupOrphanedWindowsRuntimes({
+        platform,
+        packaged: app.isPackaged,
+        spawnSyncImpl,
+      })
       const token = crypto.randomBytes(32).toString('base64url')
-      const launch = runtimeLaunch({ app, projectRoot, token, marketData })
+      const launch = runtimeLaunch({
+        app,
+        projectRoot,
+        token,
+        marketData,
+        platform,
+      })
       child = spawnImpl(launch.command, launch.args, {
         cwd: launch.cwd,
         env: {
@@ -271,15 +327,17 @@ function createLocalRuntimeProcess({
     },
 
     stop() {
-      if (child && !child.killed) child.kill()
+      terminateRuntimeProcess(child, { platform, spawnSyncImpl })
       child = null
     },
   }
 }
 
 module.exports = {
+  cleanupOrphanedWindowsRuntimes,
   createLocalRuntimeClient,
   createLocalRuntimeProcess,
   runtimeLaunch,
+  terminateRuntimeProcess,
   validateRuntimeHandshake,
 }

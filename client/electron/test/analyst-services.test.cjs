@@ -8,8 +8,10 @@ const {
   createSecureSettingsStore,
 } = require('../analyst/settings.cjs')
 const {
+  cleanupOrphanedWindowsRuntimes,
   createLocalRuntimeClient,
   runtimeLaunch,
+  terminateRuntimeProcess,
   validateRuntimeHandshake,
 } = require('../analyst/local-runtime.cjs')
 const {
@@ -573,4 +575,44 @@ test('AI evidence is minimized and carries an immutable reference', () => {
     reviewSessionDate: '2026-07-30',
     reviewStale: true,
   })
+})
+
+test('Windows runtime lifecycle kills stale instances and the full PyInstaller tree', () => {
+  const calls = []
+  const spawnSyncImpl = (command, args, options) => {
+    calls.push({ command, args, options })
+    return { status: 0 }
+  }
+  let directKillCalled = false
+  const child = {
+    pid: 43210,
+    killed: false,
+    kill: () => {
+      directKillCalled = true
+    },
+  }
+
+  cleanupOrphanedWindowsRuntimes({
+    platform: 'win32',
+    packaged: true,
+    spawnSyncImpl,
+  })
+  terminateRuntimeProcess(child, {
+    platform: 'win32',
+    spawnSyncImpl,
+  })
+
+  assert.deepEqual(calls.map((value) => value.command), [
+    'taskkill.exe',
+    'taskkill.exe',
+  ])
+  assert.deepEqual(calls[0].args, [
+    '/IM',
+    'windows-research-runtime.exe',
+    '/T',
+    '/F',
+  ])
+  assert.deepEqual(calls[1].args, ['/PID', '43210', '/T', '/F'])
+  assert.equal(calls.every((value) => value.options.windowsHide === true), true)
+  assert.equal(directKillCalled, false)
 })
