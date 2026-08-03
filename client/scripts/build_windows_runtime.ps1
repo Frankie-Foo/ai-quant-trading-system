@@ -8,6 +8,10 @@ $runtimeWork = [System.IO.Path]::GetFullPath((Join-Path $buildRoot "runtime-work
 $specFile = [System.IO.Path]::GetFullPath(
     (Join-Path $buildRoot "windows-research-runtime.spec")
 )
+$python = Join-Path $repoRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+    throw "Project virtual environment Python is required to build the Windows runtime"
+}
 
 foreach ($target in @($runtimeOutput, $runtimeWork, $specFile)) {
     if (-not $target.StartsWith($buildRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -60,7 +64,7 @@ $arguments = @(
 
 Push-Location $clientRoot
 try {
-    & python @arguments
+    & $python @arguments
     if ($LASTEXITCODE -ne 0) {
         throw "PyInstaller failed with exit code $LASTEXITCODE"
     }

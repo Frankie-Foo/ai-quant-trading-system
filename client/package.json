@@ -1,7 +1,7 @@
 {
   "name": "adaptive-trading-client",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Evidence-backed U.S. equity research desktop with isolated manual IBKR live execution",
   "author": "Trading System v2",
   "type": "module",

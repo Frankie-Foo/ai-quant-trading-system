@@ -1077,3 +1077,6 @@ the automation never falls back to live 4001.
 - Acceptance: 536 Python tests passed in 30.94 seconds; Ruff and strict mypy passed
   across 186 source files; 32 Electron tests, 12 UI tests, and Vite production build
   passed. No Paper or live order was submitted by this milestone’s verification.
+- Windows packaging uses the project virtual environment explicitly, not a caller’s
+  system Python. A local unsigned 0.2.1 installer is built after this milestone;
+  its bundled runtime hash is checked against the source runtime before handoff.
