@@ -1,7 +1,8 @@
 const fs = require('node:fs')
 const path = require('node:path')
 
-const SETTINGS_SCHEMA = 'desktop-local-research-settings.v7'
+const SETTINGS_SCHEMA = 'desktop-local-research-settings.v8'
+const PREVIOUS_AUTOMATION_SETTINGS_SCHEMA = 'desktop-local-research-settings.v7'
 const PREVIOUS_PAPER_SETTINGS_SCHEMA = 'desktop-local-research-settings.v6'
 const PREVIOUS_EXECUTION_SETTINGS_SCHEMA = 'desktop-local-research-settings.v5'
 const RESEARCH_SETTINGS_SCHEMA = 'desktop-local-research-settings.v4'
@@ -108,7 +109,7 @@ function normalizePaperAutopilotCommand(command) {
     throw new Error('模拟盘自动执行命令无效')
   }
   const kind = String(command.kind || '')
-  if (['connect', 'disconnect', 'prepare_plan', 'validate_plan', 'stop'].includes(kind)) {
+  if (['connect', 'disconnect', 'prepare_plan', 'refresh_safety', 'validate_plan', 'stop'].includes(kind)) {
     return { kind }
   }
   if (kind === 'start') {
@@ -263,6 +264,9 @@ function emptySettings() {
     encryptedIbkrPaperHost: '',
     encryptedIbkrPaperClientId: '',
     encryptedIbkrPaperAccount: '',
+    encryptedLivermoreAppId: '',
+    encryptedLivermoreAppSecret: '',
+    encryptedLivermoreChannelId: '',
     maxOrderNotional: 0,
     models: {},
   }
@@ -312,7 +316,8 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
         }
       }
       if ([RESEARCH_SETTINGS_SCHEMA, PREVIOUS_EXECUTION_SETTINGS_SCHEMA,
-        PREVIOUS_PAPER_SETTINGS_SCHEMA].includes(parsed.schemaVersion)) {
+        PREVIOUS_PAPER_SETTINGS_SCHEMA, PREVIOUS_AUTOMATION_SETTINGS_SCHEMA]
+        .includes(parsed.schemaVersion)) {
         return { ...emptySettings(), ...parsed, schemaVersion: SETTINGS_SCHEMA }
       }
       if (parsed.schemaVersion !== SETTINGS_SCHEMA) return emptySettings()
@@ -470,6 +475,9 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
       const host = String(values?.host || '').trim()
       const clientIdText = String(values?.clientId ?? '').trim()
       const paperAccount = String(values?.paperAccount || '').trim().toUpperCase()
+      const livermoreAppId = String(values?.livermoreAppId || '').trim()
+      const livermoreAppSecret = String(values?.livermoreAppSecret || '').trim()
+      const livermoreChannelId = String(values?.livermoreChannelId || '').trim()
       if (!host || host.length > 253 || /[\s/:]/.test(host)) {
         throw new Error('IBKR 模拟盘主机名无效')
       }
@@ -479,11 +487,31 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
       if (!/^DU[A-Z0-9-]{4,30}$/.test(paperAccount)) {
         throw new Error('IBKR 模拟盘账户必须是 DU 开头的账户 ID')
       }
+      const pushValues = [livermoreAppId, livermoreAppSecret, livermoreChannelId]
+      if (pushValues.some(Boolean) && pushValues.some((value) => !value)) {
+        throw new Error('Livermore push configuration is incomplete')
+      }
+      if (livermoreAppId && (
+        livermoreAppId.length > 200
+        || livermoreAppSecret.length < 8
+        || livermoreChannelId.length > 200
+      )) {
+        throw new Error('Livermore push configuration is invalid')
+      }
       write({
         ...current,
         encryptedIbkrPaperHost: encrypt(host),
         encryptedIbkrPaperClientId: encrypt(clientIdText),
         encryptedIbkrPaperAccount: encrypt(paperAccount),
+        encryptedLivermoreAppId: livermoreAppId
+          ? encrypt(livermoreAppId)
+          : current.encryptedLivermoreAppId,
+        encryptedLivermoreAppSecret: livermoreAppSecret
+          ? encrypt(livermoreAppSecret)
+          : current.encryptedLivermoreAppSecret,
+        encryptedLivermoreChannelId: livermoreChannelId
+          ? encrypt(livermoreChannelId)
+          : current.encryptedLivermoreChannelId,
       })
     },
 
@@ -536,6 +564,11 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
           hostConfigured: Boolean(current.encryptedIbkrPaperHost),
           clientIdConfigured: Boolean(current.encryptedIbkrPaperClientId),
           accountConfigured: Boolean(current.encryptedIbkrPaperAccount),
+          pushConfigured: Boolean(
+            current.encryptedLivermoreAppId
+            && current.encryptedLivermoreAppSecret
+            && current.encryptedLivermoreChannelId,
+          ),
           paperAccountMasked: maskAccount(
             decrypt(current.encryptedIbkrPaperAccount),
           ),
@@ -574,6 +607,9 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
         clientId: Number(decrypt(current.encryptedIbkrPaperClientId)) || 0,
         paperAccount: decrypt(current.encryptedIbkrPaperAccount),
         port: 4002,
+        livermoreAppId: decrypt(current.encryptedLivermoreAppId),
+        livermoreAppSecret: decrypt(current.encryptedLivermoreAppSecret),
+        livermoreChannelId: decrypt(current.encryptedLivermoreChannelId),
       }
     },
 

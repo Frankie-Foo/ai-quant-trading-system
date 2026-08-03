@@ -190,6 +190,9 @@ test('runtime launch forwards a separate fixed Paper 4002 profile without changi
           host: '192.0.2.44',
           clientId: 91,
           paperAccount: 'DU7654321',
+          livermoreAppId: 'vbot-test',
+          livermoreAppSecret: 'push-secret-value',
+          livermoreChannelId: 'channel-test',
         },
       },
     },
@@ -203,7 +206,32 @@ test('runtime launch forwards a separate fixed Paper 4002 profile without changi
     IBKR_PAPER_HOST: '192.0.2.44',
     IBKR_PAPER_CLIENT_ID: '91',
     IBKR_PAPER_ACCOUNT: 'DU7654321',
+    LIVERMORE_APP_ID: 'vbot-test',
+    LIVERMORE_APP_SECRET: 'push-secret-value',
+    LIVERMORE_CHANNEL_ID: 'channel-test',
   })
   assert.equal(Object.hasOwn(launch.executionEnv, 'IBKR_PAPER_PORT'), false)
   assert.equal(Object.hasOwn(launch.executionEnv, 'IBKR_PORT'), false)
+})
+
+test('runtime safety secrets stay in child environment and out of process arguments', () => {
+  const launch = runtimeLaunch({
+    app: { isPackaged: false, getPath: () => 'C:\\Users\\research\\AppData' },
+    projectRoot: 'C:\\project',
+    token: 'ephemeral-runtime-token-value',
+    platform: 'win32',
+    marketData: {
+      key: 'market-key-value',
+      secret: 'market-secret-value',
+      massiveApiKey: 'massive-key-value',
+      secUserAgent: 'Research User research@example.com',
+      openRouterApiKey: 'openrouter-secret-value',
+      runtimeModels: { catalyst: 'openai/gpt-5.6', redTeam: 'anthropic/claude-sonnet-5' },
+    },
+  })
+
+  assert.equal(launch.marketDataEnv.OPENROUTER_RUNTIME_API_KEY, 'openrouter-secret-value')
+  assert.equal(launch.marketDataEnv.OPENROUTER_RUNTIME_CATALYST_MODEL, 'openai/gpt-5.6')
+  assert.equal(JSON.stringify(launch.args).includes('openrouter-secret-value'), false)
+  assert.equal(JSON.stringify(launch.args).includes('market-secret-value'), false)
 })

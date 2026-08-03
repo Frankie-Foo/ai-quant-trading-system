@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from datetime import UTC, datetime
 
@@ -86,10 +87,17 @@ def fetch_massive_news(
     end_utc: datetime,
     *,
     pace_seconds: float = 12.5,
+    ticker: str | None = None,
 ) -> pl.DataFrame:
     _validate_window(start_utc, end_utc)
     if pace_seconds < 0:
         raise ValueError("pace_seconds must be nonnegative")
+    normalized_ticker = None if ticker is None else ticker.strip().upper()
+    if normalized_ticker is not None and (
+        not normalized_ticker
+        or re.fullmatch(r"[A-Z][A-Z0-9.-]{0,14}", normalized_ticker) is None
+    ):
+        raise ValueError("Massive news ticker is invalid")
     headers = {"Authorization": f"Bearer {api_key_from_env()}"}
     url = MASSIVE_NEWS_URL
     params: dict[str, QueryValue] | None = {
@@ -98,6 +106,7 @@ def fetch_massive_news(
         "sort": "published_utc",
         "order": "asc",
         "limit": 1000,
+        **({"ticker": normalized_ticker} if normalized_ticker else {}),
     }
     retrieved = datetime.now(UTC)
     rows: list[dict[str, object]] = []

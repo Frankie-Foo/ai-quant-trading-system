@@ -258,6 +258,12 @@ export function paperAutopilotErrorMessage(error) {
   if (message.includes('paper_safety_envelope_invalid')) {
     return '安全包缺失、过期或不一致，自动模拟盘已保持关闭。'
   }
+  if (message.includes('paper_runtime_safety_not_configured')) {
+    return '请在设置中保存 OpenRouter 催化剂/红队模型，并填写利弗莫尔推送配置；自动模拟盘会保持关闭。'
+  }
+  if (message.includes('paper_not_connected')) {
+    return '请先连接 IBKR 模拟盘 4002，再刷新实时安全评估。'
+  }
   if (message.includes('account_mismatch')) {
     return '当前模拟网关账户与配置的 DU 账户不一致，连接已拒绝。'
   }
@@ -391,6 +397,12 @@ export function normalizePaperAutopilotSnapshot(snapshot) {
       : '',
     planSymbol: typeof source.plan_symbol === 'string'
       ? source.plan_symbol.slice(0, 15)
+      : '',
+    safetyRefreshedAtUtc: typeof source.safety_refreshed_at_utc === 'string'
+      ? source.safety_refreshed_at_utc.slice(0, 50)
+      : '',
+    safetyError: typeof source.safety_error === 'string'
+      ? source.safety_error.slice(0, 200)
       : '',
     lastTickAtUtc: typeof source.last_tick_at_utc === 'string'
       ? source.last_tick_at_utc.slice(0, 50)

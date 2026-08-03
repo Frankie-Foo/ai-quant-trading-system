@@ -1047,3 +1047,33 @@ today's accepted selection without giving an LLM authority over price or orders.
   tests passed, Ruff clean, strict mypy passed for touched modules, and Vite
   production build succeeded. IBKR Paper status 2110 remains an upstream gateway
   blocker; no automated or manual Paper order was sent in this milestone.
+
+## M36 desktop dynamic Paper safety loop - 2026-08-03
+
+Status: Paper-only 4002 automation now refreshes its safety envelope from current
+evidence before each deterministic decision. A missing dependency blocks new entry;
+the automation never falls back to live 4001.
+
+- Added a pinned OpenRouter JSON client for Catalyst and Red-Team safety outputs.
+  The agent result must be one schema-valid JSON object and report the exact configured
+  model; malformed, partial, timeout, or route-mismatch responses are unsafe.
+- The local runtime now combines ticker-filtered Massive news, append-only SIP quotes,
+  a read-only IBKR Paper account check, deterministic supervisor checks, and verified
+  Livermore-channel health. Assessment files, final schema-valid model JSON with
+  prompt hashes and provider usage, safety envelope, event inputs, broker reads,
+  refresh outcomes, and hash-chain audit events are retained under the local research
+  runs directory.
+- The desktop encrypts the two configured runtime models and optional Livermore App
+  ID/Secret/channel ID in OS secure storage. Secrets are passed only as child-process
+  environment values, never command arguments, renderer state, Git, bootstrap data,
+  or audit rows. Paper requires all three push values before safety refresh is enabled.
+- Paper workflow is now: create today’s rank-one frozen plan, connect Paper 4002,
+  refresh safety, validate current envelope, then type the dynamic confirmation to
+  start. Each 15-second cycle refreshes safety before reading facts. Failure writes an
+  immediately unsafe envelope, so the deterministic executor fails closed.
+- News-agent classifications are cached only when the bounded fact package is unchanged;
+  an observed new/removed source changes the prompt hash and triggers both agents again.
+  This preserves fresh safety evidence without paying for duplicate model calls.
+- Acceptance: 536 Python tests passed in 30.94 seconds; Ruff and strict mypy passed
+  across 186 source files; 32 Electron tests, 12 UI tests, and Vite production build
+  passed. No Paper or live order was submitted by this milestone’s verification.

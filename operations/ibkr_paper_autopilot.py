@@ -12,10 +12,10 @@ import re
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -50,10 +50,27 @@ from operations.autonomous_paper_runtime import (
     AutonomousRuntimeOutcome,
 )
 from operations.autonomous_plan_compiler import compile_autonomous_paper_plan
-from operations.autonomous_policy_adapter import load_runtime_safety_envelope
+from operations.autonomous_policy_adapter import (
+    RuntimeSafetyEnvelope,
+    load_runtime_safety_envelope,
+    write_runtime_safety_envelope,
+)
 
 NEW_YORK = ZoneInfo("America/New_York")
 PAPER_CONFIG_NAME = "approved-autonomous-paper.json"
+
+
+class PaperSafetyRefresher(Protocol):
+    """Structural desktop safety refresher, intentionally unable to place orders."""
+
+    def refresh(
+        self,
+        *,
+        bundles: tuple[AutonomousPaperPlanBundle, ...],
+        broker: AutonomousPaperBroker,
+        observed_at_utc: datetime,
+    ) -> dict[str, object]:
+        ...
 
 
 class _AuditedPaperBroker:
@@ -239,12 +256,14 @@ class PaperAutopilot:
         runs_root: Path,
         environ: Mapping[str, str] | None = None,
         broker_factory: Callable[[bool, str], AutonomousPaperBroker] | None = None,
+        safety_refresher: PaperSafetyRefresher | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.data_root = data_root
         self.runs_root = runs_root
         self.environ = os.environ if environ is None else environ
         self._broker_factory = broker_factory or self._default_broker
+        self._safety_refresher = safety_refresher
         self._now = now
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -264,6 +283,8 @@ class PaperAutopilot:
         self._audit_run_id = ""
         self._audit_event_count = 0
         self._audit_last_hash = ""
+        self._safety_refreshed_at_utc = ""
+        self._safety_error = ""
 
     @property
     def plan_path(self) -> Path:
@@ -284,6 +305,8 @@ class PaperAutopilot:
                 "plan_status": self._plan_status,
                 "plan_error": self._plan_error,
                 "plan_symbol": self._plan_symbol(),
+                "safety_refreshed_at_utc": self._safety_refreshed_at_utc,
+                "safety_error": self._safety_error,
                 "last_tick_at_utc": self._last_tick_at_utc,
                 "last_outcomes": [dict(item) for item in self._last_outcomes],
                 "last_error": self._last_error,
@@ -312,6 +335,8 @@ class PaperAutopilot:
             return self.snapshot()
         if kind == "prepare_plan":
             return self.prepare_plan()
+        if kind == "refresh_safety":
+            return self.refresh_safety()
         if kind == "start":
             confirmation = str(command.get("confirmation", ""))
             return self.start(confirmation=confirmation)
@@ -362,7 +387,22 @@ class PaperAutopilot:
             )
             self._plan_status = "prepared"
             self._plan_error = "paper_safety_envelope_missing"
+            self._safety_refreshed_at_utc = ""
+            self._safety_error = ""
             self._last_error = ""
+            return self.snapshot()
+
+    def refresh_safety(self) -> dict[str, object]:
+        """Refresh agent safety through the current read-only Paper connection."""
+
+        with self._lock:
+            if self._running:
+                raise RuntimeError("paper_autopilot_running")
+            if not self._connected or self._broker is None:
+                raise RuntimeError("paper_not_connected")
+            config = self._load_current_config()
+            self._refresh_safety(config=config, broker=self._broker)
+            self._validate_plan()
             return self.snapshot()
 
     def connect(self) -> dict[str, object]:
@@ -522,6 +562,19 @@ class PaperAutopilot:
         try:
             while not self._stop.is_set():
                 observed_at_utc = self._now()
+                if self._safety_refresher is not None:
+                    try:
+                        self._refresh_safety(
+                            config=config,
+                            broker=audited_broker,
+                            observed_at_utc=observed_at_utc,
+                        )
+                    except Exception as exc:
+                        self._write_safety_failure(
+                            config=config,
+                            observed_at_utc=observed_at_utc,
+                            error=exc,
+                        )
                 self._record_audit(
                     "tick_open",
                     {
@@ -570,11 +623,8 @@ class PaperAutopilot:
 
     def _validate_plan(self) -> AutonomousPaperRuntimeConfig:
         try:
-            config = load_autonomous_paper_config(self.plan_path)
-            today = self._now().astimezone(NEW_YORK).date()
+            config = self._load_current_config()
             for bundle in config.plans:
-                if bundle.plan.trade_date != today:
-                    raise ValueError("paper_plan_trade_date_mismatch")
                 if not bundle.safety_envelope_path.is_file():
                     raise ValueError("paper_safety_envelope_missing")
                 envelope = load_runtime_safety_envelope(bundle.safety_envelope_path)
@@ -587,6 +637,80 @@ class PaperAutopilot:
         self._plan_status = "valid"
         self._plan_error = ""
         return config
+
+    def _load_current_config(self) -> AutonomousPaperRuntimeConfig:
+        config = load_autonomous_paper_config(self.plan_path)
+        today = self._now().astimezone(NEW_YORK).date()
+        if any(bundle.plan.trade_date != today for bundle in config.plans):
+            raise ValueError("paper_plan_trade_date_mismatch")
+        return config
+
+    def _refresh_safety(
+        self,
+        *,
+        config: AutonomousPaperRuntimeConfig,
+        broker: AutonomousPaperBroker,
+        observed_at_utc: datetime | None = None,
+    ) -> None:
+        if self._safety_refresher is None:
+            raise RuntimeError("paper_safety_refresh_unavailable")
+        observed = observed_at_utc or self._now()
+        self._record_audit(
+            "safety_refresh_requested",
+            {
+                "observed_at_utc": observed.isoformat(),
+                "plan_ids": [bundle.plan.plan_id for bundle in config.plans],
+            },
+        )
+        try:
+            summary = self._safety_refresher.refresh(
+                bundles=config.plans,
+                broker=_AuditedPaperBroker(broker, self._record_audit),
+                observed_at_utc=observed,
+            )
+        except Exception as exc:
+            self._safety_error = _safe_error_code(exc)
+            self._record_audit(
+                "safety_refresh_failed",
+                {"error": self._safety_error, "observed_at_utc": observed.isoformat()},
+            )
+            raise
+        self._safety_refreshed_at_utc = observed.isoformat()
+        self._safety_error = ""
+        self._record_audit(
+            "safety_refresh_result",
+            _safety_summary_payload(summary, observed_at_utc=observed),
+        )
+
+    def _write_safety_failure(
+        self,
+        *,
+        config: AutonomousPaperRuntimeConfig,
+        observed_at_utc: datetime,
+        error: Exception,
+    ) -> None:
+        error_code = _safe_error_code(error)
+        for bundle in config.plans:
+            write_runtime_safety_envelope(
+                bundle.safety_envelope_path,
+                RuntimeSafetyEnvelope(
+                    trade_date=bundle.plan.trade_date,
+                    symbol=bundle.plan.symbol,
+                    generated_at_utc=observed_at_utc,
+                    expires_at_utc=observed_at_utc + timedelta(microseconds=1),
+                    negative_news_clear=None,
+                    material_negative=False,
+                    agents_healthy=False,
+                    push_healthy=False,
+                    source_snapshot_ids=(
+                        f"paper-safety-refresh-failed:{bundle.plan.plan_id}",
+                    ),
+                    provenance=(
+                        "operations.ibkr_paper_autopilot.safety_refresh.v1|"
+                        f"error={error_code}"
+                    ),
+                ),
+            )
 
     def _plan_symbol(self) -> str:
         if not self.plan_path.is_file():
@@ -747,6 +871,8 @@ def _outcome_audit_payload(outcome: AutonomousRuntimeOutcome) -> dict[str, objec
 
 def _safe_error_code(error: Exception) -> str:
     message = str(error).lower()
+    if "runtime_safety_not_configured" in message:
+        return "paper_runtime_safety_not_configured"
     if "timeout" in message:
         return "connection_timeout"
     if "connection" in message or "gateway" in message:
@@ -760,3 +886,25 @@ def _safe_error_code(error: Exception) -> str:
     if "confirmation" in message:
         return "confirmation_mismatch"
     return "paper_autopilot_failed"
+
+
+def _safety_summary_payload(
+    value: Mapping[str, object],
+    *,
+    observed_at_utc: datetime,
+) -> dict[str, object]:
+    return {
+        "observed_at_utc": observed_at_utc.isoformat(),
+        "plans": _safe_nonnegative_int(value.get("plans")),
+        "healthy_envelopes": _safe_nonnegative_int(value.get("healthy_envelopes")),
+        "input_errors": _safe_nonnegative_int(value.get("input_errors")),
+        "push_healthy": value.get("push_healthy") is True,
+    }
+
+
+def _safe_nonnegative_int(value: object) -> int:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        else 0
+    )

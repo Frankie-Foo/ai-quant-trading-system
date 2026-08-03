@@ -182,9 +182,21 @@ function runtimeLaunch({
   const marketDataSecret = String(marketData.secret || '').trim()
   const massiveApiKey = String(marketData.massiveApiKey || '').trim()
   const secUserAgent = String(marketData.secUserAgent || '').trim()
+  const openRouterApiKey = String(marketData.openRouterApiKey || '').trim()
+  const runtimeModels = marketData.runtimeModels && typeof marketData.runtimeModels === 'object'
+    ? marketData.runtimeModels
+    : {}
+  const catalystModel = String(runtimeModels.catalyst || '').trim()
+  const redTeamModel = String(runtimeModels.redTeam || '').trim()
   const realtimeConfigured = Boolean(marketDataKey && marketDataSecret)
   const standaloneConfigured = Boolean(
     realtimeConfigured && massiveApiKey && secUserAgent,
+  )
+  const runtimeAgentsConfigured = Boolean(
+    standaloneConfigured
+    && openRouterApiKey
+    && catalystModel
+    && redTeamModel,
   )
   const ibkr = marketData.ibkr && typeof marketData.ibkr === 'object'
     ? marketData.ibkr
@@ -207,6 +219,9 @@ function runtimeLaunch({
   const ibkrPaperHost = String(ibkrPaper.host || '').trim()
   const ibkrPaperClientId = Number(ibkrPaper.clientId)
   const ibkrPaperAccount = String(ibkrPaper.paperAccount || '').trim().toUpperCase()
+  const livermoreAppId = String(ibkrPaper.livermoreAppId || '').trim()
+  const livermoreAppSecret = String(ibkrPaper.livermoreAppSecret || '').trim()
+  const livermoreChannelId = String(ibkrPaper.livermoreChannelId || '').trim()
   const ibkrPaperConfigured = Boolean(
     ibkrPaperHost
     && ibkrPaperHost.length <= 253
@@ -256,6 +271,13 @@ function runtimeLaunch({
               DESKTOP_MARKET_DATA_PROVIDER: 'alpaca_proxy_rest',
             }
           : {}),
+        ...(runtimeAgentsConfigured
+          ? {
+              OPENROUTER_RUNTIME_API_KEY: openRouterApiKey,
+              OPENROUTER_RUNTIME_CATALYST_MODEL: catalystModel,
+              OPENROUTER_RUNTIME_RED_TEAM_MODEL: redTeamModel,
+            }
+          : {}),
       }
     : {}
   const executionEnv = ibkrConfigured
@@ -273,6 +295,13 @@ function runtimeLaunch({
         IBKR_PAPER_HOST: ibkrPaperHost,
         IBKR_PAPER_CLIENT_ID: String(ibkrPaperClientId),
         IBKR_PAPER_ACCOUNT: ibkrPaperAccount,
+        ...(livermoreAppId && livermoreAppSecret && livermoreChannelId
+          ? {
+              LIVERMORE_APP_ID: livermoreAppId,
+              LIVERMORE_APP_SECRET: livermoreAppSecret,
+              LIVERMORE_CHANNEL_ID: livermoreChannelId,
+            }
+          : {}),
       }
     : {}
   if (app.isPackaged) {

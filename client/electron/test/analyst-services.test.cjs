@@ -196,6 +196,9 @@ test('IBKR Paper settings use a separate encrypted DU-only 4002 profile', () => 
     host: '192.0.2.44',
     clientId: 91,
     paperAccount: 'DU7654321',
+    livermoreAppId: 'vbot-test',
+    livermoreAppSecret: 'push-secret-value',
+    livermoreChannelId: 'channel-test',
   })
 
   assert.deepEqual(store.loadPaperExecutionSecrets(), {
@@ -203,12 +206,16 @@ test('IBKR Paper settings use a separate encrypted DU-only 4002 profile', () => 
     clientId: 91,
     paperAccount: 'DU7654321',
     port: 4002,
+    livermoreAppId: 'vbot-test',
+    livermoreAppSecret: 'push-secret-value',
+    livermoreChannelId: 'channel-test',
   })
   assert.deepEqual(store.loadPublic().paperExecution, {
     configured: true,
     hostConfigured: true,
     clientIdConfigured: true,
     accountConfigured: true,
+    pushConfigured: true,
     paperAccountMasked: 'DU***4321',
     port: 4002,
   })
@@ -224,6 +231,7 @@ test('IBKR Paper settings use a separate encrypted DU-only 4002 profile', () => 
   const persisted = fs.readFileSync(settingsPath, 'utf8')
   assert.equal(persisted.includes('DU7654321'), false)
   assert.equal(persisted.includes('192.0.2.44'), false)
+  assert.equal(persisted.includes('push-secret-value'), false)
 })
 
 test('execution IPC accepts only explicit long-only command shapes', () => {

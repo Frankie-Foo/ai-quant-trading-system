@@ -34,6 +34,7 @@ function marketDataFromSecrets(secrets) {
     secret: String(secrets?.marketDataSecret || '').trim(),
     massiveApiKey: String(secrets?.massiveApiKey || '').trim(),
     secUserAgent: String(secrets?.secUserAgent || '').trim(),
+    openRouterApiKey: String(secrets?.openRouterApiKey || '').trim(),
   }
 }
 
@@ -42,8 +43,13 @@ function runtimeConfiguration(
   executionSecrets,
   paperExecutionSecrets,
 ) {
+  const models = settingsStore?.loadPublic()?.models || {}
   return {
     ...marketDataFromSecrets(connectionSecrets),
+    runtimeModels: {
+      catalyst: String(models.catalyst || '').trim(),
+      redTeam: String(models.red_team || '').trim(),
+    },
     ibkr: {
       ...executionSecrets,
       paper: paperExecutionSecrets,
@@ -160,6 +166,9 @@ function sanitizePaperAutopilotSnapshot(snapshot) {
     plan_status: safeResultText(source.plan_status, 40) || 'missing',
     plan_error: safeResultText(source.plan_error, 200) || '',
     plan_symbol: safeResultText(source.plan_symbol, 15) || '',
+    safety_refreshed_at_utc:
+      safeResultText(source.safety_refreshed_at_utc, 50) || '',
+    safety_error: safeResultText(source.safety_error, 200) || '',
     last_tick_at_utc: safeResultText(source.last_tick_at_utc, 50) || '',
     last_outcomes: outcomes,
     last_error: safeResultText(source.last_error, 200) || '',
@@ -255,6 +264,11 @@ function registerHandlers() {
       }
     }
     settingsStore.saveModels(models)
+    await restartLocalRuntime(runtimeConfiguration(
+      settingsStore.loadSecrets(),
+      settingsStore.loadExecutionSecrets(),
+      settingsStore.loadPaperExecutionSecrets(),
+    ))
     return settingsStore.loadPublic()
   })
 

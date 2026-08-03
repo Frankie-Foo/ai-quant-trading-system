@@ -4,6 +4,7 @@ import json
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 import pytest
@@ -75,6 +76,28 @@ class _Broker:
         self, _request: PaperExtendedLimitRequest
     ) -> BrokerOrder:
         raise AssertionError("must not submit")
+
+
+class _SafetyRefresher:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def refresh(
+        self,
+        *,
+        bundles: object,
+        broker: Any,
+        observed_at_utc: datetime,
+    ) -> dict[str, object]:
+        del bundles, observed_at_utc
+        self.calls += 1
+        assert broker.get_account().status == "ACTIVE"
+        return {
+            "plans": 1,
+            "healthy_envelopes": 1,
+            "input_errors": 0,
+            "push_healthy": True,
+        }
 
 
 def _write_current_paper_plan(runs_root: Path, now: datetime) -> None:
@@ -275,6 +298,39 @@ def test_paper_autopilot_prepares_auditable_plan_from_current_selection(
     assert isinstance(payload, dict)
     assert payload["symbol"] == "AAPL"
     assert (tmp_path / "runs" / "paper-autopilot" / "approved-autonomous-paper.json").is_file()
+
+
+def test_paper_autopilot_refreshes_safety_only_after_read_only_paper_connection(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 3, 14, 0, tzinfo=UTC)
+    _write_current_paper_plan(tmp_path / "runs", now)
+    safety = _SafetyRefresher()
+    autopilot = PaperAutopilot(
+        data_root=tmp_path / "data",
+        runs_root=tmp_path / "runs",
+        environ={
+            "IBKR_PAPER_HOST": "192.0.2.44",
+            "IBKR_PAPER_CLIENT_ID": "91",
+            "IBKR_PAPER_ACCOUNT": "DU7654321",
+        },
+        broker_factory=lambda writes_enabled, account: _Broker(writes_enabled, account),
+        safety_refresher=safety,
+        now=lambda: now,
+    )
+
+    with pytest.raises(RuntimeError, match="paper_not_connected"):
+        autopilot.handle({"kind": "refresh_safety"})
+    autopilot.handle({"kind": "connect"})
+    refreshed = autopilot.handle({"kind": "refresh_safety"})
+
+    assert safety.calls == 1
+    assert refreshed["plan_status"] == "valid"
+    assert refreshed["safety_error"] == ""
+    events = [event["event_type"] for event in autopilot.audit_history()]
+    assert "safety_refresh_requested" in events
+    assert "broker_account_read" in events
+    assert "safety_refresh_result" in events
 
 
 def test_paper_autopilot_persists_every_tick_boundary_before_execution(
