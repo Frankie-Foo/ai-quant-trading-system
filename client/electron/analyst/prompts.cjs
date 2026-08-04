@@ -1,3 +1,11 @@
+const HUMAN_REVIEW_FORMAT = [
+  '请像给同事口头复盘一样说人话，不要从系统定义或接口字段开始。',
+  '严格输出四段：一、结论（一句话先说清今天做得对不对）；二、关键数据（最多五条，中文名称后跟数值）；三、原因（把数据连成因果，只说证据支持的部分）；四、改进（最多三条可执行的检查或规则）。',
+  '不要输出 JSON、表格代码、snake_case 字段名、快照 ID、流水号、pipeline_status 或日志口吻。字段必须翻译：RVOL 写相对成交量，close_return 写收盘涨跌，mfe 写盘中最高浮盈，selection_status 写是否入选，root_cause 写主要原因。',
+  '每个数字都说明它代表什么；没有证据就直接说“没有证据，不能判断”，不能用听起来确定的猜测补空白。',
+  '总长度控制在 800 个中文字符以内，不承诺收益，不授权买卖，不声称已经下单。',
+].join('')
+
 const ROLE_PROMPTS = {
   catalyst: [
     '你是只读催化剂分析 Agent。',
@@ -178,7 +186,7 @@ function agentMessages(role, desk) {
   return [
     {
       role: 'system',
-      content: `${rolePrompt}请用中文给出结构化、简洁、可追溯的结论。`,
+      content: `${rolePrompt}${HUMAN_REVIEW_FORMAT}`,
     },
     {
       role: 'user',

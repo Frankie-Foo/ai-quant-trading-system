@@ -894,6 +894,10 @@ test('assistant and agent prompts are evidence bounded and force non-executable 
   assert.match(assistant[0].content, /600 个中文字符以内/)
   assert.match(assistant[1].content, /2026-07-31/)
   assert.match(redTeam[0].content, /不能授权买卖/)
+  assert.match(redTeam[0].content, /像给同事口头复盘一样说人话/)
+  assert.match(redTeam[0].content, /严格输出四段/)
+  assert.match(redTeam[0].content, /不要输出 JSON/)
+  assert.match(redTeam[0].content, /相对成交量/)
   assert.throws(() => agentMessages('trader', desk), /未知 Agent/)
 })
 
