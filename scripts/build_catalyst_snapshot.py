@@ -18,7 +18,11 @@ from data_plane.catalysts import (
     empty_catalyst_frame,
 )
 from data_plane.contracts import DataQualityCheck, DatasetSnapshot, QualitySeverity
-from data_plane.providers.catalyst_news import fetch_alpaca_news, fetch_massive_news
+from data_plane.providers.catalyst_news import (
+    fetch_alpaca_news,
+    fetch_alpaca_news_direct,
+    fetch_massive_news,
+)
 from data_plane.providers.sec_filings import (
     fetch_candidate_filings,
     fetch_live_candidate_filings,
@@ -408,15 +412,27 @@ def main() -> None:
             end_utc=end_utc,
         )
     else:
-        standalone = os.getenv("DESKTOP_MARKET_DATA_PROVIDER", "").strip() in {
+        market_provider = os.getenv("DESKTOP_MARKET_DATA_PROVIDER", "").strip().lower()
+        standalone = market_provider in {
             "local_massive",
             "alpaca_proxy_rest",
         }
-        alpaca = (
-            empty_catalyst_frame()
-            if standalone
-            else fetch_alpaca_news(start_utc, end_utc)
-        )
+        if market_provider == "alpaca_direct":
+            direct_symbols = tuple(
+                candidate_universe
+                .filter(pl.col("precheck_pass"))
+                .get_column("symbol")
+                .to_list()
+            )
+            alpaca = fetch_alpaca_news_direct(
+                start_utc,
+                end_utc,
+                symbols=direct_symbols,
+            )
+        elif standalone:
+            alpaca = empty_catalyst_frame()
+        else:
+            alpaca = fetch_alpaca_news(start_utc, end_utc)
         massive = fetch_massive_news(
             start_utc, end_utc, pace_seconds=args.massive_pace_seconds
         )

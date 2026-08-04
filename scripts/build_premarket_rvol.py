@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 import polars as pl
 from dotenv import load_dotenv
+from pydantic import SecretStr
 
 from data_plane.calendar import build_xnys_schedule
 from data_plane.candidate_pools import load_premarket_pool
@@ -27,8 +28,9 @@ from data_plane.providers.alpaca import (
     fetch_bars,
     stock_data_policy_from_env,
 )
+from data_plane.providers.alpaca_direct import DirectAlpacaMarketDataClient
 from data_plane.providers.alpaca_proxy import fetch_alpaca_proxy_bars
-from data_plane.quality import BAR_SCHEMA_VERSION, audit_minute_bars
+from data_plane.quality import BAR_SCHEMA_VERSION, audit_minute_bars, canonicalize_bars
 from data_plane.storage import persist_snapshot
 from kernel.config import load_config
 from kernel.features.momentum import premarket_window_utc, rvol
@@ -40,6 +42,7 @@ HISTORY_SESSIONS = 20
 RAW_SOURCE = "alpaca.sip.premarket_1m"
 MASSIVE_RAW_SOURCE = "massive.sip.premarket_1m"
 PROXY_RAW_SOURCE = "alpaca_proxy.sip.premarket_1m"
+DIRECT_RAW_SOURCE = "alpaca_direct.sip.premarket_1m"
 FEATURE_SOURCE = "kernel.premarket.rvol_candidates"
 FACTOR_FEATURE_SOURCE = "kernel.premarket.factor_rvol_candidates"
 SYMBOL_BATCH_SIZE = 100
@@ -392,6 +395,43 @@ def main() -> None:
         raw_source = PROXY_RAW_SOURCE
         provider_name = "alpaca_proxy"
         bar_fetcher = fetch_alpaca_proxy_bars
+    elif desktop_provider == "alpaca_direct":
+        policy = AlpacaStockDataPolicy(feed="sip", delay_minutes=0, is_realtime=True)
+        raw_source = DIRECT_RAW_SOURCE
+        provider_name = "alpaca_direct"
+        key_id = os.getenv("ALPACA_API_KEY_ID", "").strip()
+        secret_key = os.getenv("ALPACA_API_SECRET_KEY", "").strip()
+        if not key_id or not secret_key:
+            raise RuntimeError("direct Alpaca credentials are missing")
+
+        def direct_bar_fetcher(
+            symbols: tuple[str, ...],
+            start_utc: datetime,
+            end_utc: datetime,
+        ) -> pl.DataFrame:
+            client = DirectAlpacaMarketDataClient(
+                key_id=SecretStr(key_id),
+                secret_key=SecretStr(secret_key),
+            )
+            try:
+                events = client.fetch_bars(
+                    symbols,
+                    start_utc=start_utc,
+                    end_utc=end_utc,
+                )
+            finally:
+                client.close()
+            rows = [event.model_dump(mode="python") for event in events]
+            for row in rows:
+                row["source"] = "alpaca.direct"
+                row["feed"] = policy.feed
+                row["adjustment"] = "split_adjusted"
+            frame = pl.DataFrame(rows) if rows else pl.DataFrame()
+            return canonicalize_bars(frame).filter(
+                (pl.col("ts_utc") >= start_utc) & (pl.col("ts_utc") < end_utc)
+            )
+
+        bar_fetcher = direct_bar_fetcher
     elif desktop_provider == "local_massive":
         policy = AlpacaStockDataPolicy(feed="sip", delay_minutes=0, is_realtime=True)
         raw_source = MASSIVE_RAW_SOURCE

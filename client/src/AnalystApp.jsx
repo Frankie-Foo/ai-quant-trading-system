@@ -507,11 +507,11 @@ function PaperAutopilotPanel({ snapshot, settings, onRefresh, onCommand }) {
 
   return (
     <section className="panel execution-control-panel paper-autopilot-panel">
-      <header className="analyst-panel-header"><div><span className="eyebrow">ISOLATED PAPER AUTOMATION</span><h3>IBKR 模拟盘自动执行</h3></div><span>固定端口 {paper.port}</span></header>
+      <header className="analyst-panel-header"><div><span className="eyebrow">ISOLATED PAPER AUTOMATION</span><h3>Alpaca 模拟盘自动执行</h3></div><span>固定端口 {paper.port}</span></header>
       <p>这条通道只接收今日冻结的执行计划与安全包；Agent 只能影响安全包，不能把自然语言直接变成订单。它与 4001 实盘手动执行完全隔离。</p>
       <div className="execution-status-grid" aria-live="polite">
         <article><span>模拟盘配置</span><strong>{paper.configured && settings?.paperExecution?.configured ? '已保存' : '未配置'}</strong><small>{paper.accountMasked || settings?.paperExecution?.paperAccountMasked || '需填写 DU 账户'}</small></article>
-        <article><span>网关连接</span><strong>{paper.connected ? '已连接' : '未连接'}</strong><small>仅模拟盘 4002</small></article>
+        <article><span>8765 服务连接</span><strong>{paper.connected ? '已连接' : '未连接'}</strong><small>仅 Alpaca Paper</small></article>
         <article><span>冻结计划</span><strong>{paper.planStatus === 'valid' ? '已校验' : '未就绪'}</strong><small>{paper.safetyRefreshedAtUtc ? `安全评估 ${localTime(paper.safetyRefreshedAtUtc)}` : paper.planSymbol ? `${paper.planSymbol} · ${paper.planError || '待刷新安全评估'}` : paper.planError || '必须是今天的计划和安全包'}</small></article>
         <article><span>自动执行</span><strong className={paper.running ? 'danger-text' : ''}>{paper.running ? '运行中' : '关闭'}</strong><small>{paper.lastTickAtUtc ? `最近轮询 ${localTime(paper.lastTickAtUtc)}` : '重启后默认关闭'}</small></article>
       </div>
@@ -521,7 +521,7 @@ function PaperAutopilotPanel({ snapshot, settings, onRefresh, onCommand }) {
       <div className="execution-arm-control">
         <div><strong>自动模拟盘总开关</strong><small>启动前必须连接、校验当日冻结计划、通过 What-If；停止只禁止后续决策，不会撤销已提交的保护性订单。</small></div>
         {!paper.running && <div className="execution-form-actions"><button type="button" disabled={busy} onClick={() => run({ kind: 'prepare_plan' }, '已从今日排名第一的选股生成冻结计划；安全 Agent 通过前不会启动。')}>从今日选股生成计划</button><button type="button" disabled={busy || !settings?.paperExecution?.configured} onClick={() => run(paper.connected ? { kind: 'disconnect' } : { kind: 'connect' }, paper.connected ? '模拟盘连接已关闭。' : '模拟盘已连接；尚未启用自动下单。')}>{paper.connected ? '关闭模拟盘连接' : '连接模拟盘'}</button><button type="button" disabled={busy || !paper.connected || !settings?.paperExecution?.pushConfigured} onClick={() => run({ kind: 'refresh_safety' }, '实时新闻、模型审查、行情与推送健康检查已写入安全包。')}>刷新实时安全评估</button><button type="button" disabled={busy || !paper.connected} onClick={() => run({ kind: 'validate_plan' }, '冻结计划与安全包校验完成。')}>校验今日冻结计划</button></div>}
-        {paper.running ? <button type="button" className="danger-button" disabled={busy} onClick={() => run({ kind: 'stop' }, '自动模拟盘已停止；请在 IBKR 中核对未完成的保护性订单。')}>停止自动模拟盘</button> : <div className="paper-arm-row"><label><span>输入“{phrase}”</span><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoComplete="off" /></label><button type="button" className="danger-button" disabled={busy || !paper.connected || paper.planStatus !== 'valid' || confirmation !== phrase} onClick={() => run({ kind: 'start', confirmation }, '自动模拟盘已启动：仅会执行冻结计划中的标的与风控规则。')}>启动自动模拟盘</button></div>}
+        {paper.running ? <button type="button" className="danger-button" disabled={busy} onClick={() => run({ kind: 'stop' }, '自动模拟盘已停止；请在 Alpaca Paper 中核对未完成的保护性订单。')}>停止自动模拟盘</button> : <div className="paper-arm-row"><label><span>输入“{phrase}”</span><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoComplete="off" /></label><button type="button" className="danger-button" disabled={busy || !paper.connected || paper.planStatus !== 'valid' || confirmation !== phrase} onClick={() => run({ kind: 'start', confirmation }, '自动模拟盘已启动：仅会执行冻结计划中的标的与风控规则。')}>启动自动模拟盘</button></div>}
       </div>
       {paper.lastOutcomes.length > 0 && <div className="execution-ledger"><header className="analyst-panel-header"><h3>最近自动决策</h3><span>{paper.lastOutcomes.length} 条</span></header>{paper.lastOutcomes.map((outcome) => <p key={`${outcome.planId}-${outcome.symbol}`}><strong>{outcome.symbol || 'N/A'} · {outcome.action || 'N/A'}</strong> {outcome.reasons.join('；') || '无补充原因'}{outcome.degradedReasons.length > 0 ? ` · 降级：${outcome.degradedReasons.join('；')}` : ''}</p>)}</div>}
       {message && <p className="execution-status-message" aria-live="polite">{message}</p>}
@@ -784,6 +784,36 @@ function ExecutionSettingsForm({ settings, busy, error, onImport, onSave, onClea
   )
 }
 
+function AlpacaPaperExecutionSettingsForm({ settings, busy, error, onSave }) {
+  const configured = settings.paperExecution?.configured === true
+  const [values, setValues] = useState({
+    baseUrl: 'http://127.0.0.1:8765',
+    apiToken: '',
+    paperAccount: 'PAPER',
+    livermoreAppId: '',
+    livermoreAppSecret: '',
+    livermoreChannelId: '',
+  })
+  const update = (key, value) => setValues((current) => ({ ...current, [key]: value }))
+  return (
+    <section className="panel execution-settings-panel paper-autopilot-settings">
+      <header className="analyst-panel-header"><div><span className="eyebrow">ALPACA PAPER AUTO EXECUTION</span><h3>Alpaca 模拟盘自动执行连接</h3></div><span>固定端口 8765</span></header>
+      <p>客户端只通过本机 8765 服务访问 Alpaca Paper；IBKR 4002 仅保留在旧分支。</p>
+      <form onSubmit={(event) => { event.preventDefault(); onSave(values) }}>
+        <label><span>8765 服务地址</span><input value={values.baseUrl} onChange={(event) => update('baseUrl', event.target.value)} placeholder="http://127.0.0.1:8765" required /></label>
+        <label><span>8765 访问令牌</span><input type="password" value={values.apiToken} onChange={(event) => update('apiToken', event.target.value)} placeholder={configured ? '已安全保存；留空保持不变' : 'CLOUD_PAPER_API_TOKEN'} autoComplete="new-password" /></label>
+        <label><span>Paper 账户标签</span><input value={values.paperAccount} onChange={(event) => update('paperAccount', event.target.value.toUpperCase())} placeholder={settings.paperExecution?.paperAccountMasked || 'PAPER'} autoComplete="off" required /></label>
+        <label><span>利弗莫尔 App ID</span><input value={values.livermoreAppId} onChange={(event) => update('livermoreAppId', event.target.value)} placeholder={settings.paperExecution?.pushConfigured ? '已安全保存；留空保持不变' : 'vbot_...'} autoComplete="off" /></label>
+        <label><span>利弗莫尔 App Secret</span><input type="password" value={values.livermoreAppSecret} onChange={(event) => update('livermoreAppSecret', event.target.value)} placeholder={settings.paperExecution?.pushConfigured ? '已安全保存；留空保持不变' : '用于安全通知健康检查'} autoComplete="new-password" /></label>
+        <label><span>利弗莫尔群聊 ID</span><input value={values.livermoreChannelId} onChange={(event) => update('livermoreChannelId', event.target.value)} placeholder={settings.paperExecution?.pushConfigured ? '已安全保存；留空保持不变' : 'channel_id'} autoComplete="off" /></label>
+        <button type="submit" disabled={busy}>{busy ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}{configured ? '更新 8765 模拟盘配置' : '保存 8765 模拟盘配置'}</button>
+      </form>
+      {error && <div className="inline-error" role="alert"><AlertTriangle size={15} />{error}</div>}
+      <p>流程：生成计划 → 连接 8765 → 刷新安全评估 → 校验 → 输入动态确认文字后启动。令牌只写入系统安全存储。</p>
+    </section>
+  )
+}
+
 function PaperExecutionSettingsForm({ settings, busy, error, onSave }) {
   const configured = settings.paperExecution?.configured === true
   const [values, setValues] = useState({
@@ -824,10 +854,10 @@ function SettingsPage({ settings, models, runtimeStatus, workflowStatus, executi
         <section className="panel settings-card"><KeyRound size={20} /><h3>安全凭据</h3><div><span>OpenRouter</span><strong>{settings.openRouterKeyConfigured ? '已安全保存' : '未配置'}</strong></div><div><span>Massive</span><strong>{settings.massiveConfigured ? '已安全保存' : '未配置'}</strong></div><div><span>Alpaca SIP</span><strong>{settings.marketDataConfigured ? '已安全保存' : '未配置'}</strong></div><div><span>SEC</span><strong>{settings.secConfigured ? '已安全保存' : '未配置'}</strong></div></section>
         <section className="panel settings-card"><ShieldCheck size={20} /><h3>数据源状态</h3><div><span>执行位置</span><strong>{runtimeStatus?.local_execution ? '本机' : '不可用'}</strong></div><div><span>实时行情</span><strong>{runtimeStatus?.market_data?.realtime_ready ? 'Alpaca SIP 已连接' : '不可用'}</strong></div><div><span>Massive 日线</span><strong>{workflowStatus?.data_inventory?.grouped_daily || 0} 个快照</strong></div><div><span>选股准备</span><strong>{workflowStatus?.data_inventory?.ready_for_selection ? '已就绪' : '等待首次同步'}</strong></div></section>
         <section className="panel settings-card"><Clock3 size={20} /><h3>IBKR 实盘执行</h3><div><span>连接配置</span><strong>{settings.execution?.configured ? '已安全保存' : '未配置'}</strong></div><div><span>账户绑定</span><strong>{settings.execution?.accountBound ? settings.execution?.liveAccountMasked : '未绑定'}</strong></div><div><span>总开关</span><strong>{execution.enabled ? '开启' : '关闭'}</strong></div><div><span>连接</span><strong>{execution.connected ? '已连接' : '未连接'}</strong></div><div><span>下单</span><strong>{execution.writesArmed ? '临时启用' : '关闭'}</strong></div></section>
-        <section className="panel settings-card"><Bot size={20} /><h3>IBKR 模拟盘自动执行</h3><div><span>连接配置</span><strong>{settings.paperExecution?.configured ? '已安全保存' : '未配置'}</strong></div><div><span>账户</span><strong>{settings.paperExecution?.paperAccountMasked || '未配置'}</strong></div><div><span>推送健康检查</span><strong>{settings.paperExecution?.pushConfigured ? '已安全保存' : '未配置'}</strong></div><div><span>端口</span><strong>4002</strong></div><div><span>状态</span><strong>{normalizePaperAutopilotSnapshot(paperSnapshot).running ? '运行中' : '关闭'}</strong></div></section>
+        <section className="panel settings-card"><Bot size={20} /><h3>Alpaca 模拟盘自动执行</h3><div><span>连接配置</span><strong>{settings.paperExecution?.configured ? '已安全保存' : '未配置'}</strong></div><div><span>账户</span><strong>{settings.paperExecution?.paperAccountMasked || '未配置'}</strong></div><div><span>推送健康检查</span><strong>{settings.paperExecution?.pushConfigured ? '已安全保存' : '未配置'}</strong></div><div><span>端口</span><strong>8765</strong></div><div><span>状态</span><strong>{normalizePaperAutopilotSnapshot(paperSnapshot).running ? '运行中' : '关闭'}</strong></div></section>
       </div>
       <ExecutionSettingsForm settings={settings} busy={busy} error={error} onImport={onImportExecution} onSave={onSaveExecution} onClearBinding={onClearExecutionBinding} />
-      <PaperExecutionSettingsForm settings={settings} busy={busy} error={error} onSave={onSavePaperExecution} />
+      <AlpacaPaperExecutionSettingsForm settings={settings} busy={busy} error={error} onSave={onSavePaperExecution} />
       {!editingModels ? (
         <section className="panel current-models">
           <header className="analyst-panel-header"><div><span className="eyebrow">MODEL ROUTING</span><h3>当前模型</h3></div><button type="button" onClick={async () => { await onLoadModels(); setEditingModels(true) }}>更改模型</button></header>
@@ -1229,7 +1259,7 @@ export default function AnalystApp() {
       <div className="analyst-boundary-stack">
         <section className="analyst-boundary"><ShieldCheck size={17} /><div><strong>研究内核 · orders_authorized=false</strong><span>选股、因子、复盘和 Agent 永远只读，不能调用订单接口。</span></div><b>RESEARCH ONLY</b></section>
         <section className={`analyst-boundary manual ${normalizeExecutionSnapshot(executionSnapshot).enabled ? 'live' : ''}`}><ArrowLeftRight size={17} /><div><strong>手动执行台 · 仅实盘 4001</strong><span>隔离的人工订单入口；实盘总开关与写权限分离，重启默认全部关闭。</span></div><b>{normalizeExecutionSnapshot(executionSnapshot).writesArmed ? 'ARMED' : normalizeExecutionSnapshot(executionSnapshot).enabled ? 'CONNECTED' : 'OFF'}</b></section>
-        <section className={`analyst-boundary paper ${normalizePaperAutopilotSnapshot(paperAutopilotSnapshot).running ? 'live' : ''}`}><Bot size={17} /><div><strong>自动模拟盘 · 仅 Paper 4002</strong><span>仅执行今日冻结计划；重启默认停止，实盘 4001 永远不受此开关影响。</span></div><b>{normalizePaperAutopilotSnapshot(paperAutopilotSnapshot).running ? 'RUNNING' : normalizePaperAutopilotSnapshot(paperAutopilotSnapshot).connected ? 'CONNECTED' : 'OFF'}</b></section>
+        <section className={`analyst-boundary paper ${normalizePaperAutopilotSnapshot(paperAutopilotSnapshot).running ? 'live' : ''}`}><Bot size={17} /><div><strong>自动模拟盘 · Alpaca Paper 8765</strong><span>仅执行今日冻结计划；重启默认停止，IBKR 4001 实盘永远不受此开关影响。</span></div><b>{normalizePaperAutopilotSnapshot(paperAutopilotSnapshot).running ? 'RUNNING' : normalizePaperAutopilotSnapshot(paperAutopilotSnapshot).connected ? 'CONNECTED' : 'OFF'}</b></section>
       </div>
       {error && <div className="analyst-global-error"><AlertTriangle size={16} />{error}。保留最后一次已知证据，不生成新的确定性结论。</div>}
       <div className="analyst-workspace">

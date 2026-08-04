@@ -154,9 +154,10 @@ function sanitizePaperAutopilotSnapshot(snapshot) {
       })
     : []
   return {
-    schema_version: 'ibkr.paper_autopilot.v1',
+    schema_version: 'alpaca.paper_autopilot.v1',
+    provider_id: safeResultText(source.provider_id, 80) || 'alpaca_paper_local_api',
     mode: 'paper',
-    port: 4002,
+    port: 8765,
     configured: source.configured === true,
     connected: source.connected === true,
     running: source.running === true,

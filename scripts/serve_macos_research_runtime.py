@@ -15,9 +15,9 @@ from pathlib import Path
 from execution.ibkr_execution import BrokerPort
 from execution.ibkr_execution import ExecutionDesk as IbkrExecutionDesk
 from execution.ibkr_tws_adapter import OfficialIbapiAdapter
+from operations.alpaca_paper_autopilot import AlpacaPaperAutopilot
 from operations.bootstrap_data import BootstrapImporter
 from operations.desktop_paper_safety import DesktopPaperSafetyRefresher
-from operations.ibkr_paper_autopilot import PaperAutopilot
 from operations.local_research_http import build_local_research_http_server
 from operations.local_research_runtime import (
     AlpacaProxyMarketDataAdapter,
@@ -146,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
             environ=os.environ,
             runs_root=runs_root,
         ),
-        paper_autopilot=PaperAutopilot(
+        paper_autopilot=AlpacaPaperAutopilot(
             data_root=data_root,
             runs_root=runs_root,
             environ=os.environ,

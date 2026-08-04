@@ -115,15 +115,15 @@ test('local runtime client exposes only bounded execution error codes', async ()
   )
 })
 
-test('local runtime client keeps Paper auto-execution on its own 4002 routes', async () => {
+test('local runtime client keeps Alpaca Paper auto-execution on its own 8765 routes', async () => {
   const requests = []
   const client = createLocalRuntimeClient({
     fetchImpl: async (url, options) => {
       requests.push({ url, options })
       return jsonResponse({
-        schema_version: 'ibkr.paper_autopilot.v1',
+        schema_version: 'alpaca.paper_autopilot.v1',
         mode: 'paper',
-        port: 4002,
+        port: 8765,
         configured: true,
         connected: options.method === 'POST',
         running: false,
@@ -214,7 +214,7 @@ test('runtime launch can detect an account before first secure binding', () => {
   })
 })
 
-test('runtime launch forwards a separate fixed Paper 4002 profile without changing live 4001', () => {
+test('runtime launch forwards a separate fixed Alpaca Paper 8765 profile without changing live 4001', () => {
   const launch = runtimeLaunch({
     app: {
       isPackaged: false,
@@ -230,9 +230,9 @@ test('runtime launch forwards a separate fixed Paper 4002 profile without changi
         liveAccount: 'U1234567',
         maxOrderNotional: 25_000,
         paper: {
-          host: '192.0.2.44',
-          clientId: 91,
-          paperAccount: 'DU7654321',
+          baseUrl: 'http://127.0.0.1:8765',
+          apiToken: 'paper-api-token-value-1234567890',
+          paperAccount: 'PAPER',
           livermoreAppId: 'vbot-test',
           livermoreAppSecret: 'push-secret-value',
           livermoreChannelId: 'channel-test',
@@ -246,9 +246,9 @@ test('runtime launch forwards a separate fixed Paper 4002 profile without changi
     IBKR_CLIENT_ID: '17',
     IBKR_LIVE_ACCOUNT: 'U1234567',
     IBKR_MAX_ORDER_NOTIONAL: '25000',
-    IBKR_PAPER_HOST: '192.0.2.44',
-    IBKR_PAPER_CLIENT_ID: '91',
-    IBKR_PAPER_ACCOUNT: 'DU7654321',
+    CLOUD_PLATFORM_BASE_URL: 'http://127.0.0.1:8765',
+    CLOUD_PAPER_API_TOKEN: 'paper-api-token-value-1234567890',
+    ALPACA_PAPER_ACCOUNT: 'PAPER',
     LIVERMORE_APP_ID: 'vbot-test',
     LIVERMORE_APP_SECRET: 'push-secret-value',
     LIVERMORE_CHANNEL_ID: 'channel-test',

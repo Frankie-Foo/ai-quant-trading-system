@@ -95,9 +95,10 @@ class DisabledPaperAutopilot:
 
     def snapshot(self) -> dict[str, object]:
         return {
-            "schema_version": "ibkr.paper_autopilot.v1",
+            "schema_version": "alpaca.paper_autopilot.v1",
+            "provider_id": "alpaca_paper_local_api",
             "mode": "paper",
-            "port": 4002,
+            "port": 8765,
             "configured": False,
             "connected": False,
             "running": False,
@@ -114,7 +115,7 @@ class DisabledPaperAutopilot:
 
     def handle(self, command: dict[str, object]) -> dict[str, object]:
         del command
-        raise RuntimeError("IBKR Paper autopilot is not configured")
+        raise RuntimeError("Alpaca Paper autopilot is not configured")
 
 
 class UnconfiguredMarketDataAdapter:

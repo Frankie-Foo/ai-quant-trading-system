@@ -149,17 +149,17 @@ function createLocalRuntimeClient({
     async paperAutopilotSnapshot() {
       const payload = await request('/v1/paper-autopilot')
       if (
-        payload?.schema_version !== 'ibkr.paper_autopilot.v1'
+        payload?.schema_version !== 'alpaca.paper_autopilot.v1'
         || payload?.mode !== 'paper'
-        || payload?.port !== 4002
+        || payload?.port !== 8765
       ) {
-        throw new Error('IBKR Paper autopilot status is invalid')
+        throw new Error('Alpaca Paper autopilot status is invalid')
       }
       return payload
     },
     async paperAutopilotCommand(command) {
       if (!command || typeof command !== 'object' || Array.isArray(command)) {
-        throw new Error('IBKR Paper autopilot command is invalid')
+        throw new Error('Alpaca Paper autopilot command is invalid')
       }
       return request('/v1/paper-autopilot/commands', {
         method: 'POST',
@@ -216,19 +216,27 @@ function runtimeLaunch({
   const ibkrPaper = ibkr.paper && typeof ibkr.paper === 'object'
     ? ibkr.paper
     : {}
-  const ibkrPaperHost = String(ibkrPaper.host || '').trim()
-  const ibkrPaperClientId = Number(ibkrPaper.clientId)
-  const ibkrPaperAccount = String(ibkrPaper.paperAccount || '').trim().toUpperCase()
+  const paperBaseUrl = String(
+    ibkrPaper.baseUrl || process.env.CLOUD_PLATFORM_BASE_URL || 'http://127.0.0.1:8765',
+  ).trim().replace(/\/+$/, '')
+  const paperApiToken = String(
+    ibkrPaper.apiToken || process.env.CLOUD_PAPER_API_TOKEN || '',
+  ).trim()
+  const paperAccount = String(ibkrPaper.paperAccount || 'PAPER').trim().toUpperCase()
   const livermoreAppId = String(ibkrPaper.livermoreAppId || '').trim()
   const livermoreAppSecret = String(ibkrPaper.livermoreAppSecret || '').trim()
   const livermoreChannelId = String(ibkrPaper.livermoreChannelId || '').trim()
-  const ibkrPaperConfigured = Boolean(
-    ibkrPaperHost
-    && ibkrPaperHost.length <= 253
-    && !/[\s/:]/.test(ibkrPaperHost)
-    && Number.isInteger(ibkrPaperClientId)
-    && ibkrPaperClientId >= 0
-    && /^DU[A-Z0-9-]{4,30}$/.test(ibkrPaperAccount)
+  const paperUrl = (() => {
+    try { return new URL(paperBaseUrl) } catch { return null }
+  })()
+  const alpacaPaperConfigured = Boolean(
+    paperUrl
+    && ['http:', 'https:'].includes(paperUrl.protocol)
+    && ['127.0.0.1', 'localhost'].includes(paperUrl.hostname)
+    && paperUrl.port === '8765'
+    && paperApiToken.length >= 24
+    && !/\s/.test(paperApiToken)
+    && /^[A-Z0-9._-]{1,64}$/.test(paperAccount)
   )
   const sharedArgs = [
     '--host',
@@ -290,11 +298,11 @@ function runtimeLaunch({
           : {}),
       }
     : {}
-  const paperExecutionEnv = ibkrPaperConfigured
+  const paperExecutionEnv = alpacaPaperConfigured
     ? {
-        IBKR_PAPER_HOST: ibkrPaperHost,
-        IBKR_PAPER_CLIENT_ID: String(ibkrPaperClientId),
-        IBKR_PAPER_ACCOUNT: ibkrPaperAccount,
+        CLOUD_PLATFORM_BASE_URL: paperBaseUrl,
+        CLOUD_PAPER_API_TOKEN: paperApiToken,
+        ALPACA_PAPER_ACCOUNT: paperAccount,
         ...(livermoreAppId && livermoreAppSecret && livermoreChannelId
           ? {
               LIVERMORE_APP_ID: livermoreAppId,

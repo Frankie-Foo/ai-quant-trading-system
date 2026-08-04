@@ -264,6 +264,8 @@ function emptySettings() {
     encryptedIbkrPaperHost: '',
     encryptedIbkrPaperClientId: '',
     encryptedIbkrPaperAccount: '',
+    encryptedCloudPaperBaseUrl: '',
+    encryptedCloudPaperApiToken: '',
     encryptedLivermoreAppId: '',
     encryptedLivermoreAppSecret: '',
     encryptedLivermoreChannelId: '',
@@ -472,6 +474,60 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
 
     savePaperExecutionSettings(values) {
       const current = read()
+      const requestedBaseUrl = String(values?.baseUrl || '').trim()
+      const requestedApiToken = String(values?.apiToken || '').trim()
+      if (requestedBaseUrl || requestedApiToken) {
+        const baseUrl = requestedBaseUrl || 'http://127.0.0.1:8765'
+        let parsed
+        try { parsed = new URL(baseUrl) } catch { parsed = null }
+        if (
+          !parsed
+          || !['http:', 'https:'].includes(parsed.protocol)
+          || !['127.0.0.1', 'localhost'].includes(parsed.hostname)
+          || parsed.port !== '8765'
+          || parsed.username
+          || parsed.password
+          || parsed.search
+          || parsed.hash
+          || !['', '/'].includes(parsed.pathname)
+        ) {
+          throw new Error('8765 模拟盘服务地址无效')
+        }
+        if (!requestedApiToken && !current.encryptedCloudPaperApiToken) {
+          throw new Error('请填写 8765 模拟盘访问令牌')
+        }
+        const paperAccount = String(values?.paperAccount || 'PAPER')
+          .trim()
+          .toUpperCase()
+        if (!/^[A-Z0-9._-]{1,64}$/.test(paperAccount)) {
+          throw new Error('Alpaca Paper 账户标签无效')
+        }
+        const livermoreAppId = String(values?.livermoreAppId || '').trim()
+        const livermoreAppSecret = String(values?.livermoreAppSecret || '').trim()
+        const livermoreChannelId = String(values?.livermoreChannelId || '').trim()
+        const pushValues = [livermoreAppId, livermoreAppSecret, livermoreChannelId]
+        if (pushValues.some(Boolean) && pushValues.some((value) => !value)) {
+          throw new Error('Livermore push configuration is incomplete')
+        }
+        write({
+          ...current,
+          encryptedCloudPaperBaseUrl: encrypt(baseUrl),
+          encryptedCloudPaperApiToken: requestedApiToken
+            ? encrypt(requestedApiToken)
+            : current.encryptedCloudPaperApiToken,
+          encryptedIbkrPaperAccount: encrypt(paperAccount),
+          encryptedLivermoreAppId: livermoreAppId
+            ? encrypt(livermoreAppId)
+            : current.encryptedLivermoreAppId,
+          encryptedLivermoreAppSecret: livermoreAppSecret
+            ? encrypt(livermoreAppSecret)
+            : current.encryptedLivermoreAppSecret,
+          encryptedLivermoreChannelId: livermoreChannelId
+            ? encrypt(livermoreChannelId)
+            : current.encryptedLivermoreChannelId,
+        })
+        return
+      }
       const host = String(values?.host || '').trim()
       const clientIdText = String(values?.clientId ?? '').trim()
       const paperAccount = String(values?.paperAccount || '').trim().toUpperCase()
@@ -523,6 +579,10 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
       } catch {
         models = {}
       }
+      const cloudPaperConfigured = Boolean(
+        current.encryptedCloudPaperBaseUrl
+        && current.encryptedCloudPaperApiToken,
+      )
       return {
         schemaVersion: SETTINGS_SCHEMA,
         configured: Boolean(
@@ -555,7 +615,23 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
           ),
           maxOrderNotional: Number(current.maxOrderNotional) || 0,
         },
-        paperExecution: {
+        paperExecution: cloudPaperConfigured
+          ? {
+              configured: true,
+              baseUrlConfigured: true,
+              tokenConfigured: true,
+              accountConfigured: Boolean(current.encryptedIbkrPaperAccount),
+              pushConfigured: Boolean(
+                current.encryptedLivermoreAppId
+                && current.encryptedLivermoreAppSecret
+                && current.encryptedLivermoreChannelId,
+              ),
+              paperAccountMasked: maskAccount(
+                decrypt(current.encryptedIbkrPaperAccount),
+              ),
+              port: 8765,
+            }
+          : {
           configured: Boolean(
             current.encryptedIbkrPaperHost
             && current.encryptedIbkrPaperClientId
@@ -602,15 +678,22 @@ function createSecureSettingsStore({ filePath, safeStorage, fsImpl = fs }) {
 
     loadPaperExecutionSecrets() {
       const current = read()
-      return {
+      const legacy = {
         host: decrypt(current.encryptedIbkrPaperHost),
         clientId: Number(decrypt(current.encryptedIbkrPaperClientId)) || 0,
         paperAccount: decrypt(current.encryptedIbkrPaperAccount),
-        port: 4002,
+        port: current.encryptedCloudPaperBaseUrl ? 8765 : 4002,
         livermoreAppId: decrypt(current.encryptedLivermoreAppId),
         livermoreAppSecret: decrypt(current.encryptedLivermoreAppSecret),
         livermoreChannelId: decrypt(current.encryptedLivermoreChannelId),
       }
+      return current.encryptedCloudPaperBaseUrl
+        ? {
+            ...legacy,
+            baseUrl: decrypt(current.encryptedCloudPaperBaseUrl),
+            apiToken: decrypt(current.encryptedCloudPaperApiToken),
+          }
+        : legacy
     },
 
     clear() {

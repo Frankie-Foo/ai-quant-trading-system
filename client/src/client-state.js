@@ -382,7 +382,7 @@ export function normalizePaperAutopilotSnapshot(snapshot) {
     connected: source.connected === true,
     running: source.running === true,
     paperWritesArmed: source.paper_writes_armed === true,
-    port: finiteNumber(source.port) || 4002,
+    port: finiteNumber(source.port) || 8765,
     accountMasked: typeof source.account_masked === 'string'
       ? source.account_masked.slice(0, 80)
       : '',

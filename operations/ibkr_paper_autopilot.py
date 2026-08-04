@@ -249,6 +249,15 @@ class _AuditedMarketFactsAdapter:
 class PaperAutopilot:
     """A tiny start/stop boundary around the pre-existing deterministic runner."""
 
+    # Provider-specific subclasses override these values/hooks. Keeping the
+    # IBKR defaults here preserves the existing 4002 branch behavior.
+    SCHEMA_VERSION = "ibkr.paper_autopilot.v1"
+    PROVIDER_ID = "ibkr_paper_gateway"
+    PAPER_PORT = 4002
+    AUDIT_LEDGER_NAME = "ibkr-paper-autopilot.sqlite3"
+    THREAD_NAME = "ibkr-paper-autopilot"
+    SAFETY_PROVENANCE_PREFIX = "operations.ibkr_paper_autopilot"
+
     def __init__(
         self,
         *,
@@ -278,7 +287,7 @@ class PaperAutopilot:
         self._plan_status = "missing"
         self._plan_error = ""
         self._audit_ledger = PaperSessionLedger(
-            self.runs_root / "ibkr-paper-autopilot.sqlite3"
+            self.runs_root / self.AUDIT_LEDGER_NAME
         )
         self._audit_run_id = ""
         self._audit_event_count = 0
@@ -293,9 +302,10 @@ class PaperAutopilot:
     def snapshot(self) -> dict[str, object]:
         with self._lock:
             return {
-                "schema_version": "ibkr.paper_autopilot.v1",
+                "schema_version": self.SCHEMA_VERSION,
+                "provider_id": self.PROVIDER_ID,
                 "mode": "paper",
-                "port": 4002,
+                "port": self.PAPER_PORT,
                 "configured": self._profile_error() is None,
                 "connected": self._connected,
                 "running": self._running,
@@ -412,18 +422,15 @@ class PaperAutopilot:
             host, client_id, account = self._profile()
             self._close_broker_locked()
             broker = self._broker_factory(False, account)
-            connect = getattr(broker, "connect", None)
-            if not callable(connect):
-                raise RuntimeError("IBKR Paper broker connection is unavailable")
             try:
-                connect(host=host, client_id=client_id)
+                self._connect_broker(broker, host=host, client_id=client_id)
                 account_snapshot = broker.get_account()
                 self._ensure_audit_run()
                 self._record_audit(
                     "autopilot_connected",
                     {
                         "mode": "paper",
-                        "port": 4002,
+                        "port": self.PAPER_PORT,
                         "account": _paper_account_payload(account_snapshot),
                     },
                 )
@@ -436,7 +443,7 @@ class PaperAutopilot:
                 raise RuntimeError(self._last_error) from exc
             self._broker = broker
             self._connected = True
-            self._account_masked = _mask_account(account)
+            self._account_masked = self._mask_account(account)
             self._last_error = ""
             return self.snapshot()
 
@@ -462,18 +469,15 @@ class PaperAutopilot:
             host, client_id, account = self._profile()
             self._close_broker_locked()
             broker = self._broker_factory(True, account)
-            connect = getattr(broker, "connect", None)
-            if not callable(connect):
-                raise RuntimeError("IBKR Paper broker connection is unavailable")
             try:
-                connect(host=host, client_id=client_id)
+                self._connect_broker(broker, host=host, client_id=client_id)
                 account_snapshot = broker.get_account()
                 self._ensure_audit_run()
                 self._record_audit(
                     "autopilot_started",
                     {
                         "mode": "paper",
-                        "port": 4002,
+                        "port": self.PAPER_PORT,
                         "account": _paper_account_payload(account_snapshot),
                         "plan_count": len(config.plans),
                     },
@@ -486,7 +490,7 @@ class PaperAutopilot:
                 raise RuntimeError(self._last_error) from exc
             self._broker = broker
             self._connected = True
-            self._account_masked = _mask_account(account)
+            self._account_masked = self._mask_account(account)
             self._last_error = ""
             self._last_outcomes = ()
             self._stop = threading.Event()
@@ -494,7 +498,7 @@ class PaperAutopilot:
             self._thread = threading.Thread(
                 target=self._run_loop,
                 args=(config, broker),
-                name="ibkr-paper-autopilot",
+                name=self.THREAD_NAME,
                 daemon=True,
             )
             self._thread.start()
@@ -706,7 +710,7 @@ class PaperAutopilot:
                         f"paper-safety-refresh-failed:{bundle.plan.plan_id}",
                     ),
                     provenance=(
-                        "operations.ibkr_paper_autopilot.safety_refresh.v1|"
+                        f"{self.SAFETY_PROVENANCE_PREFIX}.safety_refresh.v1|"
                         f"error={error_code}"
                     ),
                 ),
@@ -745,6 +749,21 @@ class PaperAutopilot:
     def _arm_phrase(self) -> str:
         account = str(self.environ.get("IBKR_PAPER_ACCOUNT", "")).strip().upper()
         return f"启用模拟盘自动执行 {_mask_account(account) if account else '当前账户'}"
+
+    def _connect_broker(
+        self,
+        broker: AutonomousPaperBroker,
+        *,
+        host: str,
+        client_id: int,
+    ) -> None:
+        connect = getattr(broker, "connect", None)
+        if not callable(connect):
+            raise RuntimeError("IBKR Paper broker connection is unavailable")
+        connect(host=host, client_id=client_id)
+
+    def _mask_account(self, value: str) -> str:
+        return _mask_account(value)
 
     def _close_broker_locked(self) -> None:
         broker = self._broker
