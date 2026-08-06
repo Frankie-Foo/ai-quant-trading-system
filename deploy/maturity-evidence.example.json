@@ -1,0 +1,21 @@
+{
+  "asof_utc": "2026-07-21T00:00:00Z",
+  "point_in_time_history_sessions": 1,
+  "net_labeled_trade_count": 0,
+  "purged_oos_fold_count": 0,
+  "quote_cost_coverage": 0.0,
+  "paper_trading_sessions": 0,
+  "reconciliation_match_rate": 0.0,
+  "duplicate_order_count": 0,
+  "full_market_realtime_data": {"passed": false, "evidence_refs": []},
+  "historical_data_license": {"passed": false, "evidence_refs": []},
+  "paper_broker_access": {"passed": false, "evidence_refs": []},
+  "kill_switch_drill": {"passed": false, "evidence_refs": []},
+  "alert_delivery_drill": {"passed": false, "evidence_refs": []},
+  "backup_restore_drill": {"passed": false, "evidence_refs": []},
+  "broker_recovery_drill": {"passed": false, "evidence_refs": []},
+  "secrets_rotated": {"passed": false, "evidence_refs": []},
+  "owner_risk_signoff": {"passed": false, "evidence_refs": []},
+  "compliance_signoff": {"passed": false, "evidence_refs": []},
+  "live_broker_permission": {"passed": false, "evidence_refs": []}
+}

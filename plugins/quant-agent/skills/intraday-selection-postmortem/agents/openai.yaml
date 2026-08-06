@@ -1,0 +1,4 @@
+interface:
+  display_name: "日内选股复盘"
+  short_description: "审计日内选股、催化剂与订单流漏选原因并生成受控沙盒研究假设"
+  default_prompt: "Use $intraday-selection-postmortem to review the latest completed session and propose evidence-bound sandbox hypotheses."

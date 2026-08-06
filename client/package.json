@@ -1,0 +1,55 @@
+{
+  "name": "adaptive-trading-client",
+  "private": true,
+  "version": "0.2.2",
+  "description": "Evidence-backed U.S. equity research desktop with isolated manual IBKR live execution",
+  "author": "Trading System v2",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "desktop": "npm run build && electron .",
+    "desktop:analyst": "npm run build && electron electron/analyst-main.cjs",
+    "test:electron": "node --test electron/test/*.test.cjs",
+    "icon:mac": "bash scripts/build_macos_icon.sh",
+    "runtime:mac": "bash scripts/build_macos_runtime.sh",
+    "runtime:win:analyst": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_runtime.ps1",
+    "bootstrap:win:analyst": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_bootstrap.ps1",
+    "dist:win": "npm run build && electron-builder --win nsis",
+    "dist:win:analyst": "npm run build && npm run test:electron && npm run bootstrap:win:analyst && npm run runtime:win:analyst && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_windows_installer.ps1",
+    "dist:mac:analyst": "npm run build && npm run test:electron && npm run test:ui && npm run bootstrap:mac:analyst && npm run icon:mac && npm run runtime:mac && electron-builder --config electron-builder.analyst.yml --mac dmg zip",
+    "test:ui": "node --test test/*.test.js",
+    "bootstrap:mac:analyst": "bash scripts/build_macos_bootstrap.sh"
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.6.0",
+    "electron": "^37.2.6",
+    "electron-builder": "^26.0.12",
+    "vite": "^6.1.0"
+  },
+  "build": {
+    "appId": "cn.frank.adaptive-trading-client",
+    "productName": "日内量化决策台",
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

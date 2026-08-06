@@ -1,0 +1,44 @@
+{
+  "mcpServers": {
+    "quant-agent-commander": {
+      "command": "python",
+      "args": ["${pluginRoot}/server/launch.py"],
+      "env": {"QUANT_AGENT_NAME": "commander", "QUANT_AGENT_MODE": "research_only"}
+    },
+    "quant-agent-risk": {
+      "command": "python",
+      "args": ["${pluginRoot}/server/launch.py"],
+      "env": {"QUANT_AGENT_NAME": "risk", "QUANT_AGENT_MODE": "research_only"}
+    },
+    "quant-agent-factor-hunter": {
+      "command": "python",
+      "args": ["${pluginRoot}/server/launch.py"],
+      "env": {"QUANT_AGENT_NAME": "factor-hunter", "QUANT_AGENT_MODE": "research_only"}
+    },
+    "quant-agent-order-flow": {
+      "command": "python",
+      "args": ["${pluginRoot}/server/launch.py"],
+      "env": {"QUANT_AGENT_NAME": "order-flow", "QUANT_AGENT_MODE": "research_only"}
+    },
+    "quant-agent-short-thesis": {
+      "command": "python",
+      "args": ["${pluginRoot}/server/launch.py"],
+      "env": {"QUANT_AGENT_NAME": "short-thesis", "QUANT_AGENT_MODE": "research_only"}
+    },
+    "quant-agent-sentiment": {
+      "command": "python",
+      "args": ["${pluginRoot}/server/launch.py"],
+      "env": {"QUANT_AGENT_NAME": "sentiment", "QUANT_AGENT_MODE": "research_only"}
+    },
+    "quant-agent-discipline": {
+      "command": "python",
+      "args": ["${pluginRoot}/server/launch.py"],
+      "env": {"QUANT_AGENT_NAME": "discipline", "QUANT_AGENT_MODE": "research_only"}
+    },
+    "quant-agent-pdca": {
+      "command": "python",
+      "args": ["${pluginRoot}/server/launch.py"],
+      "env": {"QUANT_AGENT_NAME": "pdca", "QUANT_AGENT_MODE": "research_only"}
+    }
+  }
+}

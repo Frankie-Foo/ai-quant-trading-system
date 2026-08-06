@@ -1,0 +1,4 @@
+interface:
+  display_name: "永续风险仓位监控"
+  short_description: "监控跨平台永续合约情绪并输出可审计的日内仓位倍率建议"
+  default_prompt: "Use $monitor-perp-risk-positioning to inspect Hyperliquid and Aevo risk signals and return a read-only position multiplier."

@@ -1,0 +1,89 @@
+name: trading-system-autonomous-paper
+
+x-autonomous-common: &autonomous-common
+  build:
+    context: .
+  env_file:
+    - .env
+  init: true
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+  stop_grace_period: 30s
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  volumes:
+    - ./config/autonomous_paper.local.json:/app/config/autonomous_paper.local.json:ro
+    - ./runs:/app/runs
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "5"
+
+services:
+  sip-refresher:
+    <<: *autonomous-common
+    entrypoint:
+      - python
+      - -m
+      - scripts.run_autonomous_sip_refresher
+    command:
+      - --config
+      - /app/config/autonomous_paper.local.json
+      - --sip-db
+      - /app/runs/autonomous-sip.sqlite3
+      - --lock-file
+      - /app/runs/autonomous-sip-refresher.lock
+      - --refresh-lock-file
+      - /app/runs/autonomous-sip-warmup.lock
+      - --interval-seconds
+      - "30"
+
+  runtime-agents:
+    <<: *autonomous-common
+    depends_on:
+      - sip-refresher
+    entrypoint:
+      - python
+      - -m
+      - scripts.run_runtime_agent_cycle
+    command:
+      - --config
+      - /app/config/autonomous_paper.local.json
+      - --agent-root
+      - /app/runs/runtime-agents
+      - --push-health
+      - /app/runs/runtime-agents/push-health.json
+      - --lock-file
+      - /app/runs/runtime-agent-cycle.lock
+      - --interval-seconds
+      - "15"
+
+  paper-executor:
+    <<: *autonomous-common
+    depends_on:
+      - sip-refresher
+      - runtime-agents
+    entrypoint:
+      - python
+      - -m
+      - scripts.run_autonomous_paper_session
+    command:
+      - --config
+      - /app/config/autonomous_paper.local.json
+      - --broker-mode
+      - direct
+      - --state-db
+      - /app/runs/autonomous-paper.sqlite3
+      - --sip-db
+      - /app/runs/autonomous-sip.sqlite3
+      - --notification-db
+      - /app/runs/autonomous-notifications.sqlite3
+      - --push-health
+      - /app/runs/runtime-agents/push-health.json
+      - --lock-file
+      - /app/runs/autonomous-paper.lock

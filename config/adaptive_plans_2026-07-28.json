@@ -1,0 +1,75 @@
+{
+  "schema_version": "adaptive_plan_config.v1",
+  "poll_seconds": 15,
+  "plans": [
+    {
+      "baseline": {
+        "plan_id": "plan-20260728-CDNS",
+        "symbol": "CDNS",
+        "trade_date": "2026-07-28",
+        "mode": "catalyst",
+        "entry_window_end_utc": "2026-07-28T15:30:00+00:00",
+        "force_exit_utc": "2026-07-28T17:00:00+00:00",
+        "hard_stop": 332.5,
+        "max_risk_dollars": 350.0,
+        "max_notional": 20000.0,
+        "probe_fraction": 0.25,
+        "max_spread_ratio": 0.0025,
+        "soft_cooldown_seconds": 180,
+        "max_soft_revisions": 3
+      },
+      "evidence": {
+        "benchmark_symbol": "QQQ",
+        "sector_symbol": "SMH",
+        "catalyst_score": 0.8834772201185366,
+        "provenance": "kernel.universe.selection_gates-20260728T131631Z-ffdf52b0b7a6:CDNS|score=0.7*earnings_strength_confirmed+0.3*earnings_intensity_score/100|premarket_low=333.0@2026-07-28T13:28:19Z"
+      }
+    },
+    {
+      "baseline": {
+        "plan_id": "plan-20260728-FFIV",
+        "symbol": "FFIV",
+        "trade_date": "2026-07-28",
+        "mode": "catalyst",
+        "entry_window_end_utc": "2026-07-28T15:30:00+00:00",
+        "force_exit_utc": "2026-07-28T17:00:00+00:00",
+        "hard_stop": 385.0,
+        "max_risk_dollars": 350.0,
+        "max_notional": 20000.0,
+        "probe_fraction": 0.25,
+        "max_spread_ratio": 0.0025,
+        "soft_cooldown_seconds": 180,
+        "max_soft_revisions": 3
+      },
+      "evidence": {
+        "benchmark_symbol": "QQQ",
+        "sector_symbol": "XLK",
+        "catalyst_score": 0.9639577614696666,
+        "provenance": "kernel.universe.selection_gates-20260728T131631Z-ffdf52b0b7a6:FFIV|score=0.7*earnings_strength_confirmed+0.3*earnings_intensity_score/100|premarket_low=387.258@2026-07-28T13:28:19Z"
+      }
+    },
+    {
+      "baseline": {
+        "plan_id": "plan-20260728-ESI",
+        "symbol": "ESI",
+        "trade_date": "2026-07-28",
+        "mode": "catalyst",
+        "entry_window_end_utc": "2026-07-28T15:30:00+00:00",
+        "force_exit_utc": "2026-07-28T17:00:00+00:00",
+        "hard_stop": 37.9,
+        "max_risk_dollars": 350.0,
+        "max_notional": 20000.0,
+        "probe_fraction": 0.25,
+        "max_spread_ratio": 0.0025,
+        "soft_cooldown_seconds": 180,
+        "max_soft_revisions": 3
+      },
+      "evidence": {
+        "benchmark_symbol": "SPY",
+        "sector_symbol": "XLB",
+        "catalyst_score": 0.10032558139534884,
+        "provenance": "kernel.universe.selection_gates-20260728T131631Z-ffdf52b0b7a6:ESI|score=0.7*earnings_strength_confirmed+0.3*earnings_intensity_score/100|premarket_low=38.05@2026-07-28T13:28:19Z"
+      }
+    }
+  ]
+}

@@ -1,0 +1,80 @@
+name: macOS research client checks
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/macos-research-client
+      - feature/cross-platform-research-client
+    paths:
+      - client/**
+      - config/**
+      - config.yaml
+      - data_plane/**
+      - kernel/**
+      - operations/**
+      - research/**
+      - requirements-macos-research.txt
+      - schedule/**
+      - scripts/**
+      - .github/workflows/macos-research-client.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build-unsigned:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-macos-research.txt
+
+      - name: Install local research runtime
+        run: python -m pip install -r requirements-macos-research.txt
+
+      - name: Install dependencies
+        working-directory: client
+        run: npm ci
+
+      - name: Test Electron services
+        working-directory: client
+        run: npm run test:electron
+
+      - name: Test renderer state
+        working-directory: client
+        run: npm run test:ui
+
+      - name: Build renderer
+        working-directory: client
+        run: npm run build
+
+      - name: Build macOS icon
+        working-directory: client
+        run: npm run icon:mac
+
+      - name: Build native local research runtime
+        working-directory: client
+        run: npm run runtime:mac

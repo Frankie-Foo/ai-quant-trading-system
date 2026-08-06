@@ -1,0 +1,29 @@
+{
+  "schema_version": "adaptive_plan_config.v1",
+  "poll_seconds": 15,
+  "plans": [
+    {
+      "baseline": {
+        "plan_id": "plan-YYYYMMDD-SYMBOL",
+        "symbol": "SYMBOL",
+        "trade_date": "2026-07-28",
+        "mode": "catalyst",
+        "entry_window_end_utc": "2026-07-28T15:30:00+00:00",
+        "force_exit_utc": "2026-07-28T19:55:00+00:00",
+        "hard_stop": 10.0,
+        "max_risk_dollars": 300.0,
+        "max_notional": 20000.0,
+        "probe_fraction": 0.25,
+        "max_spread_ratio": 0.0025,
+        "soft_cooldown_seconds": 180,
+        "max_soft_revisions": 3
+      },
+      "evidence": {
+        "benchmark_symbol": "SPY",
+        "sector_symbol": "XLK",
+        "catalyst_score": 0.8,
+        "provenance": "replace-with-accepted-snapshot-and-row-reference"
+      }
+    }
+  ]
+}

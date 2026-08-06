@@ -1,0 +1,66 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "perp_risk_liquidation_event.v1",
+      "default": "perp_risk_liquidation_event.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "event_id": {
+      "minLength": 1,
+      "title": "Event Id",
+      "type": "string"
+    },
+    "venue": {
+      "minLength": 1,
+      "title": "Venue",
+      "type": "string"
+    },
+    "market": {
+      "minLength": 1,
+      "title": "Market",
+      "type": "string"
+    },
+    "instrument": {
+      "minLength": 1,
+      "title": "Instrument",
+      "type": "string"
+    },
+    "liquidated_side": {
+      "enum": [
+        "long",
+        "short"
+      ],
+      "title": "Liquidated Side",
+      "type": "string"
+    },
+    "notional_usd": {
+      "exclusiveMinimum": 0,
+      "title": "Notional Usd",
+      "type": "number"
+    },
+    "observed_at_utc": {
+      "format": "date-time",
+      "title": "Observed At Utc",
+      "type": "string"
+    },
+    "provenance": {
+      "minLength": 1,
+      "title": "Provenance",
+      "type": "string"
+    }
+  },
+  "required": [
+    "event_id",
+    "venue",
+    "market",
+    "instrument",
+    "liquidated_side",
+    "notional_usd",
+    "observed_at_utc",
+    "provenance"
+  ],
+  "title": "LiquidationEvent",
+  "type": "object"
+}

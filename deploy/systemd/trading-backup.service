@@ -1,0 +1,19 @@
+[Unit]
+Description=Back up and restore-verify Trading System v2 state
+ConditionPathExists=/opt/trading-system/.venv/bin/python
+OnFailure=trading-alert@backup.service
+
+[Service]
+Type=oneshot
+User=trading
+Group=trading
+WorkingDirectory=/opt/trading-system
+EnvironmentFile=/etc/trading-system/trading-system.env
+ExecStart=/opt/trading-system/.venv/bin/python -m scripts.backup_state --data-root /var/lib/trading-system/data --state-root /var/lib/trading-system/state --destination /var/backups/trading-system --include-data
+TimeoutStartSec=6h
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/trading-system /var/backups/trading-system

@@ -1,0 +1,1 @@
+-- Frozen Postgres schema is implemented and migration-tested in M6.

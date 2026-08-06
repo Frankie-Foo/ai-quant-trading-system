@@ -1,0 +1,20 @@
+services:
+  perp-risk:
+    build:
+      context: .
+    command: ["watch"]
+    restart: unless-stopped
+    environment:
+      PERP_RISK_LIQUIDATION_SECRET: "${PERP_RISK_LIQUIDATION_SECRET:-}"
+      PERP_RISK_WEBHOOK_SECRET: "${PERP_RISK_WEBHOOK_SECRET:-}"
+    volumes:
+      - perp-risk-data:/home/perprisk/.local/share/monitor-perp-risk-positioning
+    healthcheck:
+      test: ["CMD", "perp-risk", "status"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 120s
+
+volumes:
+  perp-risk-data:

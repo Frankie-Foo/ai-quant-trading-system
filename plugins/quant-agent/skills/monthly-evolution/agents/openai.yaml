@@ -1,0 +1,4 @@
+interface:
+  display_name: "Monthly Evolution"
+  short_description: "Create draft-only evidence-backed proposals"
+  default_prompt: "Use $monthly-evolution to cluster accepted lessons into a draft research proposal."

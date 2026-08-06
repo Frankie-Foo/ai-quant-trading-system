@@ -1,0 +1,31 @@
+[Unit]
+Description=Trading System v2 weekly point-in-time research and evolution
+Wants=network-online.target
+After=network-online.target trading-backup.service
+ConditionPathExists=/opt/trading-system/.venv/bin/python
+OnFailure=trading-alert@research.service
+
+[Service]
+Type=oneshot
+User=trading
+Group=trading
+WorkingDirectory=/opt/trading-system
+EnvironmentFile=/etc/trading-system/trading-system.env
+Environment=PYTHONUNBUFFERED=1
+StateDirectory=trading-system
+RuntimeDirectory=trading-system
+UMask=0077
+ExecStart=/opt/trading-system/.venv/bin/python -m schedule.research_cycle --data-root /var/lib/trading-system/data --state-root /var/lib/trading-system/state --lock-file /run/trading-system/research-cycle.lock
+TimeoutStartSec=30h
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/trading-system /run/trading-system
+

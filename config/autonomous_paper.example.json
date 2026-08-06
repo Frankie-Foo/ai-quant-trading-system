@@ -1,0 +1,50 @@
+{
+  "schema_version": "autonomous_paper_config.v1",
+  "poll_seconds": 15,
+  "plans": [
+    {
+      "plan": {
+        "plan_id": "auto-20300102-EXAMPLE",
+        "symbol": "EXAMPLE",
+        "trade_date": "2030-01-02",
+        "reference_price": "100.00",
+        "hard_stop": "97.50",
+        "max_notional_fraction": "0.20",
+        "full_risk_fraction": "0.0035",
+        "max_spread_ratio": "0.0025",
+        "source_snapshot_ids": [
+          "replace-with-accepted-selection-snapshot-id"
+        ],
+        "provenance": "replace-with-plan-provenance"
+      },
+      "policy_evidence": {
+        "route": "catalyst",
+        "catalyst": {
+          "value": 80.0,
+          "asof_utc": "2030-01-02T12:00:00+00:00",
+          "provenance": "replace-with-catalyst-provenance"
+        },
+        "factor": {
+          "value": null,
+          "asof_utc": "2030-01-02T12:00:00+00:00",
+          "provenance": "factor-unavailable"
+        },
+        "right_tail": {
+          "value": 70.0,
+          "asof_utc": "2030-01-02T12:00:00+00:00",
+          "provenance": "replace-with-right-tail-provenance"
+        },
+        "first_target_reward_r": 2.5,
+        "weighted_expected_reward_r": 3.0,
+        "reward_risk_provenance": "replace-with-approved-r-multiple-plan",
+        "a_plus_plus_approved": false
+      },
+      "market_context": {
+        "benchmark_symbol": "SPY",
+        "sector_symbol": "XLK",
+        "provenance": "replace-with-market-context-provenance"
+      },
+      "safety_envelope": "../runs/safety/EXAMPLE.json"
+    }
+  ]
+}

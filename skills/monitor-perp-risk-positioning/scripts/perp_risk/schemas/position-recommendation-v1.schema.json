@@ -1,0 +1,122 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "perp_risk_position_recommendation.v1",
+      "default": "perp_risk_position_recommendation.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "skill_version": {
+      "title": "Skill Version",
+      "type": "string"
+    },
+    "recommendation_id": {
+      "title": "Recommendation Id",
+      "type": "string"
+    },
+    "snapshot_id": {
+      "title": "Snapshot Id",
+      "type": "string"
+    },
+    "asof_utc": {
+      "format": "date-time",
+      "title": "Asof Utc",
+      "type": "string"
+    },
+    "relevant_targets": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Relevant Targets",
+      "type": "array"
+    },
+    "position_multiplier": {
+      "maximum": 1.2,
+      "minimum": 0,
+      "title": "Position Multiplier",
+      "type": "number"
+    },
+    "action": {
+      "enum": [
+        "cash",
+        "reduce",
+        "hold",
+        "increase",
+        "research_only"
+      ],
+      "title": "Action",
+      "type": "string"
+    },
+    "actionable": {
+      "title": "Actionable",
+      "type": "boolean"
+    },
+    "base_target_position_pct": {
+      "anyOf": [
+        {
+          "maximum": 100,
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Base Target Position Pct"
+    },
+    "adjusted_target_position_pct": {
+      "anyOf": [
+        {
+          "maximum": 100,
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Adjusted Target Position Pct"
+    },
+    "reasons": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Reasons",
+      "type": "array"
+    },
+    "production_eligible": {
+      "const": false,
+      "title": "Production Eligible",
+      "type": "boolean"
+    },
+    "execution_eligible": {
+      "const": false,
+      "title": "Execution Eligible",
+      "type": "boolean"
+    },
+    "orders_submitted": {
+      "const": 0,
+      "title": "Orders Submitted",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "skill_version",
+    "recommendation_id",
+    "snapshot_id",
+    "asof_utc",
+    "relevant_targets",
+    "position_multiplier",
+    "action",
+    "actionable",
+    "reasons",
+    "production_eligible",
+    "execution_eligible",
+    "orders_submitted"
+  ],
+  "title": "PositionRecommendation",
+  "type": "object"
+}

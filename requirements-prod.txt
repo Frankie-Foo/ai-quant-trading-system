@@ -1,0 +1,15 @@
+pandas==3.0.2
+numpy==2.5.1
+scipy==1.18.0
+polars==1.42.1
+pydantic==2.11.7
+pydantic-settings==2.9.1
+psycopg[binary]==3.3.4
+httpx==0.28.1
+pandas-market-calendars==5.4.0
+lightgbm==4.6.0
+scikit-learn==1.9.0
+python-dotenv==1.1.0
+PyYAML==6.0.2
+websockets==16.0
+mcp>=1.28,<2

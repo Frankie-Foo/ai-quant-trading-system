@@ -1,0 +1,16 @@
+[Unit]
+Description=Send Trading System v2 failure alert for %i
+
+[Service]
+Type=oneshot
+User=trading
+Group=trading
+WorkingDirectory=/opt/trading-system
+EnvironmentFile=/etc/trading-system/trading-system.env
+ExecStart=/opt/trading-system/.venv/bin/python -m scripts.send_operational_alert --service %i --severity critical --summary "Trading service %i failed" --receipt-log /var/lib/trading-system/state/alert-receipts.jsonl
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/trading-system

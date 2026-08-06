@@ -1,0 +1,4 @@
+interface:
+  display_name: "Postmarket PDCA"
+  short_description: "Audit discipline and write governed lessons"
+  default_prompt: "Use $postmarket-pdca to audit the latest completed session and store governed lessons."
