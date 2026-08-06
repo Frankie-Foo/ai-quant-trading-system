@@ -4,7 +4,11 @@ const path = require('node:path')
 const { createIbkrPaperAdapter } = require('./analyst/ibkr-paper.cjs')
 const { createLocalRuntimeProcess } = require('./analyst/local-runtime.cjs')
 const { createOpenRouterClient } = require('./analyst/openrouter.cjs')
-const { agentMessages, assistantMessages } = require('./analyst/prompts.cjs')
+const {
+  agentMessages,
+  assistantMessages,
+  evidenceReference,
+} = require('./analyst/prompts.cjs')
 const {
   MODEL_KEYS,
   createSecureSettingsStore,
@@ -112,11 +116,12 @@ function registerHandlers() {
     const settings = requireConfiguredSettings()
     const secrets = settingsStore.loadSecrets()
     const desk = await fetchDesk()
-    return openRouter.complete({
+    const result = await openRouter.complete({
       apiKey: secrets.openRouterApiKey,
       model: settings.models.question,
       messages: assistantMessages(payload?.question, desk),
     })
+    return { ...result, evidence: evidenceReference(desk) }
   })
 
   ipcMain.handle('analyst:agents:run', async (_event, payload) => {
@@ -127,11 +132,12 @@ function registerHandlers() {
     const settings = requireConfiguredSettings()
     const secrets = settingsStore.loadSecrets()
     const desk = await fetchDesk()
-    return openRouter.complete({
+    const result = await openRouter.complete({
       apiKey: secrets.openRouterApiKey,
       model: settings.models[role],
       messages: agentMessages(role, desk),
     })
+    return { ...result, evidence: evidenceReference(desk) }
   })
 
   ipcMain.handle('analyst:ibkr:status', () => ibkrPaper.status())

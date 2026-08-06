@@ -12,6 +12,7 @@
     "desktop": "npm run build && electron .",
     "desktop:analyst": "npm run build && electron electron/analyst-main.cjs",
     "test:electron": "node --test electron/test/*.test.cjs",
+    "test:ui": "node --test test/*.test.js",
     "icon:mac": "bash scripts/build_macos_icon.sh",
     "runtime:mac": "bash scripts/build_macos_runtime.sh",
     "dist:win": "npm run build && electron-builder --win nsis",

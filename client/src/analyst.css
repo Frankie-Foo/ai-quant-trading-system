@@ -155,3 +155,7 @@
   .analyst-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .analyst-agent-grid, .settings-grid { grid-template-columns: 1fr; }
 }
+
+.evidence-stale {
+  color: var(--danger, #ff8b8b) !important;
+}

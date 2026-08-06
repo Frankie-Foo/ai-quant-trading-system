@@ -15,6 +15,7 @@ def _selection_snapshot(
     data_root: Path,
     *,
     session_date: date,
+    missing_boolean_facts: bool = False,
 ) -> str:
     frame = pl.DataFrame(
         {
@@ -31,15 +32,27 @@ def _selection_snapshot(
             "event_count": [1, 3, 1],
             "earnings_evidence_layers": [1, 3, 1],
             "earnings_intensity_score": [25.0, 92.0, 8.0],
-            "earnings_strength_confirmed": [False, True, False],
+            "earnings_strength_confirmed": (
+                [None, None, False]
+                if missing_boolean_facts
+                else [False, True, False]
+            ),
             "rvol": [8.0, 21.0, None],
             "premarket_gap_return": [0.04, 0.09, None],
             "premarket_return": [0.02, 0.05, None],
             "premarket_close": [52.0, 109.0, None],
             "premarket_vwap": [51.4, 106.5, None],
             "premarket_close_location": [0.8, 0.95, None],
-            "premarket_above_vwap": [True, True, False],
-            "directional_volume_confirmed": [True, True, False],
+            "premarket_above_vwap": (
+                [None, None, False]
+                if missing_boolean_facts
+                else [True, True, False]
+            ),
+            "directional_volume_confirmed": (
+                [None, None, False]
+                if missing_boolean_facts
+                else [True, True, False]
+            ),
             "market_cap": [2_000_000_000.0, 30_000_000_000.0, 500_000_000.0],
             "adv_usd": [20_000_000.0, 800_000_000.0, 5_000_000.0],
             "atr_pct": [0.05, 0.04, 0.08],
@@ -209,3 +222,27 @@ def test_beijing_after_midnight_stays_on_open_us_session(tmp_path: Path) -> None
     after_selection = after_close["selection"]
     assert isinstance(after_selection, dict)
     assert after_selection["stale"] is True
+
+
+
+def test_desk_preserves_missing_candidate_booleans_as_unknown(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    runs_root = tmp_path / "runs"
+    runs_root.mkdir()
+    _selection_snapshot(
+        data_root,
+        session_date=date(2026, 7, 30),
+        missing_boolean_facts=True,
+    )
+
+    result = TradingDeskEvidence(
+        data_root=data_root,
+        runs_root=runs_root,
+    ).snapshot(datetime(2026, 7, 30, 13, 0, tzinfo=UTC))
+
+    candidates = result["selection"]["candidates"]
+    assert candidates[0]["earnings_strength_confirmed"] is None
+    assert candidates[0]["premarket_above_vwap"] is None
+    assert candidates[0]["directional_volume_confirmed"] is None

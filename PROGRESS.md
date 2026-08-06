@@ -963,3 +963,34 @@ macOS client's fixed realtime market-data endpoint without committing credential
   strict mypy success across 253 source files, ten Electron tests passed, Vite
   production build succeeded, and tracked-file scans found zero supplied-key or
   supplied-secret matches.
+## M33 client hardening and evidence-bound AI - 2026-07-31
+
+Status: the adaptive web client and macOS research client now fail closed across the
+security, data-truth, health, and AI provenance defects found during desktop retesting.
+
+- Protected the one-way global emergency stop with a client-only custom action header.
+  Cross-site form or ordinary webpage requests now receive HTTP 403 and cannot mutate
+  the stop store. Optional Bearer deployments issue a random HttpOnly,
+  SameSite=Strict browser-session cookie from the local index page, so REST and SSE
+  remain usable without exposing the configured Bearer token to renderer JavaScript.
+- Changed candidate boolean projection and both clients to preserve missing facts as
+  `N/A`. Positive entry/add actions and suggested share counts are suppressed whenever
+  the displayed critical gate facts are incomplete; an empty blocker array alone no
+  longer renders as "all conditions passed".
+- Split macOS desk, runtime, and action errors so a successful desk refresh cannot
+  erase a runtime failure. Initialization now preserves successfully loaded settings
+  when the runtime is unavailable and shows a reloadable error state instead of an
+  infinite loading screen. Credential reset now requires confirmation and reports
+  failures.
+- Minimized OpenRouter payloads through explicit candidate, opportunity, job, and
+  maturity allowlists. Ordinary Q&A omits operational ledgers; only the supervisor
+  receives sanitized operational evidence. Every AI response now carries the target
+  date, selection snapshot/as-of, review snapshot, and stale flags, and the UI marks
+  results when the current immutable evidence changes.
+- Reworded research-only actions and the position page so strategy states cannot be
+  mistaken for broker-confirmed holdings or manual buy/sell instructions. Onboarding,
+  settings, Q&A, boundary banners, README, and client documentation now disclose the
+  OpenRouter evidence flow.
+- Acceptance: Ruff and strict mypy passed on the changed Python modules; the full
+  Python suite passed 465 tests in 25.04 seconds; four UI state tests, eleven Electron
+  service tests, and the Vite production build passed.

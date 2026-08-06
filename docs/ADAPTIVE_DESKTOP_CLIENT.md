@@ -77,8 +77,8 @@ flowchart LR
 客户端显示的动作只有建议性质：
 
 - `ARM_ENTRY`：条件开始聚合；
-- `ENTER_PROBE`：允许考虑侦察仓；
-- `ALLOW_ADD`：持仓后多周期和订单流再次确认，且仍有风险容量；
+- `ENTER_PROBE`：侦察仓条件满足，仅作为研究状态；
+- `ALLOW_ADD`：持仓后多周期和订单流再次确认，且仍有风险容量，仅作为研究状态；
 - `REDUCE`：优势衰减，建议减仓；
 - `TIGHTEN_STOP`：结构止损上移；
 - `EXIT_NOW`：硬止损或时间止损；
@@ -153,7 +153,8 @@ Copy-Item config\adaptive_plans.example.json config\adaptive_plans.local.json
   和只读 SSE；
 - `/v1/desk` 只返回白名单化字段：不可变选股、盘后复盘、任务状态、Agent 健康和成熟度
   证据，不返回任务 token、密钥或 `.env`；
-- 所有 POST 请求返回 405；
+- 唯一允许的写操作是单向全局急停；它要求客户端专用自定义请求头，跨站表单或普通网页请求无法触发；
+- 配置 Bearer 保护时，首页签发随机、HttpOnly、SameSite=Strict 的浏览器会话 Cookie，REST 与 SSE 可继续使用；外部调用仍可使用 Authorization Bearer；
 - 本地服务只绑定 loopback；
 - VPS 部署必须在认证 HTTPS 网关后，不能把本地只读端口裸露到公网；
 - 行情连接由云端平台唯一持有，本地只消费受限接口。

@@ -16,10 +16,84 @@ const ROLE_PROMPTS = {
   ].join(''),
 }
 
-function compactDeskEvidence(desk) {
+const CANDIDATE_FIELDS = [
+  'rank',
+  'symbol',
+  'route',
+  'catalyst_categories',
+  'event_count',
+  'earnings_evidence_layers',
+  'earnings_intensity_score',
+  'earnings_strength_confirmed',
+  'rvol',
+  'premarket_gap_return',
+  'premarket_return',
+  'premarket_close_location',
+  'premarket_above_vwap',
+  'directional_volume_confirmed',
+  'market_cap',
+  'adv_usd',
+  'atr_pct',
+]
+
+const OPPORTUNITY_FIELDS = [
+  'rank',
+  'symbol',
+  'close_return',
+  'mfe',
+  'selection_status',
+  'root_cause',
+]
+
+const JOB_FIELDS = [
+  'job_name',
+  'trade_date',
+  'status',
+  'attempts',
+  'error_code',
+  'finished_at_utc',
+]
+
+const MATURITY_FIELDS = [
+  'asof_utc',
+  'paper_trading_sessions',
+  'point_in_time_history_sessions',
+  'net_labeled_trade_count',
+  'quote_cost_coverage',
+  'purged_oos_fold_count',
+  'duplicate_order_count',
+  'reconciliation_match_rate',
+]
+
+function pickFields(value, fields) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const selected = {}
+  for (const field of fields) {
+    if (value[field] !== undefined) selected[field] = value[field]
+  }
+  return selected
+}
+
+function evidenceReference(desk) {
   const selection = desk?.selection || {}
   const review = desk?.review || {}
   return {
+    observedAtUtc: desk?.observed_at_utc || null,
+    targetTradeDate: desk?.target_trade_date || null,
+    selectionSnapshotId: selection.snapshot_id || null,
+    selectionAsofUtc: selection.asof_utc || null,
+    selectionSessionDate: selection.session_date || null,
+    selectionStale: Boolean(selection.stale),
+    reviewSnapshotId: review.snapshot_id || null,
+    reviewSessionDate: review.session_date || null,
+    reviewStale: Boolean(review.stale),
+  }
+}
+
+function compactDeskEvidence(desk, { includeOperations = false } = {}) {
+  const selection = desk?.selection || {}
+  const review = desk?.review || {}
+  const compact = {
     observed_at_utc: desk?.observed_at_utc || null,
     target_trade_date: desk?.target_trade_date || null,
     stage: desk?.stage || null,
@@ -40,24 +114,36 @@ function compactDeskEvidence(desk) {
       blocker: selection.blocker || null,
       target_trade_date: selection.target_trade_date || null,
       session_date: selection.session_date || null,
+      snapshot_id: selection.snapshot_id || null,
+      asof_utc: selection.asof_utc || null,
       stale: Boolean(selection.stale),
       pass_count: selection.pass_count ?? 0,
       candidates: Array.isArray(selection.candidates)
-        ? selection.candidates.slice(0, 20)
+        ? selection.candidates.slice(0, 20).map((item) => (
+            pickFields(item, CANDIDATE_FIELDS)
+          ))
         : [],
     },
     review: {
       status: review.status || null,
       session_date: review.session_date || null,
+      snapshot_id: review.snapshot_id || null,
       stale: Boolean(review.stale),
       opportunity_count: review.opportunity_count ?? 0,
       opportunities: Array.isArray(review.opportunities)
-        ? review.opportunities.slice(0, 12)
+        ? review.opportunities.slice(0, 12).map((item) => (
+            pickFields(item, OPPORTUNITY_FIELDS)
+          ))
         : [],
     },
-    maturity: desk?.maturity || {},
-    jobs: Array.isArray(desk?.jobs) ? desk.jobs.slice(0, 12) : [],
   }
+  if (includeOperations) {
+    compact.maturity = pickFields(desk?.maturity, MATURITY_FIELDS)
+    compact.jobs = Array.isArray(desk?.jobs)
+      ? desk.jobs.slice(0, 12).map((item) => pickFields(item, JOB_FIELDS))
+      : []
+  }
+  return compact
 }
 
 function assistantMessages(question, desk) {
@@ -92,7 +178,10 @@ function agentMessages(role, desk) {
     },
     {
       role: 'user',
-      content: `请审阅以下研究证据：${JSON.stringify(compactDeskEvidence(desk))}`,
+      content: `请审阅以下研究证据：${JSON.stringify(compactDeskEvidence(
+        desk,
+        { includeOperations: role === 'supervisor' },
+      ))}`,
     },
   ]
 }
@@ -102,4 +191,5 @@ module.exports = {
   agentMessages,
   assistantMessages,
   compactDeskEvidence,
+  evidenceReference,
 }

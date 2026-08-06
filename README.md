@@ -39,7 +39,7 @@ health, then consumes resumable cloud SSE into the existing local SIP store.
 `feature/macos-research-client` 提供一个与本地模拟盘隔离、但在 Mac 本机运行完整
 研究内核的发行版。它内置 `data_plane/`、`kernel/`、`research/` 和 `schedule/`，
 在用户目录保存 accepted 快照、任务账本和复盘结果；Electron 只负责选股、证据答疑、
-收盘复盘和三个研究 Agent 的交互。首次启动填写用户自己的 OpenRouter Key，以及
+收盘复盘和三个研究 Agent 的交互。答疑与 Agent 会把最小化、白名单化并带快照引用的研究证据发送至 OpenRouter。首次启动填写用户自己的 OpenRouter Key，以及
 固定 Alpaca SIP 代理的 Key/Secret；四个模型角色可独立选择。
 
 固定代理地址为 `wss://alpaca-trade-api.vertu.cn/v2/sip`，程序会验证报价、成交和

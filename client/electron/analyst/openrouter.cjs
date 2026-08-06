@@ -62,7 +62,7 @@ function createOpenRouterClient({
         }))
     },
 
-    async complete({ apiKey, model, messages, maxTokens = 900, temperature = 0.2 }) {
+    async complete({ apiKey, model, messages, maxTokens = 8192, temperature = 0.2 }) {
       const modelId = String(model || '').trim()
       if (!modelId) throw new Error('尚未选择 OpenRouter 模型')
       if (!Array.isArray(messages) || !messages.length) {

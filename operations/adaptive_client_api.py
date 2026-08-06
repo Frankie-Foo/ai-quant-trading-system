@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -202,10 +203,20 @@ def build_client_http_server(
 
     if not static_root.is_dir():
         raise FileNotFoundError(f"client static root does not exist: {static_root}")
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        raise ValueError(
+            "the desktop client server is localhost-only; "
+            "remote deployment requires the authenticated HTTPS gateway"
+        )
     if bearer_token is not None and (
         len(bearer_token) < 16 or "\r" in bearer_token or "\n" in bearer_token
     ):
         raise ValueError("client bearer token must be at least 16 safe characters")
+
+    browser_session_token = (
+        secrets.token_urlsafe(32) if bearer_token is not None else None
+    )
+    browser_session_cookie = "adaptive_client_session"
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "AdaptiveTradingClient/1"
@@ -247,6 +258,12 @@ def build_client_http_server(
                 "Cache-Control",
                 "no-cache" if target.name == "index.html" else "public, max-age=3600",
             )
+            if browser_session_token is not None and target.name == "index.html":
+                self.send_header(
+                    "Set-Cookie",
+                    f"{browser_session_cookie}={browser_session_token}; "
+                    "Path=/; HttpOnly; SameSite=Strict",
+                )
             self.send_header("Content-Length", str(len(content)))
             self.end_headers()
             self.wfile.write(content)
@@ -259,6 +276,27 @@ def build_client_http_server(
                         status=HTTPStatus.UNAUTHORIZED,
                         body={
                             "error": "read-only client authentication required",
+                            "orders_authorized": False,
+                        },
+                    )
+                )
+                return
+            if (
+                parsed.path == "/v1/emergency-stop"
+                and self.headers.get("X-Adaptive-Client-Action", "")
+                != "emergency-stop-v1"
+            ):
+                stop_active = (
+                    application.emergency_stop.read().active
+                    if application.emergency_stop is not None
+                    else False
+                )
+                self._send_json(
+                    ClientApiResponse(
+                        status=HTTPStatus.FORBIDDEN,
+                        body={
+                            "error": "trusted client action header required",
+                            "emergency_stop_active": stop_active,
                             "orders_authorized": False,
                         },
                     )
@@ -342,9 +380,24 @@ def build_client_http_server(
                 return True
             header = self.headers.get("Authorization", "")
             prefix = "Bearer "
-            if not header.startswith(prefix):
+            if header.startswith(prefix) and secrets.compare_digest(
+                header[len(prefix) :], bearer_token
+            ):
+                return True
+            cookie = SimpleCookie()
+            try:
+                cookie.load(self.headers.get("Cookie", ""))
+            except CookieError:
                 return False
-            return secrets.compare_digest(header[len(prefix) :], bearer_token)
+            session = cookie.get(browser_session_cookie)
+            return bool(
+                session
+                and browser_session_token
+                and secrets.compare_digest(
+                    session.value,
+                    browser_session_token,
+                )
+            )
 
         def log_message(self, format: str, *args: Any) -> None:
             return

@@ -17,6 +17,7 @@ const {
   agentMessages,
   assistantMessages,
   compactDeskEvidence,
+  evidenceReference,
 } = require('../analyst/prompts.cjs')
 const { createIbkrPaperAdapter } = require('../analyst/ibkr-paper.cjs')
 
@@ -230,6 +231,7 @@ test('OpenRouter client lists text models and sends non-streaming chat safely', 
   assert.equal(requests[0].options.headers.Authorization, 'Bearer secret-key')
   assert.equal(requests[1].options.headers.Authorization, 'Bearer secret-key')
   assert.equal(JSON.parse(requests[1].options.body).stream, false)
+  assert.equal(JSON.parse(requests[1].options.body).max_tokens, 8192)
 })
 
 test('OpenRouter errors expose typed status but never echo the API key', async () => {
@@ -354,4 +356,68 @@ test('assistant and agent prompts are evidence bounded and force non-executable 
   assert.match(assistant[1].content, /2026-07-31/)
   assert.match(redTeam[0].content, /不能授权买卖/)
   assert.throws(() => agentMessages('trader', desk), /未知 Agent/)
+})
+
+
+test('AI evidence is minimized and carries an immutable reference', () => {
+  const desk = {
+    observed_at_utc: '2026-07-31T12:00:00+00:00',
+    target_trade_date: '2026-07-31',
+    stage: 'research_only',
+    selection: {
+      status: 'ready',
+      session_date: '2026-07-31',
+      snapshot_id: 'selection-snapshot-1',
+      asof_utc: '2026-07-31T11:59:00+00:00',
+      stale: false,
+      candidates: [{
+        rank: 1,
+        symbol: 'AAA',
+        rvol: 5.5,
+        api_secret: 'must-not-leave-device',
+      }],
+    },
+    review: {
+      status: 'ready',
+      session_date: '2026-07-30',
+      snapshot_id: 'review-snapshot-1',
+      stale: true,
+      opportunities: [{
+        rank: 1,
+        symbol: 'BBB',
+        close_return: 0.1,
+        raw_payload: 'must-not-leave-device',
+      }],
+    },
+    jobs: [{
+      job_name: 'postmarket_review',
+      trade_date: '2026-07-30',
+      status: 'succeeded',
+      run_token: 'must-not-leave-device',
+    }],
+    maturity: { paper_trading_sessions: 2, secret: 'hidden' },
+  }
+
+  const compact = compactDeskEvidence(desk)
+  const supervisor = agentMessages('supervisor', desk)
+  const reference = evidenceReference(desk)
+  const serializedCompact = JSON.stringify(compact)
+  const serializedSupervisor = JSON.stringify(supervisor)
+
+  assert.equal(compact.jobs, undefined)
+  assert.equal(compact.maturity, undefined)
+  assert.doesNotMatch(serializedCompact, /must-not-leave-device/)
+  assert.match(serializedSupervisor, /postmarket_review/)
+  assert.doesNotMatch(serializedSupervisor, /run_token|must-not-leave-device/)
+  assert.deepEqual(reference, {
+    observedAtUtc: '2026-07-31T12:00:00+00:00',
+    targetTradeDate: '2026-07-31',
+    selectionSnapshotId: 'selection-snapshot-1',
+    selectionAsofUtc: '2026-07-31T11:59:00+00:00',
+    selectionSessionDate: '2026-07-31',
+    selectionStale: false,
+    reviewSnapshotId: 'review-snapshot-1',
+    reviewSessionDate: '2026-07-30',
+    reviewStale: true,
+  })
 })

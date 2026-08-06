@@ -17,6 +17,11 @@ import {
   ShieldCheck,
   Sparkles,
 } from 'lucide-react'
+import {
+  booleanLabel,
+  evidenceReferenceFromDesk,
+  evidenceReferenceKey,
+} from './client-state'
 
 const bridge = window.analystDesktop
 
@@ -96,6 +101,16 @@ function LoadingScreen() {
   )
 }
 
+function EvidenceStamp({ evidence, currentKey }) {
+  if (!evidence) return <small>证据引用缺失</small>
+  const changed = evidenceReferenceKey(evidence) !== currentKey
+  return (
+    <small className={changed ? 'evidence-stale' : ''}>
+      证据 {evidence.targetTradeDate || 'N/A'} · {evidence.selectionSnapshotId || '无选股快照'} · {changed ? '当前证据已变化' : evidence.selectionStale ? '历史快照' : '当前快照'}
+    </small>
+  )
+}
+
 function ConnectionSetup({ busy, error, runtimeStatus, onValidated }) {
   const [openRouterApiKey, setOpenRouterApiKey] = useState('')
   const [marketDataKey, setMarketDataKey] = useState('')
@@ -121,7 +136,7 @@ function ConnectionSetup({ busy, error, runtimeStatus, onValidated }) {
           <label>
             <span>OpenRouter API Key</span>
             <input type="password" value={openRouterApiKey} onChange={(event) => setOpenRouterApiKey(event.target.value)} placeholder="sk-or-…" autoComplete="off" required />
-            <small>只在 Electron 主进程使用，并由 macOS Keychain 加密保存。</small>
+            <small>只在 Electron 主进程使用，并由 macOS Keychain 加密保存；答疑与 Agent 会把最小化研究证据发送至 OpenRouter 及所选模型提供商。</small>
           </label>
           <label>
             <span>Alpaca 代理行情 Key</span>
@@ -138,7 +153,7 @@ function ConnectionSetup({ busy, error, runtimeStatus, onValidated }) {
             验证连接
           </button>
         </form>
-        <div className="boundary-note"><ShieldCheck size={15} /><span>实时 SIP 只提供报价、成交和分钟线；历史、新闻或财务数据不足时仍会阻断完整选股。</span></div>
+        <div className="boundary-note"><ShieldCheck size={15} /><span>实时 SIP 只提供报价、成交和分钟线；历史、新闻或财务数据不足时仍会阻断完整选股。使用答疑或 Agent 时，最小化证据会发送至 OpenRouter。</span></div>
       </section>
     </main>
   )
@@ -204,8 +219,8 @@ function CandidateTable({ candidates = [] }) {
           <span><b>{candidate.rank ?? '—'}</b><strong>{candidate.symbol}</strong></span>
           <span className={candidate.premarket_gap_return > 0 ? 'positive' : ''}>{percent(candidate.premarket_gap_return)}</span>
           <span>{number(candidate.rvol)}×</span>
-          <span>{candidate.earnings_strength_confirmed ? '强确认' : `${candidate.earnings_evidence_layers ?? 0} 层`}<small>强度 {number(candidate.earnings_intensity_score, 0)}</small></span>
-          <span>{candidate.premarket_above_vwap ? 'VWAP 上方' : 'VWAP 下方'}<small>收盘位 {percent(candidate.premarket_close_location, 0)}</small></span>
+          <span>{candidate.earnings_strength_confirmed == null ? 'N/A' : candidate.earnings_strength_confirmed ? '强确认' : `${candidate.earnings_evidence_layers ?? 0} 层`}<small>强度 {number(candidate.earnings_intensity_score, 0)}</small></span>
+          <span>{booleanLabel(candidate.premarket_above_vwap, 'VWAP 上方', 'VWAP 下方')}<small>收盘位 {percent(candidate.premarket_close_location, 0)}</small></span>
         </div>
       ))}
     </div>
@@ -238,6 +253,7 @@ function TodayPage({ desk }) {
 }
 
 function AssistantPage({ desk, model }) {
+  const currentEvidenceKey = evidenceReferenceKey(evidenceReferenceFromDesk(desk))
   const [question, setQuestion] = useState('')
   const [messages, setMessages] = useState([])
   const [busy, setBusy] = useState(false)
@@ -258,6 +274,7 @@ function AssistantPage({ desk, model }) {
         content: result.content,
         model: result.model,
         usage: result.usage,
+        evidence: result.evidence,
       }])
     } catch (caught) {
       setError(caught.message || '答疑请求失败')
@@ -270,13 +287,13 @@ function AssistantPage({ desk, model }) {
     <div className="analyst-page-stack assistant-layout">
       <header className="analyst-page-header"><div><span className="eyebrow">EVIDENCE-BOUND Q&A</span><h2>研究答疑</h2></div><p>模型：{model || 'N/A'} · 自动附带当前选股与复盘证据</p></header>
       <section className="panel chat-panel">
-        <div className="chat-context"><Database size={15} /><span>当前上下文：目标交易日 {desk?.target_trade_date || 'N/A'} · {desk?.selection?.stale ? '历史证据' : '当前证据'} · 无交易权限</span></div>
+        <div className="chat-context"><Database size={15} /><span>当前上下文：目标交易日 {desk?.target_trade_date || 'N/A'} · {desk?.selection?.stale ? '历史证据' : '当前证据'} · 最小化证据将发送至 OpenRouter · 无交易权限</span></div>
         <div className="chat-thread">
           {!messages.length && <div className="chat-empty"><MessageSquareText size={28} /><h3>可以问什么？</h3><p>为什么选它、今天为何空仓、漏选因子是什么、证据是否过期、复盘能得到什么假设。</p></div>}
           {messages.map((message, index) => (
             <article className={`chat-message ${message.role}`} key={`${message.role}-${index}`}>
               <span>{message.role === 'user' ? '你' : 'AI'}</span>
-              <div><p>{message.content}</p>{message.model && <small>{message.model} · {message.usage?.totalTokens || 0} tokens</small>}</div>
+              <div><p>{message.content}</p>{message.model && <small>{message.model} · {message.usage?.totalTokens || 0} tokens</small>}{message.role === 'assistant' && <EvidenceStamp evidence={message.evidence} currentKey={currentEvidenceKey} />}</div>
             </article>
           ))}
           {busy && <div className="chat-thinking"><LoaderCircle className="spin" size={16} />正在根据证据回答……</div>}
@@ -322,7 +339,8 @@ function ReviewPage({ desk }) {
   )
 }
 
-function AgentsPage({ settings }) {
+function AgentsPage({ settings, desk }) {
+  const currentEvidenceKey = evidenceReferenceKey(evidenceReferenceFromDesk(desk))
   const [results, setResults] = useState({})
   const [busyRole, setBusyRole] = useState('')
   const [error, setError] = useState('')
@@ -354,7 +372,7 @@ function AgentsPage({ settings }) {
               <button type="button" disabled={Boolean(busyRole)} onClick={() => run(role)}>
                 {busyRole === role ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}运行今日复核
               </button>
-              {result && <div className="agent-result"><p>{result.content}</p><small>{result.model} · {result.usage?.totalTokens || 0} tokens</small></div>}
+              {result && <div className="agent-result"><p>{result.content}</p><small>{result.model} · {result.usage?.totalTokens || 0} tokens</small><EvidenceStamp evidence={result.evidence} currentKey={currentEvidenceKey} /></div>}
             </section>
           )
         })}
@@ -367,7 +385,7 @@ function SettingsPage({ settings, models, runtimeStatus, ibkrStatus, busy, error
   const [editingModels, setEditingModels] = useState(false)
   return (
     <div className="analyst-page-stack">
-      <header className="analyst-page-header"><div><span className="eyebrow">SECURITY & PROVIDERS</span><h2>设置</h2></div><p>凭据不显示、不导出、不进入 Git</p></header>
+      <header className="analyst-page-header"><div><span className="eyebrow">SECURITY & PROVIDERS</span><h2>设置</h2></div><p>凭据不显示、不导出、不进入 Git；AI 请求会发送最小化研究证据至 OpenRouter</p></header>
       <div className="settings-grid">
         <section className="panel settings-card"><KeyRound size={20} /><h3>安全凭据</h3><div><span>OpenRouter Key</span><strong>{settings.openRouterKeyConfigured ? '已保存在系统安全存储' : '未配置'}</strong></div><div><span>行情凭据</span><strong>{settings.marketDataConfigured ? '已保存在系统安全存储' : '未配置'}</strong></div><div><span>远程选股服务</span><strong>不使用</strong></div></section>
         <section className="panel settings-card"><ShieldCheck size={20} /><h3>本地研究内核</h3><div><span>执行位置</span><strong>{runtimeStatus?.local_execution ? '本机 Mac' : '不可用'}</strong></div><div><span>行情 Adapter</span><strong>{runtimeStatus?.market_data?.realtime_ready ? 'Alpaca SIP 已连接' : runtimeStatus?.market_data?.configured ? '连接异常' : '未配置'}</strong></div><div><span>研究输入</span><strong>{runtimeStatus?.market_data?.research_inputs_ready ? '完整' : '仍缺历史/新闻/财务'}</strong></div><div><span>订单权限</span><strong>永久关闭</strong></div></section>
@@ -395,16 +413,22 @@ export default function AnalystApp() {
   const [page, setPage] = useState('today')
   const [onboarding, setOnboarding] = useState('')
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
+  const [deskError, setDeskError] = useState('')
+  const [runtimeError, setRuntimeError] = useState('')
+  const [actionError, setActionError] = useState('')
   const [loading, setLoading] = useState(true)
+  const connectionError = [runtimeError, deskError].filter(Boolean).join('；')
+  const error = [connectionError, actionError].filter(Boolean).join('；')
 
   const refreshDesk = useCallback(async () => {
     try {
       const next = await bridge.desk.get()
       setDesk(next)
-      setError('')
+      setDeskError('')
+      return next
     } catch (caught) {
-      setError(caught.message || '研究数据服务不可用')
+      setDeskError(caught.message || '研究数据服务不可用')
+      return null
     }
   }, [])
 
@@ -412,22 +436,23 @@ export default function AnalystApp() {
     try {
       const status = await bridge.runtime.status()
       setRuntimeStatus(status)
+      setRuntimeError('')
       return status
     } catch (caught) {
-      setError(caught.message || '本地研究内核不可用')
+      setRuntimeError(caught.message || '本地研究内核不可用')
       return null
     }
   }, [])
 
   const loadModels = useCallback(async () => {
     setBusy(true)
-    setError('')
+    setActionError('')
     try {
       const catalog = await bridge.models.list()
       setModels(catalog)
       return catalog
     } catch (caught) {
-      setError(caught.message || '无法读取 OpenRouter 模型')
+      setActionError(caught.message || '无法读取 OpenRouter 模型')
       return []
     } finally {
       setBusy(false)
@@ -439,25 +464,48 @@ export default function AnalystApp() {
     document.title = 'AI 量化研究台'
     const initialize = async () => {
       try {
-        const [current, localStatus] = await Promise.all([
-          bridge.settings.get(),
-          bridge.runtime.status(),
-        ])
+        if (!bridge) throw new Error('桌面安全桥接不可用，请重新启动客户端')
+        const current = await bridge.settings.get()
         if (cancelled) return
         setSettings(current)
-        setRuntimeStatus(localStatus)
+
+        try {
+          const localStatus = await bridge.runtime.status()
+          if (!cancelled) {
+            setRuntimeStatus(localStatus)
+            setRuntimeError('')
+          }
+        } catch (caught) {
+          if (!cancelled) {
+            setRuntimeError(caught.message || '本地研究内核不可用')
+          }
+        }
+
         if (!current.openRouterKeyConfigured || !current.marketDataConfigured) {
           setOnboarding('connection')
         } else if (!current.configured) {
-          const catalog = await bridge.models.list()
-          if (cancelled) return
-          setModels(catalog)
-          setOnboarding('models')
+          try {
+            const catalog = await bridge.models.list()
+            if (!cancelled) setModels(catalog)
+          } catch (caught) {
+            if (!cancelled) {
+              setActionError(caught.message || '无法读取 OpenRouter 模型')
+            }
+          }
+          if (!cancelled) setOnboarding('models')
         } else {
-          await Promise.all([refreshDesk(), bridge.ibkrPaper.status().then(setIbkrStatus)])
+          await refreshDesk()
+          try {
+            const status = await bridge.ibkrPaper.status()
+            if (!cancelled) setIbkrStatus(status)
+          } catch (caught) {
+            if (!cancelled) {
+              setActionError(caught.message || 'IBKR Paper 状态不可用')
+            }
+          }
         }
       } catch (caught) {
-        if (!cancelled) setError(caught.message || '客户端初始化失败')
+        if (!cancelled) setActionError(caught.message || '客户端初始化失败')
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -477,15 +525,16 @@ export default function AnalystApp() {
 
   const validateConnection = async (connection) => {
     setBusy(true)
-    setError('')
+    setActionError('')
     try {
       const result = await bridge.settings.validateConnection(connection)
       setSettings(result.settings)
       setModels(result.models)
       setRuntimeStatus(result.runtime)
+      setRuntimeError('')
       setOnboarding('models')
     } catch (caught) {
-      setError(caught.message || '连接验证失败')
+      setActionError(caught.message || '连接验证失败')
     } finally {
       setBusy(false)
     }
@@ -493,15 +542,20 @@ export default function AnalystApp() {
 
   const saveModels = async (values) => {
     setBusy(true)
-    setError('')
+    setActionError('')
     try {
       const next = await bridge.settings.saveModels(values)
       setSettings(next)
       setOnboarding('')
-      await Promise.all([refreshDesk(), bridge.ibkrPaper.status().then(setIbkrStatus)])
+      await refreshDesk()
+      try {
+        setIbkrStatus(await bridge.ibkrPaper.status())
+      } catch (caught) {
+        setActionError(caught.message || 'IBKR Paper 状态不可用')
+      }
       return true
     } catch (caught) {
-      setError(caught.message || '模型配置保存失败')
+      setActionError(caught.message || '模型配置保存失败')
       return false
     } finally {
       setBusy(false)
@@ -509,12 +563,24 @@ export default function AnalystApp() {
   }
 
   const reset = async () => {
-    const next = await bridge.settings.clear()
-    setSettings(next)
-    setDesk(null)
-    setModels([])
-    setOnboarding('connection')
-    setPage('today')
+    if (!window.confirm('确认清除本机安全存储中的所有模型与行情凭据？')) return
+    setBusy(true)
+    setActionError('')
+    try {
+      const next = await bridge.settings.clear()
+      setSettings(next)
+      setDesk(null)
+      setModels([])
+      setRuntimeStatus(null)
+      setRuntimeError('')
+      setDeskError('')
+      setOnboarding('connection')
+      setPage('today')
+    } catch (caught) {
+      setActionError(caught.message || '无法清除本地设置')
+    } finally {
+      setBusy(false)
+    }
   }
 
   const activeCandidates = desk?.selection?.candidates || []
@@ -523,7 +589,17 @@ export default function AnalystApp() {
     review: desk?.review?.opportunity_count || 0,
   }), [activeCandidates.length, desk?.review?.opportunity_count])
 
-  if (loading || !settings) return <LoadingScreen />
+  if (loading) return <LoadingScreen />
+  if (!settings) {
+    return (
+      <main className="onboarding-shell">
+        <section className="onboarding-card">
+          <div className="setup-error"><AlertTriangle size={16} />{actionError || '客户端初始化失败'}</div>
+          <button className="primary-action" type="button" onClick={() => window.location.reload()}><RefreshCw size={16} />重新加载客户端</button>
+        </section>
+      </main>
+    )
+  }
   if (onboarding === 'connection') return <ConnectionSetup busy={busy} error={error} runtimeStatus={runtimeStatus} onValidated={validateConnection} />
   if (onboarding === 'models') return <ModelSetup models={models} initialValues={settings.models} busy={busy} error={error} onSave={saveModels} />
 
@@ -534,17 +610,17 @@ export default function AnalystApp() {
       : page === 'review'
         ? <ReviewPage desk={desk} />
         : page === 'agents'
-          ? <AgentsPage settings={settings} />
+          ? <AgentsPage settings={settings} desk={desk} />
           : <SettingsPage settings={settings} models={models} runtimeStatus={runtimeStatus} ibkrStatus={ibkrStatus} busy={busy} error={error} onLoadModels={loadModels} onSaveModels={saveModels} onReset={reset} />
 
   return (
     <main className="analyst-app">
       <header className="analyst-topbar">
         <div className="analyst-brand"><span><Activity size={21} /></span><div><strong>AI 量化研究台</strong><small>macOS RESEARCH EDITION</small></div></div>
-        <div className="analyst-connection"><i className={error ? 'bad' : ''} /><span>{error ? '本地内核异常' : '本地研究内核在线'}</span></div>
-        <button type="button" onClick={refreshDesk}><RefreshCw size={15} />刷新</button>
+        <div className="analyst-connection"><i className={connectionError ? 'bad' : ''} /><span>{connectionError ? '本地研究服务异常' : '本地研究内核在线'}</span></div>
+        <button type="button" onClick={() => { refreshDesk(); refreshRuntime() }}><RefreshCw size={15} />刷新</button>
       </header>
-      <section className="analyst-boundary"><ShieldCheck size={17} /><div><strong>本地研究版 · 无交易能力</strong><span>选股、因子、复盘在本机执行；实时 SIP 使用固定代理，IBKR Paper 仅预留接口。</span></div><b>LOCAL · NO ORDERS</b></section>
+      <section className="analyst-boundary"><ShieldCheck size={17} /><div><strong>本地研究版 · 无交易能力</strong><span>选股、因子、复盘在本机执行；AI 答疑会把最小化证据发送至 OpenRouter；IBKR Paper 仅预留接口。</span></div><b>LOCAL · NO ORDERS</b></section>
       {error && <div className="analyst-global-error"><AlertTriangle size={16} />{error}。保留最后一次已知证据，不生成新的确定性结论。</div>}
       <div className="analyst-workspace">
         <nav className="analyst-nav">
@@ -556,7 +632,7 @@ export default function AnalystApp() {
         </nav>
         <section className="analyst-content">{pageContent}</section>
       </div>
-      <footer className="analyst-footer"><span><Database size={13} />本地不可变研究证据</span><span><KeyRound size={13} />模型与行情凭据：系统安全存储</span><span>行情源：Alpaca SIP 代理 · 模拟盘：无 · 订单：禁止</span></footer>
+      <footer className="analyst-footer"><span><Database size={13} />本地不可变研究证据</span><span><KeyRound size={13} />凭据：系统安全存储 · AI 证据：最小化后外发</span><span>行情源：Alpaca SIP 代理 · 模拟盘：无 · 订单：禁止</span></footer>
     </main>
   )
 }
