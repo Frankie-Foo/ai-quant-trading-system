@@ -1188,9 +1188,12 @@ security handling, operational recovery, and the modular-monolith decision.
   present in CI.
 - Added the database ownership inventory and migration contract without moving,
   dropping, or fabricating any existing table.
-- Acceptance: governance tests 3 passed and dependency-boundary tests 7 passed;
-  Python tests 573 passed in 40.06 seconds; Ruff clean; strict mypy clean across
-  285 source files; Electron tests 33 passed; UI tests 12 passed; Vite production
-  build passed. `pip-audit` was
+- Added an executable SQLite migration runner and connected the scheduler job
+  ledger and execution order ledger. Legacy `run_token` schemas upgrade in place;
+  failed migrations roll back both schema and version record.
+- Acceptance: governance tests 3 passed, dependency-boundary tests 7 passed, and
+  migration/ledger tests 13 passed; full Python tests 578 passed in 39.27
+  seconds; Ruff clean; strict mypy clean across 290 source files; Electron tests
+  33 passed; UI tests 12 passed; Vite production build passed. `pip-audit` was
   installed but its PyPI advisory lookup failed with a local TLS EOF, so the
   security audit remains a CI follow-up rather than a passing local result.

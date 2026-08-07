@@ -6,12 +6,68 @@ import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from db.migrations.sqlite import SQLiteMigration, apply_sqlite_migrations
 from execution.order_state import OrderLifecycle, OrderState, apply_transition
 from kernel.tradeplan import TradePlan
 
 
 class OrderLedgerConflictError(RuntimeError):
     """A client order ID was reused for a different intent."""
+
+
+def _create_order_ledger_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS orders (
+            client_order_id TEXT PRIMARY KEY,
+            broker_order_id TEXT UNIQUE,
+            plan_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            requested_shares INTEGER NOT NULL CHECK(requested_shares > 0),
+            state TEXT NOT NULL,
+            lifecycle_json TEXT NOT NULL,
+            created_at_utc TEXT NOT NULL,
+            updated_at_utc TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS order_events (
+            client_order_id TEXT NOT NULL REFERENCES orders(client_order_id),
+            sequence INTEGER NOT NULL CHECK(sequence > 0),
+            at_utc TEXT NOT NULL,
+            from_state TEXT NOT NULL,
+            to_state TEXT NOT NULL,
+            filled_shares INTEGER NOT NULL CHECK(filled_shares >= 0),
+            provenance TEXT NOT NULL,
+            PRIMARY KEY (client_order_id, sequence)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trade_plans (
+            plan_id TEXT PRIMARY KEY,
+            client_order_id TEXT NOT NULL UNIQUE,
+            trace_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            plan_json TEXT NOT NULL,
+            created_at_utc TEXT NOT NULL
+        )
+        """
+    )
+
+
+ORDER_LEDGER_MIGRATIONS = (
+    SQLiteMigration(
+        version=1,
+        name="orders_and_trade_plans",
+        signature="execution.order_ledger.v1",
+        apply=_create_order_ledger_schema,
+    ),
+)
 
 
 class OrderLedger:
@@ -30,39 +86,10 @@ class OrderLedger:
 
     def _initialize(self) -> None:
         with self._connect() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS orders (
-                    client_order_id TEXT PRIMARY KEY,
-                    broker_order_id TEXT UNIQUE,
-                    plan_id TEXT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    requested_shares INTEGER NOT NULL CHECK(requested_shares > 0),
-                    state TEXT NOT NULL,
-                    lifecycle_json TEXT NOT NULL,
-                    created_at_utc TEXT NOT NULL,
-                    updated_at_utc TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS order_events (
-                    client_order_id TEXT NOT NULL REFERENCES orders(client_order_id),
-                    sequence INTEGER NOT NULL CHECK(sequence > 0),
-                    at_utc TEXT NOT NULL,
-                    from_state TEXT NOT NULL,
-                    to_state TEXT NOT NULL,
-                    filled_shares INTEGER NOT NULL CHECK(filled_shares >= 0),
-                    provenance TEXT NOT NULL,
-                    PRIMARY KEY (client_order_id, sequence)
-                );
-                CREATE TABLE IF NOT EXISTS trade_plans (
-                    plan_id TEXT PRIMARY KEY,
-                    client_order_id TEXT NOT NULL UNIQUE,
-                    trace_id TEXT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    trade_date TEXT NOT NULL,
-                    plan_json TEXT NOT NULL,
-                    created_at_utc TEXT NOT NULL
-                );
-                """
+            apply_sqlite_migrations(
+                connection,
+                owner="execution.order_ledger",
+                migrations=ORDER_LEDGER_MIGRATIONS,
             )
 
     def get_plan(self, plan_id: str) -> TradePlan | None:
