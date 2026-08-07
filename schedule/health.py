@@ -12,8 +12,10 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from data_plane.providers.alpaca import market_data_provider_from_env
+
 ROOT = Path(__file__).resolve().parents[1]
-REQUIRED_PROVIDER_ENV = (
+CLOUD_PROVIDER_ENV = (
     "CLOUD_PLATFORM_BASE_URL",
     "CLOUD_MARKET_DATA_API_TOKEN",
 )
@@ -162,7 +164,29 @@ def _ledger_checks(state_db: Path, *, require_success: bool) -> list[dict[str, o
 
 
 def _credential_check() -> dict[str, object]:
-    missing = [name for name in REQUIRED_PROVIDER_ENV if not os.getenv(name, "").strip()]
+    try:
+        provider = market_data_provider_from_env()
+    except RuntimeError as exc:
+        return _check(
+            "provider_credentials",
+            status="fail",
+            detail=str(exc),
+            critical=True,
+        )
+    if provider == "alpaca_direct":
+        missing = []
+        if not any(
+            os.getenv(name, "").strip()
+            for name in ("ALPACA_API_KEY_ID", "ALPACA_PAPER_KEY_ID")
+        ):
+            missing.append("ALPACA_API_KEY_ID or ALPACA_PAPER_KEY_ID")
+        if not any(
+            os.getenv(name, "").strip()
+            for name in ("ALPACA_API_SECRET_KEY", "ALPACA_PAPER_SECRET_KEY")
+        ):
+            missing.append("ALPACA_API_SECRET_KEY or ALPACA_PAPER_SECRET_KEY")
+    else:
+        missing = [name for name in CLOUD_PROVIDER_ENV if not os.getenv(name, "").strip()]
     return _check(
         "provider_credentials",
         status="pass" if not missing else "fail",

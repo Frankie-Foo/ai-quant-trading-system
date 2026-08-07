@@ -39,6 +39,7 @@ def test_premarket_and_paper_units_preserve_fail_closed_defaults() -> None:
     assert "BROKER_WRITE_ENABLED=false" in environment
     assert "TRADING_KILL_SWITCH=true" in environment
     assert "CLOUD_PLATFORM_BASE_URL=https://cloud-strategy-platform.example.internal" in environment
+    assert "MARKET_DATA_PROVIDER=cloud_proxy" in environment
     assert "ALPACA_API_KEY_ID" not in environment
     assert "ALPACA_API_SECRET_KEY" not in environment
 

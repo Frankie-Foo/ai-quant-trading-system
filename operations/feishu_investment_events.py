@@ -9,7 +9,7 @@ from typing import Protocol
 
 from execution.autonomous_paper_session import AutonomousPaperPlan, PaperSessionResult
 from execution.engine import PaperExecutionResult
-from execution.locked_selection import LockedSelection
+from execution.locked_selection import LockedCandidate, LockedSelection
 from operations.feishu_base import InvestmentTable
 
 
@@ -39,33 +39,33 @@ def record_locked_selection(
             f"{snapshot.dataset_id}:{candidate.symbol}"
         )
         fields = {
+            "运行ID": event_id,
             "选股时间": observed_at_utc,
-            "交易日期": selection.trade_date,
+            "股票名称": candidate.symbol,
             "股票代码": candidate.symbol,
-            "选择排名": candidate.selection_rank,
-            "RVOL": candidate.rvol,
-            "参考价格": candidate.price,
-            "日均成交额": candidate.adv_usd,
-            "ATR比例": candidate.atr_pct,
-            "市值分层": candidate.tier,
-            "选择快照ID": snapshot.dataset_id,
-            "状态": "进入观察名单",
-            "触发原因": (
-                f"rank={candidate.selection_rank};"
-                f"rvol={candidate.rvol:.4f};"
-                "directional_volume_confirmed=true"
+            "市场": "美股",
+            "信号类型": "综合",
+            "模拟动作": "候选",
+            "状态": "新信号",
+            "触发理由": _selection_reason(candidate),
+            "下一动作": (
+                "启动盯盘；实时条件与风控门通过后自动提交模拟盘买入；"
+                "条件失效则放弃"
             ),
-            "来源": (
-                f"{snapshot.source}|{snapshot.schema_version}|"
-                f"asof={snapshot.asof_utc.isoformat()}|"
+            "执行摘要": (
+                f"排名={candidate.selection_rank}；"
+                f"参考价={candidate.price:.2f}；"
+                f"RVOL={candidate.rvol:.2f}；"
+                f"日均成交额=${candidate.adv_usd:,.0f}；"
+                f"ATR={candidate.atr_pct:.2%}；"
+                f"市值={_market_cap_text(candidate.market_cap)}；"
+                f"盘前={_premarket_summary(candidate)}"
+            ),
+            "策略版本": "selection_gates.v2|investment-flywheel.v1",
+            "数据源状态": (
+                f"通过；{snapshot.dataset_id};"
+                f"asof={snapshot.asof_utc.isoformat()};"
                 f"sha256={snapshot.content_sha256}"
-            ),
-            "消息正文": (
-                f"【量化系统·选股】{candidate.symbol}\n"
-                f"排名：{candidate.selection_rank}\n"
-                f"RVOL：{candidate.rvol:.2f}\n"
-                f"参考价：{candidate.price:.2f}\n"
-                "状态：进入盘中观察名单"
             ),
         }
         record_ids.append(client.record_event(InvestmentTable.SELECTION, event_id, fields))
@@ -97,23 +97,26 @@ def record_monitor_trigger(
     if not symbol.strip() or not trigger_type.strip() or not operation.strip():
         raise ValueError("monitor trigger identity fields are required")
     fields: dict[str, object] = {
+        "运行ID": clean_event_id,
         "触发时间": triggered_at_utc,
-        "交易日期": trade_date,
+        "监控计划ID": f"watch:{trade_date.isoformat()}:{symbol.strip().upper()}",
         "股票代码": symbol.strip().upper(),
-        "触发类型": trigger_type.strip(),
-        "操作": operation.strip(),
-        "触发原因": reason.strip(),
-        "状态": "已触发",
-        "来源": source.strip(),
-        "消息正文": message,
+        "股票名称": symbol.strip().upper(),
+        "触发类型": _monitor_trigger_type(trigger_type),
+        "模拟动作": _monitor_action(trigger_type),
+        "触发条件": reason.strip(),
+        "执行结果": "已执行" if order_ids else "已触发",
+        "执行摘要": f"{operation.strip()}；{message}",
+        "下一动作": "继续盯盘并等待下一状态转换",
+        "数据源状态": source.strip(),
     }
     if trigger_price is not None:
         fields["触发价格"] = trigger_price
     if position_shares is not None:
-        fields["持仓股数"] = position_shares
+        fields["模拟数量"] = position_shares
     clean_orders = tuple(item.strip() for item in order_ids if item.strip())
     if clean_orders:
-        fields["订单ID"] = ",".join(clean_orders)
+        fields["执行摘要"] = f"{fields['执行摘要']}；订单={','.join(clean_orders)}"
     return client.record_event(InvestmentTable.MONITOR, clean_event_id, fields)
 
 
@@ -140,23 +143,23 @@ def record_simulated_trade(
     if not event_id.strip() or not symbol.strip() or not plan_id.strip():
         raise ValueError("simulated trade identity fields are required")
     fields: dict[str, object] = {
+        "运行ID": event_id.strip(),
         "成交时间": observed_at_utc,
-        "交易日期": trade_date,
         "股票代码": symbol.strip().upper(),
-        "操作": operation.strip(),
-        "状态": status.strip(),
-        "计划ID": plan_id.strip(),
-        "触发原因": reason.strip(),
-        "来源": source.strip(),
-        "消息正文": message,
+        "股票名称": symbol.strip().upper(),
+        "方向": "买入",
+        "订单状态": _trade_order_status(status),
+        "数量": filled_shares or requested_shares or 0,
+        "模拟账户": "paper",
+        "持仓状态": "持仓中" if filled_shares else "取消",
+        "触发来源": f"{operation.strip()}|{plan_id.strip()}",
+        "下一动作": "继续盯盘；订单完成后进入复盘" if filled_shares else "等待修复或重试",
+        "数据源状态": source.strip(),
+        "执行摘要": message,
     }
     clean_orders = tuple(item.strip() for item in order_ids if item.strip())
     if clean_orders:
-        fields["订单ID"] = ",".join(clean_orders)
-    if requested_shares is not None:
-        fields["请求股数"] = requested_shares
-    if filled_shares is not None:
-        fields["成交股数"] = filled_shares
+        fields["执行摘要"] = f"{fields['执行摘要']}；订单={','.join(clean_orders)}"
     return client.record_event(InvestmentTable.TRADE, event_id.strip(), fields)
 
 
@@ -253,21 +256,19 @@ def record_postmarket_review(
         f"{selection_review_id}"
     )
     fields = {
+        "运行ID": event_id,
         "复盘时间": observed_at_utc,
-        "交易日期": trade_date,
-        "复盘类型": "收盘复盘",
-        "状态": "已完成",
-        "复盘ID": program_review_id,
-        "程序复盘ID": program_review_id,
-        "选股复盘ID": selection_review_id,
-        "关联证据": "|".join(clean_evidence),
-        "触发原因": "交易日已结束，数据与证据链完整",
-        "来源": "schedule.postmarket|research.postmarket.program_review",
-        "消息正文": (
-            f"【量化系统·收盘复盘】{trade_date.isoformat()}\n"
-            f"程序复盘：{program_review_id}\n"
-            f"选股复盘：{selection_review_id}\n"
-            "结论：复盘完成，结果进入本地研究账本"
+        "关联信号ID": selection_review_id,
+        "关联交易ID": "|".join(clean_evidence),
+        "复盘结论": "收盘复盘完成，证据链已记录；结果进入本地研究账本",
+        "策略改进": "待下一交易日根据成交与触发结果更新",
+        "下一动作": "进入下一交易日选股",
+        "数据源状态": "通过；schedule.postmarket|research.postmarket.program_review",
+        "执行摘要": (
+            f"交易日={trade_date.isoformat()}；"
+            f"程序复盘={program_review_id}；"
+            f"选股复盘={selection_review_id}；"
+            f"证据数={len(clean_evidence)}"
         ),
     }
     return client.record_event(InvestmentTable.REVIEW, event_id, fields)
@@ -292,3 +293,78 @@ def _stable_trade_event_id(plan_id: str, result: PaperSessionResult) -> str:
 def _require_utc(value: datetime) -> None:
     if value.tzinfo is None or value.utcoffset() != timedelta(0):
         raise ValueError("Feishu investment event timestamp must be UTC")
+
+
+def _selection_reason(candidate: LockedCandidate) -> str:
+    categories = ",".join(candidate.catalyst_categories) or "N/A"
+    above_vwap = (
+        candidate.premarket_above_vwap
+        if candidate.premarket_above_vwap is not None
+        else "N/A"
+    )
+    return (
+        f"排名={candidate.selection_rank};催化剂={categories};"
+        f"事件数={candidate.event_count};RVOL={candidate.rvol:.2f};"
+        f"盘前涨幅={_percent_text(candidate.premarket_return)};"
+        f"跳空={_percent_text(candidate.premarket_gap_return)};"
+        f"盘前高于VWAP={above_vwap};"
+        "方向性成交量已确认;"
+        f"当前停牌={candidate.current_halt};"
+        f"近期LULD={candidate.recent_luld_count};"
+        f"LULD风险={candidate.luld_risk}"
+    )
+
+
+def _premarket_summary(candidate: LockedCandidate) -> str:
+    if candidate.premarket_close is None or candidate.premarket_vwap is None:
+        return "N/A"
+    return f"close={candidate.premarket_close:.4f},vwap={candidate.premarket_vwap:.4f}"
+
+
+def _market_cap_text(value: float | None) -> str:
+    return "N/A" if value is None else f"${value / 1_000_000_000:.2f}B"
+
+
+def _percent_text(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:.2%}"
+
+
+def _monitor_trigger_type(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized == "stop":
+        return "止损"
+    if normalized in {"tp1", "tp2"}:
+        return "止盈"
+    if normalized == "entry":
+        return "突破"
+    if normalized == "add":
+        return "量价异动"
+    return "风控"
+
+
+def _monitor_action(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized == "add":
+        return "加仓"
+    if normalized in {"stop", "tp1", "tp2"}:
+        return "卖出"
+    if normalized == "entry":
+        return "买入"
+    return "不操作"
+
+
+def _trade_order_status(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized == "filled":
+        return "模拟成交"
+    if normalized in {"rejected", "cancelled"}:
+        return "拒绝"
+    if normalized in {
+        "created",
+        "pending_risk",
+        "approved",
+        "submitted",
+        "partially_filled",
+    }:
+        return "待执行"
+    return "失败"

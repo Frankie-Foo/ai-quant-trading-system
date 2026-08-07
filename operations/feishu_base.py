@@ -16,11 +16,15 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
+
+# lark-cli returns Base datetime cells without an offset; the write contract
+# stores UTC, so the readback normalizer treats that presentation as UTC.
+FEISHU_DISPLAY_TIMEZONE = UTC
 
 
 class FeishuBaseError(RuntimeError):
@@ -104,7 +108,7 @@ class FeishuBaseSettings:
         if len(set(table_ids)) != len(table_ids):
             raise RuntimeError("investment Feishu table IDs must be distinct")
 
-        event_id_field = values.get("FEISHU_INVESTMENT_EVENT_ID_FIELD", "事件ID").strip()
+        event_id_field = values.get("FEISHU_INVESTMENT_EVENT_ID_FIELD", "运行ID").strip()
         if not event_id_field:
             raise RuntimeError("FEISHU_INVESTMENT_EVENT_ID_FIELD must be non-empty")
 
@@ -163,12 +167,12 @@ class FeishuBaseEventClient:
         *,
         runner: Callable[[Sequence[str]], Mapping[str, object]] | None = None,
         sleep: Callable[[float], None] = time.sleep,
-        command: str = "lark-cli",
+        command: str | None = None,
     ) -> None:
         self.settings = settings
         self._runner = runner
         self._sleep = sleep
-        self._command = command
+        self._command = command or ("lark-cli.cmd" if os.name == "nt" else "lark-cli")
 
     @classmethod
     def from_environment(
@@ -377,6 +381,8 @@ class FeishuBaseEventClient:
             capture_output=True,
             check=False,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=45,
         )
         try:
@@ -462,4 +468,28 @@ def _cell_text(value: object) -> str:
         except (ArithmeticError, ValueError):
             return str(value)
         return format(normalized, "f")
-    return "" if value is None else str(value)
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return _datetime_text(value)
+    if isinstance(value, str):
+        return _datetime_text_or_text(value)
+    return str(value)
+
+
+def _datetime_text(value: datetime) -> str:
+    aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return aware.astimezone(UTC).replace(microsecond=0).isoformat()
+
+
+def _datetime_text_or_text(value: str) -> str:
+    candidate = value.strip()
+    if "T" not in candidate and " " not in candidate:
+        return value
+    try:
+        parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=FEISHU_DISPLAY_TIMEZONE)
+    return _datetime_text(parsed)

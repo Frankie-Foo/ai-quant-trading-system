@@ -63,9 +63,10 @@ def test_selection_records_candidates_with_provenance_but_not_polls() -> None:
     table, event_id, fields = writer.events[0]
     assert table is InvestmentTable.SELECTION
     assert event_id == "selection:2026-08-06:selection-snapshot-1:NVDA"
-    assert fields["选择快照ID"] == "selection-snapshot-1"
-    assert "sha256=" in str(fields["来源"])
-    assert "轮询" not in str(fields["消息正文"])
+    assert fields["运行ID"] == event_id
+    assert fields["状态"] == "新信号"
+    assert "selection-snapshot-1" in str(fields["数据源状态"])
+    assert "轮询" not in str(fields["触发理由"])
 
 
 def test_postmarket_review_records_all_evidence_once() -> None:
@@ -84,5 +85,5 @@ def test_postmarket_review_records_all_evidence_once() -> None:
     table, event_id, fields = writer.events[0]
     assert table is InvestmentTable.REVIEW
     assert event_id == "review:2026-08-06:program-review-1:selection-review-1"
-    assert fields["复盘类型"] == "收盘复盘"
-    assert fields["关联证据"] == "signal-1|episode-1|program-review-1"
+    assert fields["运行ID"] == event_id
+    assert fields["关联交易ID"] == "signal-1|episode-1|program-review-1"

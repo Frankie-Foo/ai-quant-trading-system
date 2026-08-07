@@ -118,7 +118,7 @@ def test_settings_are_optional_only_when_completely_unconfigured() -> None:
         }
     )
     assert settings is not None
-    assert settings.trade.event_id_field == "事件ID"
+    assert settings.trade.event_id_field == "运行ID"
     with pytest.raises(RuntimeError, match="incomplete dedicated"):
         FeishuBaseSettings.from_environment(
             {"FEISHU_INVESTMENT_BASE_TOKEN": "base-token"}

@@ -185,10 +185,12 @@ def test_action_notification_reuses_original_message_and_records_one_base_event(
     table, event_id, fields = base.events[0]
     assert table is InvestmentTable.TRADE
     assert event_id.startswith("trade:")
-    assert fields["交易日期"] == date(2026, 7, 29)
-    assert fields["计划ID"] == _plan().plan_id
+    assert fields["运行ID"] == event_id
+    assert fields["成交时间"] == NOW
     assert fields["股票代码"] == "XYZ"
-    assert fields["消息正文"]
+    assert fields["模拟账户"] == "paper"
+    assert _plan().plan_id in str(fields["触发来源"])
+    assert fields["执行摘要"]
 
 
 def test_push_delivery_failure_creates_five_minute_fail_closed_latch(

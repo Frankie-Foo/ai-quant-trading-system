@@ -41,7 +41,7 @@ Windows 与 macOS 发行版使用同一套 Electron 界面和本地 Python sidec
 复盘；accepted 快照、任务账本、复盘结果与执行账本都留在本机。内置 bootstrap 只含
 研究数据和哈希清单，不含 API Key。
 
-首次启动需要配置用户自己的 OpenRouter Key、Massive Key、Alpaca SIP 代理
+首次启动需要配置用户自己的 OpenRouter Key、Massive Key、Alpaca SIP
 Key/Secret 和 SEC 联系信息。模型角色可分别选择。行情、新闻或财务证据缺失时，系统
 会明确阻断对应研究流程，不会用旧名单或测试数据冒充今日结果。凭据由 Electron
 `safeStorage` 调用 macOS Keychain 或 Windows 系统安全存储加密，渲染页面只接收
@@ -271,19 +271,21 @@ The command exits nonzero until every objective metric and external attestation 
 present. Even `live_eligible` never arms the broker; live approval remains a separate
 owner action.
 
-## Keyless cloud market data and Paper execution
+## Direct Alpaca market data and Paper execution
 
-The AI investment process owns no Alpaca credential. It verifies scoped cloud market
-and Paper API access without calling any order endpoint:
+The AI investment process uses direct Alpaca SIP market data by default. Configure
+`ALPACA_API_KEY_ID` and `ALPACA_API_SECRET_KEY`; the provider records source and feed
+provenance on every returned decision-time row. Access can be checked without calling
+any order endpoint:
 
 ```powershell
 .\.venv\Scripts\python -m scripts.verify_alpaca_access --symbols AAPL
 ```
 
-The safe output must report an active, unblocked Paper account, authenticated cloud
-market events, and `orders_submitted: 0`. Alpaca WebSocket ownership lives only in the
-separate cloud-strategy-platform repository. This local collector leases its symbols,
-waits for usable market health, then consumes the scoped SSE event API:
+The safe output must report an active, unblocked Paper account, authenticated Alpaca
+market events, and `orders_submitted: 0`. Alpaca WebSocket ownership remains separate
+from this REST data path. This local collector leases its symbols, waits for usable
+market health, then consumes the SIP event API:
 
 ```powershell
 .\.venv\Scripts\python -m scripts.stream_alpaca_sip `
@@ -296,14 +298,14 @@ It persists every received minute bar and latest NBBO quote for each symbol-seco
 WAL/FULL SQLite ledger. API failure yields no event and therefore no decision; missing
 market data is never filled.
 
-Historical cloud bars and quotes must carry a valid per-symbol `coverage` contract.
-When the cloud reports regular-session gaps, an empty upstream response, stale realtime
-events, or `fallback_recommended=true`, the AI process stops that path. It does not
-silently switch to Yahoo/community data or reconnect to Alpaca with a hidden key.
+Historical Alpaca bars and quotes carry source/feed provenance and are never filled
+when upstream data is missing. If direct Alpaca access is unavailable, the process
+fails closed; it does not silently switch to Yahoo/community data. An environment may
+opt into the old proxy only by setting `MARKET_DATA_PROVIDER=cloud_proxy`.
 
 Broker writes remain fail-closed through three independent controls:
 
-1. the AI process has only a scoped cloud Paper token, never an Alpaca Key;
+1. the AI process uses separate market-data and Paper credentials;
 2. both cloud and AI environments default Broker writes to false;
 3. `.env` defaults to `BROKER_WRITE_ENABLED=false` and `TRADING_KILL_SWITCH=true`;
 4. the execution engine also requires coded Paper product readiness before it can call

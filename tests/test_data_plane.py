@@ -181,6 +181,7 @@ def test_alpaca_stock_policy_rejects_unknown_feed(
 def test_loopback_cloud_market_data_bypasses_environment_proxy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("MARKET_DATA_PROVIDER", "cloud_proxy")
     monkeypatch.setenv("CLOUD_PLATFORM_BASE_URL", "http://127.0.0.1:8765")
     monkeypatch.setenv("CLOUD_MARKET_DATA_API_TOKEN", "test-token")
     monkeypatch.setenv("CLOUD_MARKET_DATA_FEED", "sip")

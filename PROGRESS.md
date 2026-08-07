@@ -1137,3 +1137,38 @@ confirmations, and no broker order calls.
   strict mypy clean for all seven monitor modules. A real SIP smoke reached all
   three symbols; three formal watchlist processes are running and no order was
   submitted.
+
+## M40 investment flywheel selection projection - 2026-08-06
+
+Status: connected the accepted selection snapshot to the user's own Feishu
+investment Base. The projection uses the Base's writable `运行ID` key and its
+actual four-table field names; it records selection reasons, market-cap
+availability, premarket evidence, next action, and paper-only plan state.
+
+- Selection events are idempotent and read-back verified. Feishu datetime
+  readback is normalized as UTC; Windows uses `lark-cli.cmd` with UTF-8 output.
+- Only state transitions are projected. Per-second polling remains local and
+  is not written to Feishu.
+- Acceptance: 9 targeted Feishu/selection tests passed; Ruff clean on all
+  changed Python files. The approved Base now contains 31 selection records for
+  2026-08-06: MGNI, AEVA, SOUN, CLOV, CCI, RVMD, VSEC, CAI, EZPW, BBBY, SATL,
+  TPC, TBLA, TTMI, EBAY, SBLK, MTDR, GTM, EXPE, RDW, MCK, PR, VECO, NUCL,
+  GPN, DHT, ORA, EDIT, VVV, RIG, and KLIC. No broker order was submitted.
+
+## M41 Alpaca direct market-data priority - 2026-08-07
+
+Status: routed the public bars, quotes, trades, and monitoring-coverage seams to
+direct Alpaca SIP REST by default. The broken local market proxy is no longer on
+the default path; `MARKET_DATA_PROVIDER=cloud_proxy` is required to opt into it.
+Direct credentials accept the canonical `ALPACA_API_*` names and the existing
+Paper key aliases, remain in environment variables, and are never logged.
+
+- Direct rows retain UTC timestamps, SIP feed, split adjustment, and Alpaca
+  provenance. Empty or incomplete upstream coverage fails closed; no filling or
+  interpolation was added.
+- Health checks now validate credentials for the selected provider. The
+  production deployment example explicitly selects the cloud proxy because that
+  deployment owns its credentials; local `.env.example` defaults to direct Alpaca.
+- Acceptance: full test suite 570 passed in 34.70 seconds; 51 targeted provider,
+  health, deployment, and notification tests passed; Ruff and strict mypy clean
+  on the changed production modules. No broker order was submitted.
