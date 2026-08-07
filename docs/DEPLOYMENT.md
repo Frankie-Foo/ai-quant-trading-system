@@ -24,7 +24,8 @@ release contract; the platform-specific document defines the commands.
 3. Configuration is rendered from the deployment secret manager; no secret is
    copied into the repository or image.
 4. Database migrations are reviewed, idempotent, and have a tested rollback or
-   roll-forward path.
+   roll-forward path. Confirm the target SQLite owner/version rows from
+   [db/README.md](../db/README.md); Postgres uses the checked-in SQL baseline.
 5. Paper/live write controls and kill switches are verified before startup.
 6. A backup or immutable snapshot exists before a stateful migration.
 
@@ -49,4 +50,3 @@ Stop new scheduled work, preserve logs and state evidence, and restore the last
 known-good commit or image. Never delete the order/event ledger during rollback.
 If a migration is not safely reversible, roll forward with a compatible schema
 and keep the old reader until the migration is verified.
-

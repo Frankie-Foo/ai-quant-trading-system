@@ -28,6 +28,9 @@ contract passes.
 ## Scheduler stopped or duplicated
 
 - Inspect the SQLite job ledger and process lock.
+- Inspect `schema_migrations` before restarting a stateful service; an absent or
+  mismatched owner/version/checksum is a deployment failure, not a retryable
+  market-data error.
 - Confirm the latest state transition and retry count.
 - Remove only a verified stale lease through the documented recovery command.
 - Restart one stage once; do not start parallel copies of the same stage.
@@ -46,4 +49,3 @@ projection must not create a duplicate Paper order or be reported as a fill.
 3. Reconcile by deterministic client order ID before any retry.
 4. If state is uncertain, enter `recovery_required`; do not create a new order.
 5. Record the incident and rollback point in the release record and `PROGRESS.md`.
-
