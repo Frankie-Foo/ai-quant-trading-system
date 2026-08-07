@@ -1306,3 +1306,16 @@ starts cannot both observe an unapplied version and execute it twice.
 - Acceptance: migration regression tests 5 passed, including concurrent
   startup serialization; no broker order was submitted and no remote Feishu
   Base was accessed.
+
+## M51 release-candidate verification - 2026-08-07
+
+Status: final local release-candidate verification completed on
+`codex/enterprise-foundation`.
+
+- Python: 594 tests passed in 32.70 seconds; Ruff clean; strict mypy clean
+  across 327 source files.
+- Client evidence remains green: Electron 33 tests, renderer 12 tests, and
+  Vite production build passed.
+- The worktree is clean, `main` remains untouched, and no remote is configured.
+  `pip-audit` remains a CI follow-up because the local PyPI request failed with
+  TLS EOF; no local security-audit pass is claimed.
