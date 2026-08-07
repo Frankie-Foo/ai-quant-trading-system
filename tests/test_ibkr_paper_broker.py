@@ -180,3 +180,23 @@ def test_paper_broker_rejects_warning_and_disabled_writes_before_submission(tmp_
             )
         )
     assert not disabled_transport.submissions
+
+
+def test_ibkr_paper_schema_is_versioned(tmp_path: Path) -> None:
+    broker, _ = _broker(tmp_path)
+
+    with broker._connect() as connection:
+        row = connection.execute(
+            """
+            SELECT owner, version, name
+            FROM schema_migrations
+            WHERE owner = 'execution.ibkr_paper_broker'
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert tuple(row) == (
+        "execution.ibkr_paper_broker",
+        1,
+        "ibkr_paper_orders",
+    )

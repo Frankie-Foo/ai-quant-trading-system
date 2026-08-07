@@ -9,6 +9,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
+from db.migrations.sqlite import SQLiteMigration, apply_sqlite_migrations
 from kernel.adaptive_trade_plan import (
     AdaptiveTradePlanEngine,
     BaselineTradePlan,
@@ -172,6 +173,58 @@ class StoredEvaluation:
     sequence: int | None
 
 
+def _create_adaptive_plan_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS adaptive_plans (
+            plan_id TEXT PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            baseline_json TEXT NOT NULL,
+            registered_at_utc TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS adaptive_runtime (
+            plan_id TEXT PRIMARY KEY REFERENCES adaptive_plans(plan_id),
+            runtime_json TEXT NOT NULL,
+            latest_evaluation_json TEXT,
+            latest_event_json TEXT,
+            last_event_signature TEXT,
+            updated_at_utc TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS adaptive_events (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id TEXT NOT NULL REFERENCES adaptive_plans(plan_id),
+            observed_at_utc TEXT NOT NULL,
+            event_json TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_adaptive_events_plan_sequence
+        ON adaptive_events(plan_id, sequence)
+        """
+    )
+
+
+ADAPTIVE_PLAN_MIGRATIONS = (
+    SQLiteMigration(
+        version=1,
+        name="adaptive_plan_schema",
+        signature="adaptive_plan_schema.v1",
+        apply=_create_adaptive_plan_schema,
+    ),
+)
+
+
 class AdaptivePlanStore:
     """Own plan registration, atomic evaluation, recovery and client reads."""
 
@@ -197,32 +250,10 @@ class AdaptivePlanStore:
 
     def _initialize(self) -> None:
         with self._connect() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS adaptive_plans (
-                    plan_id TEXT PRIMARY KEY,
-                    symbol TEXT NOT NULL,
-                    trade_date TEXT NOT NULL,
-                    baseline_json TEXT NOT NULL,
-                    registered_at_utc TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS adaptive_runtime (
-                    plan_id TEXT PRIMARY KEY REFERENCES adaptive_plans(plan_id),
-                    runtime_json TEXT NOT NULL,
-                    latest_evaluation_json TEXT,
-                    latest_event_json TEXT,
-                    last_event_signature TEXT,
-                    updated_at_utc TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS adaptive_events (
-                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                    plan_id TEXT NOT NULL REFERENCES adaptive_plans(plan_id),
-                    observed_at_utc TEXT NOT NULL,
-                    event_json TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_adaptive_events_plan_sequence
-                    ON adaptive_events(plan_id, sequence);
-                """
+            apply_sqlite_migrations(
+                connection,
+                owner="operations.adaptive_plan_store",
+                migrations=ADAPTIVE_PLAN_MIGRATIONS,
             )
 
     def register(self, plan: BaselineTradePlan) -> None:

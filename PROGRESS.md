@@ -1241,3 +1241,16 @@ autonomous notification outbox to the shared SQLite migration contract.
 - Acceptance: account guardian, emergency stop, adaptive API, HTTP auth, and
   notification tests 30 passed; Ruff clean; strict mypy clean across the
   changed production/test modules. No broker order was submitted.
+
+## M46 adaptive and broker ledger governance - 2026-08-07
+
+Status: connected the adaptive-plan event store, autonomous Paper session
+ledger, IBKR Paper idempotency ledger, and IBKR execution ledger to the
+versioned SQLite migration runner. The largest trading-plane outbox schema no
+longer relies on `executescript` during process startup.
+
+- Existing tables remain additive and compatible; no plans, audit events, or
+  broker receipts are deleted or rewritten.
+- Acceptance: adaptive-plan/API, autonomous Paper, and IBKR tests 87 passed;
+  Ruff clean; strict mypy clean across the changed production/test modules.
+  No broker order was submitted.

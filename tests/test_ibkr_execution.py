@@ -1007,3 +1007,27 @@ def test_broker_timeout_is_durable_unknown_and_is_never_blindly_resubmitted(
     assert recovered["recent_orders"][0]["status"] == "filled"
     assert len(broker.submissions) == 1
     assert len(broker.lookup_refs) == 1
+
+
+def test_ibkr_execution_schema_is_versioned(tmp_path: Path) -> None:
+    desk = ExecutionDesk(
+        tmp_path / "ibkr.sqlite3",
+        MemoryBroker(),
+        live_account="U7654321",
+    )
+
+    with desk._connect_ledger() as connection:
+        row = connection.execute(
+            """
+            SELECT owner, version, name
+            FROM schema_migrations
+            WHERE owner = 'execution.ibkr_execution'
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert tuple(row) == (
+        "execution.ibkr_execution",
+        1,
+        "ibkr_execution_orders",
+    )

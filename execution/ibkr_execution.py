@@ -19,6 +19,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Protocol
 
+from db.migrations.sqlite import SQLiteMigration, apply_sqlite_migrations
+
 LIVE_PORT = 4001
 PAPER_PORT = 4002
 SCHEMA_VERSION = "ibkr.execution.v1"
@@ -95,6 +97,38 @@ def _mask_account(account_id: str | None) -> str | None:
     if len(account_id) <= 4:
         return "*" * len(account_id)
     return f"{account_id[0]}{'*' * (len(account_id) - 5)}{account_id[-4:]}"
+
+
+def _create_ibkr_execution_orders(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ibkr_execution_orders (
+            idempotency_key TEXT PRIMARY KEY,
+            mode TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            client_id INTEGER NOT NULL,
+            client_order_id TEXT NOT NULL,
+            intent_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            broker_order_id INTEGER,
+            perm_id INTEGER,
+            order_ref TEXT NOT NULL UNIQUE,
+            last_error TEXT,
+            created_at_utc TEXT NOT NULL,
+            updated_at_utc TEXT NOT NULL
+        )
+        """
+    )
+
+
+IBKR_EXECUTION_MIGRATIONS = (
+    SQLiteMigration(
+        version=1,
+        name="ibkr_execution_orders",
+        signature="ibkr_execution_orders.v1",
+        apply=_create_ibkr_execution_orders,
+    ),
+)
 
 
 class ExecutionDesk:
@@ -703,24 +737,10 @@ class ExecutionDesk:
 
     def _initialize_ledger(self) -> None:
         with self._connect_ledger() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS ibkr_execution_orders (
-                    idempotency_key TEXT PRIMARY KEY,
-                    mode TEXT NOT NULL,
-                    account_id TEXT NOT NULL,
-                    client_id INTEGER NOT NULL,
-                    client_order_id TEXT NOT NULL,
-                    intent_json TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    broker_order_id INTEGER,
-                    perm_id INTEGER,
-                    order_ref TEXT NOT NULL UNIQUE,
-                    last_error TEXT,
-                    created_at_utc TEXT NOT NULL,
-                    updated_at_utc TEXT NOT NULL
-                )
-                """
+            apply_sqlite_migrations(
+                connection,
+                owner="execution.ibkr_execution",
+                migrations=IBKR_EXECUTION_MIGRATIONS,
             )
 
     def _create_or_read_order(

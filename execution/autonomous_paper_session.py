@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
+from db.migrations.sqlite import SQLiteMigration, apply_sqlite_migrations
 from execution.account_guardian import (
     AccountGuardian,
     AccountGuardianLedger,
@@ -224,60 +225,102 @@ class _TailRuntimeState:
     order_flow_below_active: bool
 
 
+def _create_autonomous_paper_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS paper_session_days (
+            trade_date TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            updated_at_utc TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS paper_session_commands (
+            command_id TEXT PRIMARY KEY,
+            trade_date TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            broker_order_id TEXT,
+            completed INTEGER NOT NULL,
+            updated_at_utc TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS paper_premarket_entries (
+            plan_id TEXT PRIMARY KEY,
+            plan_json TEXT NOT NULL,
+            runtime_json TEXT NOT NULL,
+            active_client_order_id TEXT,
+            active_broker_order_id TEXT,
+            updated_at_utc TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS paper_position_lifecycle (
+            plan_id TEXT PRIMARY KEY,
+            main_profit_realized INTEGER NOT NULL,
+            updated_at_utc TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS paper_tail_runtime (
+            plan_id TEXT PRIMARY KEY,
+            maximum_favorable_excursion_r REAL NOT NULL,
+            order_flow_below_45_seconds INTEGER NOT NULL,
+            last_observed_at_utc TEXT NOT NULL,
+            order_flow_below_active INTEGER NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS paper_autopilot_audit_events (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at_utc TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            previous_hash TEXT NOT NULL,
+            event_hash TEXT NOT NULL UNIQUE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_paper_autopilot_audit_run_sequence
+        ON paper_autopilot_audit_events (run_id, sequence)
+        """
+    )
+
+
+AUTONOMOUS_PAPER_MIGRATIONS = (
+    SQLiteMigration(
+        version=1,
+        name="autonomous_paper_schema",
+        signature="autonomous_paper_schema.v1",
+        apply=_create_autonomous_paper_schema,
+    ),
+)
+
+
 class PaperSessionLedger:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS paper_session_days (
-                    trade_date TEXT PRIMARY KEY,
-                    status TEXT NOT NULL,
-                    reason TEXT NOT NULL,
-                    updated_at_utc TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS paper_session_commands (
-                    command_id TEXT PRIMARY KEY,
-                    trade_date TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    broker_order_id TEXT,
-                    completed INTEGER NOT NULL,
-                    updated_at_utc TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS paper_premarket_entries (
-                    plan_id TEXT PRIMARY KEY,
-                    plan_json TEXT NOT NULL,
-                    runtime_json TEXT NOT NULL,
-                    active_client_order_id TEXT,
-                    active_broker_order_id TEXT,
-                    updated_at_utc TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS paper_position_lifecycle (
-                    plan_id TEXT PRIMARY KEY,
-                    main_profit_realized INTEGER NOT NULL,
-                    updated_at_utc TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS paper_tail_runtime (
-                    plan_id TEXT PRIMARY KEY,
-                    maximum_favorable_excursion_r REAL NOT NULL,
-                    order_flow_below_45_seconds INTEGER NOT NULL,
-                    last_observed_at_utc TEXT NOT NULL,
-                    order_flow_below_active INTEGER NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS paper_autopilot_audit_events (
-                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                    run_id TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    occurred_at_utc TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    previous_hash TEXT NOT NULL,
-                    event_hash TEXT NOT NULL UNIQUE
-                );
-                CREATE INDEX IF NOT EXISTS idx_paper_autopilot_audit_run_sequence
-                    ON paper_autopilot_audit_events (run_id, sequence);
-                """
+            apply_sqlite_migrations(
+                connection,
+                owner="execution.autonomous_paper_session",
+                migrations=AUTONOMOUS_PAPER_MIGRATIONS,
             )
 
     def _connect(self) -> sqlite3.Connection:

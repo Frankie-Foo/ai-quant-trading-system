@@ -17,6 +17,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Literal, Protocol
 
+from db.migrations.sqlite import SQLiteMigration, apply_sqlite_migrations
 from execution.alpaca_paper import (
     BrokerError,
     BrokerOrder,
@@ -78,6 +79,33 @@ class _StoredOrder:
     quantity: int
     status: str
     broker_order_id: int | None
+
+
+def _create_ibkr_paper_orders(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ibkr_paper_orders (
+            client_order_id TEXT PRIMARY KEY,
+            order_ref TEXT NOT NULL UNIQUE,
+            request_hash TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            broker_order_id INTEGER,
+            updated_at_utc TEXT NOT NULL
+        )
+        """
+    )
+
+
+IBKR_PAPER_MIGRATIONS = (
+    SQLiteMigration(
+        version=1,
+        name="ibkr_paper_orders",
+        signature="ibkr_paper_orders.v1",
+        apply=_create_ibkr_paper_orders,
+    ),
+)
 
 
 class IBKRPaperBroker:
@@ -447,19 +475,10 @@ class IBKRPaperBroker:
 
     def _initialize(self) -> None:
         with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS ibkr_paper_orders (
-                    client_order_id TEXT PRIMARY KEY,
-                    order_ref TEXT NOT NULL UNIQUE,
-                    request_hash TEXT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    quantity INTEGER NOT NULL,
-                    status TEXT NOT NULL,
-                    broker_order_id INTEGER,
-                    updated_at_utc TEXT NOT NULL
-                )
-                """
+            apply_sqlite_migrations(
+                connection,
+                owner="execution.ibkr_paper_broker",
+                migrations=IBKR_PAPER_MIGRATIONS,
             )
 
     def _connect(self) -> sqlite3.Connection:

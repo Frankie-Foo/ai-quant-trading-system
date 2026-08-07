@@ -1269,3 +1269,23 @@ def test_runtime_failure_flat_account_cancels_pending_entry_before_returning(
     assert result.cancelled_order_ids == ("pending-entry-1",)
     assert broker.cancelled == ["pending-entry-1"]
     assert broker.close_requests == []
+
+
+def test_autonomous_paper_schema_is_versioned(tmp_path: Path) -> None:
+    ledger = PaperSessionLedger(tmp_path / "autonomous-paper.sqlite3")
+
+    with ledger._connect() as connection:
+        row = connection.execute(
+            """
+            SELECT owner, version, name
+            FROM schema_migrations
+            WHERE owner = 'execution.autonomous_paper_session'
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert tuple(row) == (
+        "execution.autonomous_paper_session",
+        1,
+        "autonomous_paper_schema",
+    )
