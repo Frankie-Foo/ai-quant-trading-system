@@ -37,7 +37,7 @@ Run the same checks used by CI:
 ```powershell
 python -m pytest -q
 python -m ruff check .
-python -m mypy data_plane kernel research execution schedule agent_gateway scripts tests
+python -m mypy db data_plane kernel research execution operations schedule agent_gateway plugins scripts tests
 Set-Location client
 npm ci
 npm run test:electron
@@ -48,4 +48,3 @@ npm run build
 Use Conventional Commits, keep commits focused, and update `PROGRESS.md` with
 exact validation evidence for each milestone. Never commit `.env`, API keys,
 runtime databases, snapshots, or generated releases.
-

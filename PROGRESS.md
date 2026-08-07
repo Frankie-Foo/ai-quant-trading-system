@@ -1268,3 +1268,18 @@ governs the local mutex database; it does not access or alter any remote Base.
 - Acceptance: agent gateway, cloud-feature, Feishu Base client, and related
   tests 30 passed; Ruff clean; strict mypy clean across 6 changed modules.
   No remote Feishu Base was read or written; no broker order was submitted.
+
+## M48 enterprise validation and CI parity - 2026-08-07
+
+Status: expanded CI and contributor instructions to type-check every Python
+production boundary, including `db`, `operations`, and `plugins`, then ran the
+same checks locally from the dedicated enterprise worktree.
+
+- Python: 592 tests passed in 32.06 seconds; Ruff clean; strict mypy clean
+  across 327 source files.
+- Client: Electron tests 33 passed; renderer tests 12 passed; Vite production
+  build passed.
+- Dependency advisory lookup remains a CI follow-up because this machine's
+  `pip-audit` request to PyPI previously failed with a TLS EOF; no dependency
+  audit pass is claimed locally.
+- No broker order was submitted and no remote Feishu Base was accessed.
