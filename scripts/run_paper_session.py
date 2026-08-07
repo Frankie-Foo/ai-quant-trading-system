@@ -28,7 +28,10 @@ from execution.sip_store import SipEventStore
 from execution.time_exit import TimeExitCoordinator, TimeExitLedger
 from kernel.config import load_config
 from operations.feishu_base import FeishuBaseError, FeishuBaseEventClient
-from operations.feishu_investment_events import record_paper_execution
+from operations.feishu_investment_events import (
+    record_paper_execution,
+    record_paper_monitor_trigger,
+)
 from operations.readiness import MaturityEvidence, assess_product_readiness
 from schedule.runtime import JsonEventLogger, ProcessLock
 
@@ -335,10 +338,17 @@ async def _run(args: argparse.Namespace, logger: JsonEventLogger) -> None:
                     )
                     if feishu is not None:
                         try:
+                            observed_at_utc = datetime.now(UTC)
+                            record_paper_monitor_trigger(
+                                feishu,
+                                trade_date=trade_date,
+                                observed_at_utc=observed_at_utc,
+                                result=result,
+                            )
                             record_paper_execution(
                                 feishu,
                                 trade_date=trade_date,
-                                observed_at_utc=datetime.now(UTC),
+                                observed_at_utc=observed_at_utc,
                                 result=result,
                             )
                         except FeishuBaseError as exc:

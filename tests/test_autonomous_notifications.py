@@ -181,7 +181,7 @@ def test_notification_ledger_migrates_legacy_rows(tmp_path: Path) -> None:
     assert versions == [(1,), (2,)]
 
 
-def test_action_notification_reuses_original_message_and_records_one_base_event(
+def test_action_notification_reuses_original_message_and_records_monitor_and_trade_events(
     tmp_path: Path,
 ) -> None:
     base = FakeBase()
@@ -192,8 +192,12 @@ def test_action_notification_reuses_original_message_and_records_one_base_event(
     ).notify(_plan(), _result(), observed_at_utc=NOW)
 
     assert notified is True
-    assert len(base.events) == 1
-    table, event_id, fields = base.events[0]
+    assert len(base.events) == 2
+    assert [event[0] for event in base.events] == [
+        InvestmentTable.MONITOR,
+        InvestmentTable.TRADE,
+    ]
+    table, event_id, fields = base.events[1]
     assert table is InvestmentTable.TRADE
     assert event_id.startswith("trade:")
     assert fields["运行ID"] == event_id

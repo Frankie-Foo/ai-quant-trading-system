@@ -7,9 +7,14 @@ from datetime import date, datetime, timedelta
 from hashlib import sha256
 from typing import Protocol
 
-from execution.autonomous_paper_session import AutonomousPaperPlan, PaperSessionResult
+from execution.autonomous_paper_session import (
+    AutonomousPaperPlan,
+    PaperSessionResult,
+    SessionAction,
+)
 from execution.engine import PaperExecutionResult
 from execution.locked_selection import LockedCandidate, LockedSelection
+from execution.order_state import OrderState
 from operations.feishu_base import InvestmentTable
 
 
@@ -195,6 +200,44 @@ def record_autonomous_trade(
     )
 
 
+def record_autonomous_monitor_trigger(
+    client: InvestmentEventPort,
+    plan: AutonomousPaperPlan,
+    result: PaperSessionResult,
+    *,
+    observed_at_utc: datetime,
+    action_name: str,
+    message: str,
+) -> str | None:
+    """Project one autonomous action into monitor history, never each tick."""
+
+    _require_utc(observed_at_utc)
+    if result.action is SessionAction.OBSERVE:
+        return None
+    trigger_type = _autonomous_monitor_trigger_type(result.action)
+    order_ids = (
+        *result.submitted_order_ids,
+        *result.cancelled_order_ids,
+        *result.flatten_order_ids,
+    )
+    return record_monitor_trigger(
+        client,
+        event_id=_stable_monitor_event_id(plan, result),
+        symbol=plan.symbol,
+        trade_date=plan.trade_date,
+        triggered_at_utc=observed_at_utc,
+        trigger_type=trigger_type,
+        operation=action_name,
+        reason=";".join(result.reasons) or "N/A",
+        message=message,
+        source=(
+            f"scripts.run_autonomous_paper_session|{plan.provenance}|"
+            f"{result.provenance}"
+        ),
+        order_ids=order_ids,
+    )
+
+
 def record_paper_execution(
     client: InvestmentEventPort,
     *,
@@ -231,6 +274,59 @@ def record_paper_execution(
         ),
         requested_shares=lifecycle.requested_shares,
         filled_shares=lifecycle.filled_shares,
+    )
+
+
+def record_paper_monitor_trigger(
+    client: InvestmentEventPort,
+    *,
+    trade_date: date,
+    observed_at_utc: datetime,
+    result: PaperExecutionResult,
+) -> str | None:
+    """Project one Paper order state transition, never a market-data poll."""
+
+    _require_utc(observed_at_utc)
+    lifecycle = result.lifecycle
+    if not lifecycle.events:
+        return None
+    transition = lifecycle.events[-1]
+    trigger_type = _paper_monitor_trigger_type(transition.to_state)
+    operation = "模拟买入" if trigger_type == "entry" else "模拟买入被风控阻断"
+    failure_code = result.verdict.failure_code
+    reason = (
+        failure_code.value
+        if failure_code is not None
+        else f"order_state={transition.to_state.value}"
+    )
+    order_ids = tuple(
+        item
+        for item in (result.broker_order_id, lifecycle.client_order_id)
+        if item
+    )
+    return record_monitor_trigger(
+        client,
+        event_id=(
+            f"monitor:{trade_date.isoformat()}:{lifecycle.client_order_id}:"
+            f"{transition.sequence}:{transition.to_state.value}"
+        ),
+        symbol=lifecycle.symbol,
+        trade_date=trade_date,
+        triggered_at_utc=transition.at_utc,
+        trigger_type=trigger_type,
+        operation=operation,
+        reason=reason,
+        message=(
+            f"plan_id={lifecycle.plan_id};client_order_id={lifecycle.client_order_id};"
+            f"state={transition.to_state.value};dry_run={result.dry_run};"
+            f"replayed={result.replayed}"
+        ),
+        source=(
+            f"scripts.run_paper_session|execution.engine|"
+            f"{transition.provenance}"
+        ),
+        position_shares=lifecycle.filled_shares,
+        order_ids=order_ids,
     )
 
 
@@ -290,6 +386,24 @@ def _stable_trade_event_id(plan_id: str, result: PaperSessionResult) -> str:
     return "trade:" + sha256(material.encode()).hexdigest()
 
 
+def _stable_monitor_event_id(
+    plan: AutonomousPaperPlan,
+    result: PaperSessionResult,
+) -> str:
+    material = "|".join(
+        (
+            plan.plan_id,
+            plan.trade_date.isoformat(),
+            result.action.value,
+            *result.reasons,
+            *result.submitted_order_ids,
+            *result.cancelled_order_ids,
+            *result.flatten_order_ids,
+        )
+    )
+    return "monitor:" + sha256(material.encode()).hexdigest()
+
+
 def _require_utc(value: datetime) -> None:
     if value.tzinfo is None or value.utcoffset() != timedelta(0):
         raise ValueError("Feishu investment event timestamp must be UTC")
@@ -327,6 +441,31 @@ def _market_cap_text(value: float | None) -> str:
 
 def _percent_text(value: float | None) -> str:
     return "N/A" if value is None else f"{value:.2%}"
+
+
+def _paper_monitor_trigger_type(value: OrderState) -> str:
+    if value in {
+        OrderState.SUBMITTED,
+        OrderState.PARTIALLY_FILLED,
+        OrderState.FILLED,
+    }:
+        return "entry"
+    return "risk"
+
+
+def _autonomous_monitor_trigger_type(value: SessionAction) -> str:
+    if value is SessionAction.ENTRY_SUBMITTED:
+        return "entry"
+    if value is SessionAction.REDUCE_SUBMITTED:
+        return "tp1"
+    if value is SessionAction.EXIT_SUBMITTED:
+        return "tp2"
+    if value in {
+        SessionAction.STOP_EXIT_SUBMITTED,
+        SessionAction.HARD_LOSS_FLATTEN,
+    }:
+        return "stop"
+    return "risk"
 
 
 def _monitor_trigger_type(value: str) -> str:

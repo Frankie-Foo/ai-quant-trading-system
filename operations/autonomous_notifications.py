@@ -19,7 +19,10 @@ from execution.autonomous_paper_session import (
     SessionAction,
 )
 from operations.feishu_base import FeishuBaseError, InvestmentTable
-from operations.feishu_investment_events import record_autonomous_trade
+from operations.feishu_investment_events import (
+    record_autonomous_monitor_trigger,
+    record_autonomous_trade,
+)
 from operations.runtime_agent_safety import (
     PushHealthEvidence,
     write_push_health_evidence,
@@ -327,6 +330,14 @@ class AutonomousPaperNotifier:
         )
         if self.base is not None:
             try:
+                record_autonomous_monitor_trigger(
+                    self.base,
+                    plan,
+                    result,
+                    observed_at_utc=observed_at_utc,
+                    action_name=action_name,
+                    message=message,
+                )
                 record_autonomous_trade(
                     self.base,
                     plan,

@@ -1,6 +1,21 @@
 # Progress
 
-## Adaptive desktop decision client — 2026-07-28
+## Feishu investment flywheel repair - 2026-08-07
+
+Status: implemented and verified on the enterprise branch.
+
+- Premarket selection now validates that an accepted `selection_gates.v2`
+  snapshot exists before marking the job successful; `rvol_pending` cannot
+  masquerade as a completed selection.
+- Completed selection stages project accepted candidates to the dedicated
+  four-table investment Base idempotently. No poll data is projected.
+- Paper and autonomous monitor paths project real order/action state
+  transitions to the monitor table, then simulated orders to the trade table.
+  `OBSERVE` ticks remain local-only.
+- Evidence: 33 focused tests passed; Ruff clean; strict mypy clean across the
+  four changed source files.
+
+## Adaptive desktop decision client - 2026-07-28
 
 Status: implemented for local read-only operation; automatic orders remain disabled.
 
