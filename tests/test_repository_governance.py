@@ -19,6 +19,7 @@ def test_enterprise_governance_files_exist() -> None:
         ".github/pull_request_template.md",
         ".github/workflows/ci.yml",
         "cliff.toml",
+        "db/README.md",
     )
     assert all((ROOT / path).is_file() for path in required)
 

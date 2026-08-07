@@ -1186,6 +1186,8 @@ security handling, operational recovery, and the modular-monolith decision.
 - Added PR/main CI for Python tests, Ruff, strict mypy, dependency consistency,
   Electron tests, UI tests, Vite build, and pip-audit. No broker-write flag is
   present in CI.
+- Added the database ownership inventory and migration contract without moving,
+  dropping, or fabricating any existing table.
 - Acceptance: governance tests 3 passed and dependency-boundary tests 7 passed;
   Python tests 573 passed in 40.06 seconds; Ruff clean; strict mypy clean across
   285 source files; Electron tests 33 passed; UI tests 12 passed; Vite production
