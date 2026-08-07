@@ -1186,8 +1186,9 @@ security handling, operational recovery, and the modular-monolith decision.
 - Added PR/main CI for Python tests, Ruff, strict mypy, dependency consistency,
   Electron tests, UI tests, Vite build, and pip-audit. No broker-write flag is
   present in CI.
-- Acceptance: governance tests 3 passed; Python tests 573 passed in 40.06
-  seconds; Ruff clean; strict mypy clean across 285 source files; Electron tests
-  33 passed; UI tests 12 passed; Vite production build passed. `pip-audit` was
+- Acceptance: governance tests 3 passed and dependency-boundary tests 7 passed;
+  Python tests 573 passed in 40.06 seconds; Ruff clean; strict mypy clean across
+  285 source files; Electron tests 33 passed; UI tests 12 passed; Vite production
+  build passed. `pip-audit` was
   installed but its PyPI advisory lookup failed with a local TLS EOF, so the
   security audit remains a CI follow-up rather than a passing local result.
