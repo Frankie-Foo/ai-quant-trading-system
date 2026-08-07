@@ -13,6 +13,15 @@
   scripts tests
 ```
 
+## 企业级协作与发布
+
+`main` 是唯一生产基线。每个需求使用独立的 `codex/<task>` 分支和独立
+Git worktree；评审通过后合并到 `main`，生产只部署明确记录的 `main` commit。
+工作树、提交、发布、部署和故障处理规则见
+[CONTRIBUTING](CONTRIBUTING.md)、[DEPLOYMENT](docs/DEPLOYMENT.md) 和
+[RUNBOOK](docs/RUNBOOK.md)。架构边界和禁止事项见
+[AGENTS.md](AGENTS.md) 与 [ADR-0001](docs/ADR/0001-modular-monolith-and-worktrees.md)。
+
 敏感凭据只能放在被忽略的 `.env` 或客户端系统安全存储中，不能写入报告、安装包、
 源码或 Git。
 

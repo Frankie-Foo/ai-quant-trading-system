@@ -1172,3 +1172,22 @@ Paper key aliases, remain in environment variables, and are never logged.
 - Acceptance: full test suite 570 passed in 34.70 seconds; 51 targeted provider,
   health, deployment, and notification tests passed; Ruff and strict mypy clean
   on the changed production modules. No broker order was submitted.
+
+## M42 enterprise repository foundation - 2026-08-07
+
+Status: established the first enterprise governance layer in the dedicated
+`codex/enterprise-foundation` worktree. `main` remains untouched. The repository
+now documents task-isolated worktrees, reviewed-commit deployment, rollback,
+security handling, operational recovery, and the modular-monolith decision.
+
+- Added `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`, `cliff.toml`,
+  `.github/pull_request_template.md`, and the pending-owner `.github/CODEOWNERS`
+  placeholder. Added `docs/DEPLOYMENT.md`, `docs/RUNBOOK.md`, and ADR-0001.
+- Added PR/main CI for Python tests, Ruff, strict mypy, dependency consistency,
+  Electron tests, UI tests, Vite build, and pip-audit. No broker-write flag is
+  present in CI.
+- Acceptance: governance tests 3 passed; Python tests 573 passed in 40.06
+  seconds; Ruff clean; strict mypy clean across 285 source files; Electron tests
+  33 passed; UI tests 12 passed; Vite production build passed. `pip-audit` was
+  installed but its PyPI advisory lookup failed with a local TLS EOF, so the
+  security audit remains a CI follow-up rather than a passing local result.
