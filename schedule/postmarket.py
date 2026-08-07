@@ -5,9 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
-import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -20,6 +18,7 @@ from data_plane.contracts import DatasetSnapshot
 from kernel.config import load_config
 from operations.feishu_base import FeishuBaseError, FeishuBaseEventClient
 from operations.feishu_investment_events import record_postmarket_review
+from schedule.child_process import run_child
 from schedule.runtime import JsonEventLogger, LockUnavailableError, ProcessLock
 from schedule.state import JobLedger
 
@@ -137,36 +136,31 @@ def _run_module(
         str(data_root),
         *extra_args,
     ]
-    started = time.monotonic()
     logger.emit("child_started", module=module, trade_date=trade_date.isoformat())
-    completed = subprocess.run(
+    result = run_child(
         command,
         cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=900,
-        check=False,
+        timeout_seconds=900,
     )
-    elapsed_ms = round((time.monotonic() - started) * 1000)
-    if completed.returncode != 0:
+    if result.return_code != 0:
         logger.emit(
             "child_failed",
             level="error",
             module=module,
             trade_date=trade_date.isoformat(),
-            return_code=completed.returncode,
-            elapsed_ms=elapsed_ms,
-            stdout_lines=len(completed.stdout.splitlines()),
-            stderr_lines=len(completed.stderr.splitlines()),
+            return_code=result.return_code,
+            elapsed_ms=result.elapsed_ms,
+            stdout_lines=len(result.stdout.splitlines()),
+            stderr_lines=len(result.stderr.splitlines()),
         )
-        raise RuntimeError(f"{module} failed with exit code {completed.returncode}")
+        raise RuntimeError(f"{module} failed with exit code {result.return_code}")
     logger.emit(
         "child_completed",
         module=module,
         trade_date=trade_date.isoformat(),
-        elapsed_ms=elapsed_ms,
+        elapsed_ms=result.elapsed_ms,
     )
-    return completed.stdout
+    return result.stdout
 
 
 def _run_one(

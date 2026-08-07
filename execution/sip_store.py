@@ -10,7 +10,77 @@ from typing import Any
 
 import polars as pl
 
+from db.migrations.sqlite import SQLiteMigration, apply_sqlite_migrations
 from execution.alpaca_sip_stream import SipBar, SipEvent, SipQuote
+
+
+def _create_sip_event_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sip_bars (
+            symbol TEXT NOT NULL,
+            ts_utc TEXT NOT NULL,
+            open REAL NOT NULL,
+            high REAL NOT NULL,
+            low REAL NOT NULL,
+            close REAL NOT NULL,
+            volume INTEGER NOT NULL,
+            trade_count INTEGER NOT NULL,
+            vwap REAL NOT NULL,
+            provenance TEXT NOT NULL,
+            received_at_utc TEXT NOT NULL,
+            PRIMARY KEY (symbol, ts_utc)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sip_quote_seconds (
+            symbol TEXT NOT NULL,
+            second_utc TEXT NOT NULL,
+            quote_ts_utc TEXT NOT NULL,
+            bid_price REAL NOT NULL,
+            bid_size INTEGER NOT NULL,
+            ask_price REAL NOT NULL,
+            ask_size INTEGER NOT NULL,
+            provenance TEXT NOT NULL,
+            received_at_utc TEXT NOT NULL,
+            PRIMARY KEY (symbol, second_utc)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sip_trades (
+            symbol TEXT NOT NULL,
+            ts_utc TEXT NOT NULL,
+            trade_id INTEGER NOT NULL,
+            exchange_code TEXT NOT NULL,
+            price REAL NOT NULL,
+            size INTEGER NOT NULL,
+            conditions_json TEXT NOT NULL,
+            tape TEXT NOT NULL,
+            provenance TEXT NOT NULL,
+            received_at_utc TEXT NOT NULL,
+            PRIMARY KEY (symbol, ts_utc, trade_id, tape)
+        )
+        """
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS ix_sip_bars_ts ON sip_bars(ts_utc)")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS ix_sip_quotes_ts ON sip_quote_seconds(quote_ts_utc)"
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS ix_sip_trades_ts ON sip_trades(ts_utc)")
+
+
+SIP_EVENT_STORE_MIGRATIONS = (
+    SQLiteMigration(
+        version=1,
+        name="sip_event_store",
+        signature="sip_event_store.v1",
+        apply=_create_sip_event_schema,
+    ),
+)
 
 
 class SipEventStore:
@@ -28,51 +98,10 @@ class SipEventStore:
 
     def _initialize(self) -> None:
         with self._connect() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS sip_bars (
-                    symbol TEXT NOT NULL,
-                    ts_utc TEXT NOT NULL,
-                    open REAL NOT NULL,
-                    high REAL NOT NULL,
-                    low REAL NOT NULL,
-                    close REAL NOT NULL,
-                    volume INTEGER NOT NULL,
-                    trade_count INTEGER NOT NULL,
-                    vwap REAL NOT NULL,
-                    provenance TEXT NOT NULL,
-                    received_at_utc TEXT NOT NULL,
-                    PRIMARY KEY (symbol, ts_utc)
-                );
-                CREATE TABLE IF NOT EXISTS sip_quote_seconds (
-                    symbol TEXT NOT NULL,
-                    second_utc TEXT NOT NULL,
-                    quote_ts_utc TEXT NOT NULL,
-                    bid_price REAL NOT NULL,
-                    bid_size INTEGER NOT NULL,
-                    ask_price REAL NOT NULL,
-                    ask_size INTEGER NOT NULL,
-                    provenance TEXT NOT NULL,
-                    received_at_utc TEXT NOT NULL,
-                    PRIMARY KEY (symbol, second_utc)
-                );
-                CREATE TABLE IF NOT EXISTS sip_trades (
-                    symbol TEXT NOT NULL,
-                    ts_utc TEXT NOT NULL,
-                    trade_id INTEGER NOT NULL,
-                    exchange_code TEXT NOT NULL,
-                    price REAL NOT NULL,
-                    size INTEGER NOT NULL,
-                    conditions_json TEXT NOT NULL,
-                    tape TEXT NOT NULL,
-                    provenance TEXT NOT NULL,
-                    received_at_utc TEXT NOT NULL,
-                    PRIMARY KEY (symbol, ts_utc, trade_id, tape)
-                );
-                CREATE INDEX IF NOT EXISTS ix_sip_bars_ts ON sip_bars(ts_utc);
-                CREATE INDEX IF NOT EXISTS ix_sip_quotes_ts ON sip_quote_seconds(quote_ts_utc);
-                CREATE INDEX IF NOT EXISTS ix_sip_trades_ts ON sip_trades(ts_utc);
-                """
+            apply_sqlite_migrations(
+                connection,
+                owner="execution.sip_event_store",
+                migrations=SIP_EVENT_STORE_MIGRATIONS,
             )
 
     def append(self, event: SipEvent) -> None:

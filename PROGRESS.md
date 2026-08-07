@@ -1197,3 +1197,20 @@ security handling, operational recovery, and the modular-monolith decision.
   33 passed; UI tests 12 passed; Vite production build passed. `pip-audit` was
   installed but its PyPI advisory lookup failed with a local TLS EOF, so the
   security audit remains a CI follow-up rather than a passing local result.
+
+## M43 execution-boundary hardening - 2026-08-07
+
+Status: extended the migration contract to the Paper session ledger and the
+Alpaca SIP event store. Existing SQLite files remain readable and receive an
+immutable owner/version/checksum record on first startup; migration callbacks
+use separate statements inside the runner's transaction rather than
+`executescript`, preserving rollback behavior.
+
+- Added a shell-free, timeout-bounded child-process seam for the premarket,
+  postmarket, research, Paper, and monthly schedulers. The seam returns a
+  stable result object and never logs child stdout/stderr contents.
+- Scheduler wrappers retain their existing event names and test seams while
+  sharing command execution, timeout validation, and elapsed-time measurement.
+- Acceptance: 11 migration/session/SIP tests passed; scheduler and deployment
+  regression tests 30 passed; Ruff clean; strict mypy clean across 7 changed
+  scheduler/test modules. No broker order was submitted.

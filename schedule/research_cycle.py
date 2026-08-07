@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from data_plane.calendar import build_xnys_schedule
+from schedule.child_process import run_child
 from schedule.runtime import JsonEventLogger, LockUnavailableError, ProcessLock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,29 +64,24 @@ def _run_stage(
     logger: JsonEventLogger,
     timeout_seconds: int,
 ) -> None:
-    started = time.monotonic()
     logger.emit("research_stage_started", stage=name)
-    completed = subprocess.run(
+    result = run_child(
         [sys.executable, *arguments],
         cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=timeout_seconds,
-        check=False,
+        timeout_seconds=timeout_seconds,
     )
-    elapsed_ms = round((time.monotonic() - started) * 1000)
-    if completed.returncode != 0:
+    if result.return_code != 0:
         logger.emit(
             "research_stage_failed",
             level="error",
             stage=name,
-            return_code=completed.returncode,
-            stdout_lines=len(completed.stdout.splitlines()),
-            stderr_lines=len(completed.stderr.splitlines()),
-            elapsed_ms=elapsed_ms,
+            return_code=result.return_code,
+            stdout_lines=len(result.stdout.splitlines()),
+            stderr_lines=len(result.stderr.splitlines()),
+            elapsed_ms=result.elapsed_ms,
         )
         raise RuntimeError(f"research stage failed: {name}")
-    logger.emit("research_stage_completed", stage=name, elapsed_ms=elapsed_ms)
+    logger.emit("research_stage_completed", stage=name, elapsed_ms=result.elapsed_ms)
 
 
 def _stages(

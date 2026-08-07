@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from data_plane.calendar import build_xnys_schedule
+from schedule.child_process import run_child
 from schedule.runtime import JsonEventLogger, LockUnavailableError, ProcessLock
 from schedule.state import JobLedger
 
@@ -56,7 +56,7 @@ def run(argv: list[str] | None = None) -> int:
             if lease is None:
                 logger.emit("job_skipped", asof_date=args.asof_date.isoformat())
                 return 0
-            completed = subprocess.run(
+            result = run_child(
                 [
                     sys.executable,
                     "-m",
@@ -69,16 +69,13 @@ def run(argv: list[str] | None = None) -> int:
                     args.llm_mode,
                 ],
                 cwd=ROOT,
-                capture_output=True,
-                text=True,
-                timeout=1800,
-                check=False,
+                timeout_seconds=1800,
             )
-            if completed.returncode != 0:
+            if result.return_code != 0:
                 ledger.fail(lease, error_code="MonthlyEvolutionFailed")
                 logger.emit("job_failed", level="error", orders_submitted=0)
                 return 1
-            payload = json.loads(completed.stdout)
+            payload = json.loads(result.stdout)
             if not isinstance(payload, dict):
                 raise RuntimeError("monthly evolution output was not a JSON object")
             proposal_ids = payload.get("proposal_ids", [])

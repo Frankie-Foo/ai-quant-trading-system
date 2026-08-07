@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
-import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -19,6 +17,7 @@ from execution.locked_selection import load_locked_selection
 from kernel.config import load_config
 from operations.feishu_base import FeishuBaseError, FeishuBaseEventClient
 from operations.feishu_investment_events import record_locked_selection
+from schedule.child_process import run_child
 from schedule.runtime import JsonEventLogger
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -98,21 +97,24 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _run_child(command: list[str], logger: JsonEventLogger) -> None:
-    started = time.monotonic()
     module = command[2] if len(command) > 2 else "unknown"
     logger.emit("child_started", module=module)
-    completed = subprocess.run(command, cwd=ROOT, check=False)
-    elapsed_ms = round((time.monotonic() - started) * 1000)
-    if completed.returncode != 0:
+    result = run_child(
+        command,
+        cwd=ROOT,
+        timeout_seconds=6 * 3600,
+        capture_output=False,
+    )
+    if result.return_code != 0:
         logger.emit(
             "child_failed",
             level="error",
             module=module,
-            return_code=completed.returncode,
-            elapsed_ms=elapsed_ms,
+            return_code=result.return_code,
+            elapsed_ms=result.elapsed_ms,
         )
-        raise RuntimeError(f"{module} failed with exit code {completed.returncode}")
-    logger.emit("child_completed", module=module, elapsed_ms=elapsed_ms)
+        raise RuntimeError(f"{module} failed with exit code {result.return_code}")
+    logger.emit("child_completed", module=module, elapsed_ms=result.elapsed_ms)
 
 
 def run(argv: list[str] | None = None, *, now_utc: datetime | None = None) -> int:

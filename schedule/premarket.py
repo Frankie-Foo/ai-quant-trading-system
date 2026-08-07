@@ -5,15 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import subprocess
 import sys
-import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from data_plane.calendar import build_xnys_schedule
 from kernel.config import load_config
+from schedule.child_process import run_child
 from schedule.runtime import JsonEventLogger, LockUnavailableError, ProcessLock
 from schedule.state import JobLedger, JobStatus
 
@@ -73,30 +72,25 @@ def _extract_artifacts(stdout: str) -> tuple[str, ...]:
 def _run(
     arguments: list[str], *, logger: JsonEventLogger, timeout: int = 3600
 ) -> tuple[str, ...]:
-    started = time.monotonic()
     logger.emit("child_started", command=arguments[:3])
-    completed = subprocess.run(
+    result = run_child(
         [sys.executable, *arguments],
         cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
+        timeout_seconds=timeout,
     )
-    elapsed_ms = round((time.monotonic() - started) * 1000)
-    if completed.returncode != 0:
+    if result.return_code != 0:
         logger.emit(
             "child_failed",
             level="error",
             command=arguments[:3],
-            return_code=completed.returncode,
-            stdout_lines=len(completed.stdout.splitlines()),
-            stderr_lines=len(completed.stderr.splitlines()),
-            elapsed_ms=elapsed_ms,
+            return_code=result.return_code,
+            stdout_lines=len(result.stdout.splitlines()),
+            stderr_lines=len(result.stderr.splitlines()),
+            elapsed_ms=result.elapsed_ms,
         )
-        raise RuntimeError(f"child failed with exit code {completed.returncode}")
-    logger.emit("child_completed", command=arguments[:3], elapsed_ms=elapsed_ms)
-    return _extract_artifacts(completed.stdout)
+        raise RuntimeError(f"child failed with exit code {result.return_code}")
+    logger.emit("child_completed", command=arguments[:3], elapsed_ms=result.elapsed_ms)
+    return _extract_artifacts(result.stdout)
 
 
 def _previous_session(trade_date: date) -> date:
