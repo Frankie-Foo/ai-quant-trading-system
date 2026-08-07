@@ -13,6 +13,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from data_plane.providers.alpaca import market_data_provider_from_env
+from schedule.state import JOB_LEDGER_MIGRATIONS
 
 ROOT = Path(__file__).resolve().parents[1]
 CLOUD_PROVIDER_ENV = (
@@ -82,6 +83,18 @@ def _ledger_checks(state_db: Path, *, require_success: bool) -> list[dict[str, o
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 ).fetchall()
             }
+            applied_migration_versions: set[int] | None = None
+            if "schema_migrations" in tables:
+                applied_migration_versions = {
+                    int(row[0])
+                    for row in connection.execute(
+                        """
+                        SELECT version
+                        FROM schema_migrations
+                        WHERE owner = 'schedule.job_ledger'
+                        """
+                    ).fetchall()
+                }
             if "job_runs" in tables:
                 success = connection.execute(
                     """
@@ -120,6 +133,25 @@ def _ledger_checks(state_db: Path, *, require_success: bool) -> list[dict[str, o
             critical=True,
         )
     ]
+    if healthy:
+        expected_migration_versions = {
+            migration.version for migration in JOB_LEDGER_MIGRATIONS
+        }
+        missing_migrations = expected_migration_versions - (
+            applied_migration_versions or set()
+        )
+        checks.append(
+            _check(
+                "ledger_migrations",
+                status="pass" if not missing_migrations else "fail",
+                detail=(
+                    "schedule job-ledger migrations are applied"
+                    if not missing_migrations
+                    else "schedule job-ledger migrations are missing"
+                ),
+                critical=bool(missing_migrations),
+            )
+        )
     checks.append(
         _check(
             "prior_success",

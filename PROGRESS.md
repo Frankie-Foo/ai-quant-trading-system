@@ -1283,3 +1283,14 @@ same checks locally from the dedicated enterprise worktree.
   `pip-audit` request to PyPI previously failed with a TLS EOF; no dependency
   audit pass is claimed locally.
 - No broker order was submitted and no remote Feishu Base was accessed.
+
+## M49 readiness migration gate - 2026-08-07
+
+Status: made scheduler readiness verify the expected `schedule.job_ledger`
+migration versions for an existing state database. A healthy but unversioned
+legacy SQLite file is now not ready; a first-run database remains allowed to
+bootstrap through the scheduler's idempotent migration path.
+
+- The check is read-only and does not mutate state or expose credentials.
+- Acceptance: schedule health, premarket, and research-cycle tests 12 passed;
+  Ruff clean; strict mypy clean across 2 changed modules.

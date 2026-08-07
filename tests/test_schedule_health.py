@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import date
 from pathlib import Path
 
@@ -36,6 +37,25 @@ def test_health_rejects_a_corrupt_existing_ledger(tmp_path: Path) -> None:
 
     assert result["status"] == "not_ready"
     assert result["critical_failures"] == 1
+
+
+def test_health_rejects_an_unversioned_existing_ledger(tmp_path: Path) -> None:
+    state_db = tmp_path / "jobs.sqlite3"
+    with sqlite3.connect(state_db) as connection:
+        connection.execute("CREATE TABLE legacy_marker (value TEXT NOT NULL)")
+
+    result = evaluate_health(
+        data_root=tmp_path / "data",
+        state_db=state_db,
+        check_credentials=False,
+        require_success=False,
+    )
+
+    assert result["status"] == "not_ready"
+    checks = result["checks"]
+    assert isinstance(checks, list)
+    migration_check = next(item for item in checks if item["name"] == "ledger_migrations")
+    assert migration_check["status"] == "fail"
 
 
 def test_health_reports_missing_credential_names_without_values(
