@@ -1214,3 +1214,16 @@ use separate statements inside the runner's transaction rather than
 - Acceptance: 11 migration/session/SIP tests passed; scheduler and deployment
   regression tests 30 passed; Ruff clean; strict mypy clean across 7 changed
   scheduler/test modules. No broker order was submitted.
+
+## M44 order-protection ledger governance - 2026-08-07
+
+Status: connected the time-exit and synthetic-stop SQLite ledgers to the same
+versioned migration runner. These ledgers are part of the trading plane's
+idempotency and outbox recovery path; their schemas now have explicit owners,
+immutable checksums, and transactional first-startup initialization.
+
+- Existing files remain compatible because migrations use `CREATE TABLE IF NOT
+  EXISTS`; no order or stop records are moved or deleted.
+- Acceptance: time-exit, synthetic-stop, and Alpaca Paper broker tests 24
+  passed; Ruff clean; strict mypy clean across 4 changed production/test
+  modules. No broker order was submitted.
