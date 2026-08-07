@@ -1227,3 +1227,17 @@ immutable checksums, and transactional first-startup initialization.
 - Acceptance: time-exit, synthetic-stop, and Alpaca Paper broker tests 24
   passed; Ruff clean; strict mypy clean across 4 changed production/test
   modules. No broker order was submitted.
+
+## M45 safety and notification ledger governance - 2026-08-07
+
+Status: migrated the account-exclusivity guardian, global emergency stop, and
+autonomous notification outbox to the shared SQLite migration contract.
+
+- The notification ledger preserves the legacy three-column schema through a
+  two-step additive migration, so existing claimed/sent records remain
+  readable while delivery fields are introduced transactionally.
+- Safety stores now have explicit migration owners and immutable checksums;
+  the emergency-stop singleton is initialized as part of its migration.
+- Acceptance: account guardian, emergency stop, adaptive API, HTTP auth, and
+  notification tests 30 passed; Ruff clean; strict mypy clean across the
+  changed production/test modules. No broker order was submitted.

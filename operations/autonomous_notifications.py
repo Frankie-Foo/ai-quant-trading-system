@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
+from db.migrations.sqlite import SQLiteMigration, apply_sqlite_migrations
 from execution.autonomous_paper_session import (
     AutonomousPaperPlan,
     PaperSessionResult,
@@ -61,50 +62,68 @@ class NotificationInFlightError(RuntimeError):
     """An earlier process may have pushed this event but did not finish auditing it."""
 
 
+def _create_autonomous_notifications(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS autonomous_notifications (
+            notification_key TEXT PRIMARY KEY,
+            message_id TEXT NOT NULL,
+            sent_at_utc TEXT NOT NULL,
+            message_body TEXT NOT NULL DEFAULT '',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'sent',
+            claimed_at_utc TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+
+
+def _add_autonomous_notification_columns(connection: sqlite3.Connection) -> None:
+    columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(autonomous_notifications)"
+        ).fetchall()
+    }
+    additions = (
+        ("message_body", "TEXT NOT NULL DEFAULT ''"),
+        ("payload_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("status", "TEXT NOT NULL DEFAULT 'sent'"),
+        ("claimed_at_utc", "TEXT NOT NULL DEFAULT ''"),
+    )
+    for name, definition in additions:
+        if name not in columns:
+            connection.execute(
+                f"ALTER TABLE autonomous_notifications ADD COLUMN {name} {definition}"
+            )
+
+
+AUTONOMOUS_NOTIFICATION_MIGRATIONS = (
+    SQLiteMigration(
+        version=1,
+        name="autonomous_notifications",
+        signature="autonomous_notifications.v1",
+        apply=_create_autonomous_notifications,
+    ),
+    SQLiteMigration(
+        version=2,
+        name="autonomous_notification_delivery_columns",
+        signature="autonomous_notifications.delivery_columns.v1",
+        apply=_add_autonomous_notification_columns,
+    ),
+)
+
+
 class AutonomousNotificationLedger:
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS autonomous_notifications (
-                    notification_key TEXT PRIMARY KEY,
-                    message_id TEXT NOT NULL,
-                    sent_at_utc TEXT NOT NULL,
-                    message_body TEXT NOT NULL DEFAULT '',
-                    payload_json TEXT NOT NULL DEFAULT '{}',
-                    status TEXT NOT NULL DEFAULT 'sent',
-                    claimed_at_utc TEXT NOT NULL DEFAULT ''
-                )
-                """
+            apply_sqlite_migrations(
+                connection,
+                owner="operations.autonomous_notifications",
+                migrations=AUTONOMOUS_NOTIFICATION_MIGRATIONS,
             )
-            columns = {
-                str(row[1])
-                for row in connection.execute(
-                    "PRAGMA table_info(autonomous_notifications)"
-                ).fetchall()
-            }
-            if "message_body" not in columns:
-                connection.execute(
-                    "ALTER TABLE autonomous_notifications "
-                    "ADD COLUMN message_body TEXT NOT NULL DEFAULT ''"
-                )
-            if "payload_json" not in columns:
-                connection.execute(
-                    "ALTER TABLE autonomous_notifications "
-                    "ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}'"
-                )
-            if "status" not in columns:
-                connection.execute(
-                    "ALTER TABLE autonomous_notifications "
-                    "ADD COLUMN status TEXT NOT NULL DEFAULT 'sent'"
-                )
-            if "claimed_at_utc" not in columns:
-                connection.execute(
-                    "ALTER TABLE autonomous_notifications "
-                    "ADD COLUMN claimed_at_utc TEXT NOT NULL DEFAULT ''"
-                )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)

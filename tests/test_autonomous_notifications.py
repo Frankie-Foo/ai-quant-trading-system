@@ -159,6 +159,16 @@ def test_notification_ledger_migrates_legacy_rows(tmp_path: Path) -> None:
 
     records = AutonomousNotificationLedger(ledger_path).list_records()
 
+    with sqlite3.connect(ledger_path) as connection:
+        versions = connection.execute(
+            """
+            SELECT version
+            FROM schema_migrations
+            WHERE owner = 'operations.autonomous_notifications'
+            ORDER BY version
+            """
+        ).fetchall()
+
     assert records == (
         {
             "notification_key": "legacy-key",
@@ -168,6 +178,7 @@ def test_notification_ledger_migrates_legacy_rows(tmp_path: Path) -> None:
             "payload": {},
         },
     )
+    assert versions == [(1,), (2,)]
 
 
 def test_action_notification_reuses_original_message_and_records_one_base_event(
