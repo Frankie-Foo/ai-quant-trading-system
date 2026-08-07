@@ -1294,3 +1294,15 @@ bootstrap through the scheduler's idempotent migration path.
 - The check is read-only and does not mutate state or expose credentials.
 - Acceptance: schedule health, premarket, and research-cycle tests 12 passed;
   Ruff clean; strict mypy clean across 2 changed modules.
+
+## M50 migration concurrency fix - 2026-08-07
+
+Status: closed a startup race in the SQLite migration runner. Version lookup
+now occurs after the runner acquires `BEGIN IMMEDIATE`, so concurrent service
+starts cannot both observe an unapplied version and execute it twice.
+
+- Checksum validation, rollback, and idempotent re-entry behavior are
+  unchanged; the lock is held only for the current owner/version operation.
+- Acceptance: migration regression tests 5 passed, including concurrent
+  startup serialization; no broker order was submitted and no remote Feishu
+  Base was accessed.

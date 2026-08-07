@@ -58,18 +58,20 @@ def apply_sqlite_migrations(
             f"{normalized_owner}:{migration.version}:{migration.name}:"
             f"{migration.signature}".encode()
         ).hexdigest()
-        row = connection.execute(
-            "SELECT checksum FROM schema_migrations WHERE owner=? AND version=?",
-            (normalized_owner, migration.version),
-        ).fetchone()
-        if row is not None:
-            if str(row[0]) != checksum:
-                raise RuntimeError(
-                    f"migration checksum mismatch: {normalized_owner}:{migration.version}"
-                )
-            continue
         try:
             connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT checksum FROM schema_migrations WHERE owner=? AND version=?",
+                (normalized_owner, migration.version),
+            ).fetchone()
+            if row is not None:
+                if str(row[0]) != checksum:
+                    raise RuntimeError(
+                        "migration checksum mismatch: "
+                        f"{normalized_owner}:{migration.version}"
+                    )
+                connection.commit()
+                continue
             migration.apply(connection)
             connection.execute(
                 """

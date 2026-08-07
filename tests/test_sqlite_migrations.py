@@ -1,5 +1,8 @@
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from time import sleep
 
 import pytest
 
@@ -120,3 +123,39 @@ def test_order_ledger_records_its_schema_version(tmp_path: Path) -> None:
             "WHERE owner='execution.order_ledger'"
         ).fetchone()
     assert row == (1, "orders_and_trade_plans")
+
+
+def test_concurrent_startup_applies_a_migration_once(tmp_path: Path) -> None:
+    path = tmp_path / "concurrent.sqlite3"
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def apply(connection: sqlite3.Connection) -> None:
+        nonlocal calls
+        sleep(0.05)
+        with calls_lock:
+            calls += 1
+        connection.execute("CREATE TABLE IF NOT EXISTS sample (value TEXT NOT NULL)")
+
+    migration = SQLiteMigration(
+        version=1,
+        name="sample",
+        signature="sample.concurrent.v1",
+        apply=apply,
+    )
+
+    def worker() -> None:
+        connection = sqlite3.connect(path, timeout=5, isolation_level=None)
+        try:
+            apply_sqlite_migrations(
+                connection,
+                owner="concurrent",
+                migrations=(migration,),
+            )
+        finally:
+            connection.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        tuple(executor.map(lambda _: worker(), range(2)))
+
+    assert calls == 1
