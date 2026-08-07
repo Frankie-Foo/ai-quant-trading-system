@@ -1254,3 +1254,17 @@ longer relies on `executescript` during process startup.
 - Acceptance: adaptive-plan/API, autonomous Paper, and IBKR tests 87 passed;
   Ruff clean; strict mypy clean across the changed production/test modules.
   No broker order was submitted.
+
+## M47 cache, Feishu lock, and agent-fact governance - 2026-08-07
+
+Status: migrated the cloud-feature cache, Feishu local write lock, and SQLite
+agent fact store to the shared migration runner. The Feishu change only
+governs the local mutex database; it does not access or alter any remote Base.
+
+- The agent fact store keeps its existing allowlisted tables, constraints, and
+  indexes while applying each DDL statement inside the migration transaction.
+- The cloud cache retains point-in-time rows and the Feishu lock retains its
+  singleton mutual-exclusion semantics.
+- Acceptance: agent gateway, cloud-feature, Feishu Base client, and related
+  tests 30 passed; Ruff clean; strict mypy clean across 6 changed modules.
+  No remote Feishu Base was read or written; no broker order was submitted.

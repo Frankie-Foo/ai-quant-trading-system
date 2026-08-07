@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -85,6 +86,20 @@ def test_event_write_is_create_then_exact_readback_and_replay_safe(tmp_path: Pat
     assert replay == "rec-created"
     assert sum("+record-upsert" in command for command in runner.commands) == 1
     assert all(command[-2:] == ("--format", "json") for command in runner.commands)
+    with sqlite3.connect(_settings(tmp_path).lock_db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT owner, version, name
+            FROM schema_migrations
+            WHERE owner = 'operations.feishu_write_lock'
+            """
+        ).fetchone()
+    assert row is not None
+    assert tuple(row) == (
+        "operations.feishu_write_lock",
+        1,
+        "feishu_write_lock",
+    )
 
 
 def test_event_write_rejects_duplicate_business_key(tmp_path: Path) -> None:

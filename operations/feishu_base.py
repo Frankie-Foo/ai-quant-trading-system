@@ -22,6 +22,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 
+from db.migrations.sqlite import SQLiteMigration, apply_sqlite_migrations
+
 # lark-cli returns Base datetime cells without an offset; the write contract
 # stores UTC, so the readback normalizer treats that presentation as UTC.
 FEISHU_DISPLAY_TIMEZONE = UTC
@@ -42,6 +44,26 @@ class InvestmentTable(StrEnum):
     MONITOR = "monitor"
     TRADE = "trade"
     REVIEW = "review"
+
+
+def _create_feishu_write_lock(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS feishu_write_lock (
+            lock_id INTEGER PRIMARY KEY CHECK (lock_id = 1)
+        )
+        """
+    )
+
+
+FEISHU_WRITE_LOCK_MIGRATIONS = (
+    SQLiteMigration(
+        version=1,
+        name="feishu_write_lock",
+        signature="feishu_write_lock.v1",
+        apply=_create_feishu_write_lock,
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -250,11 +272,11 @@ class FeishuBaseEventClient:
         path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(path, timeout=30)
         try:
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS feishu_write_lock "
-                "(lock_id INTEGER PRIMARY KEY CHECK (lock_id = 1))"
+            apply_sqlite_migrations(
+                connection,
+                owner="operations.feishu_write_lock",
+                migrations=FEISHU_WRITE_LOCK_MIGRATIONS,
             )
-            connection.commit()
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("INSERT OR IGNORE INTO feishu_write_lock(lock_id) VALUES (1)")
             yield

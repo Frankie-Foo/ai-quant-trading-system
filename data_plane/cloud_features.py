@@ -9,6 +9,8 @@ from pathlib import Path
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
+from db.migrations.sqlite import SQLiteMigration, apply_sqlite_migrations
+
 CLOUD_FEATURE_API_VERSION = "v1"
 
 
@@ -104,6 +106,32 @@ class CloudFeatureClient:
             self._client.close()
 
 
+def _create_cloud_feature_vectors(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cloud_feature_vectors (
+            symbol TEXT NOT NULL,
+            asof_utc TEXT NOT NULL,
+            input_event_id TEXT NOT NULL,
+            api_version TEXT NOT NULL,
+            vector_json TEXT NOT NULL,
+            fetched_at_utc TEXT NOT NULL,
+            PRIMARY KEY (symbol, asof_utc, input_event_id)
+        )
+        """
+    )
+
+
+CLOUD_FEATURE_CACHE_MIGRATIONS = (
+    SQLiteMigration(
+        version=1,
+        name="cloud_feature_vectors",
+        signature="cloud_feature_vectors.v1",
+        apply=_create_cloud_feature_vectors,
+    ),
+)
+
+
 class CloudFeatureCache:
     """Process-independent local point-in-time cache read by realtime strategy code."""
 
@@ -111,18 +139,10 @@ class CloudFeatureCache:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS cloud_feature_vectors (
-                    symbol TEXT NOT NULL,
-                    asof_utc TEXT NOT NULL,
-                    input_event_id TEXT NOT NULL,
-                    api_version TEXT NOT NULL,
-                    vector_json TEXT NOT NULL,
-                    fetched_at_utc TEXT NOT NULL,
-                    PRIMARY KEY (symbol, asof_utc, input_event_id)
-                )
-                """
+            apply_sqlite_migrations(
+                connection,
+                owner="data_plane.cloud_feature_cache",
+                migrations=CLOUD_FEATURE_CACHE_MIGRATIONS,
             )
 
     def _connect(self) -> sqlite3.Connection:

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import shutil
+import sqlite3
 import sys
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -119,6 +120,29 @@ def _fact(name: str = "sample_metric") -> Fact:
         value=1.0,
         availability=Availability.AVAILABLE,
         provenance="synthetic.fact",
+    )
+
+
+def test_sqlite_agent_fact_schema_is_versioned(tmp_path: Path) -> None:
+    path = tmp_path / "agent-facts.sqlite3"
+    store = SQLiteAgentFactStore(path)
+
+    store.initialize()
+
+    with sqlite3.connect(path) as connection:
+        row = connection.execute(
+            """
+            SELECT owner, version, name
+            FROM schema_migrations
+            WHERE owner = 'agent_gateway.sqlite_fact_store'
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert tuple(row) == (
+        "agent_gateway.sqlite_fact_store",
+        1,
+        "agent_fact_store",
     )
 
 
