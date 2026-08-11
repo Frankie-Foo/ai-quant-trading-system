@@ -62,8 +62,18 @@ def market_data_provider_from_env() -> MarketDataProvider:
 
 
 def _direct_credentials() -> tuple[SecretStr, SecretStr]:
-    key_id = _first_present("ALPACA_API_KEY_ID", "ALPACA_PAPER_KEY_ID")
-    secret_key = _first_present("ALPACA_API_SECRET_KEY", "ALPACA_PAPER_SECRET_KEY")
+    key_id = _first_present(
+        "ALPACA_API_KEY_ID",
+        "ALPACA_PAPER_KEY_ID",
+        "ALPACA_API_KEY",
+        "APCA_API_KEY_ID",
+    )
+    secret_key = _first_present(
+        "ALPACA_API_SECRET_KEY",
+        "ALPACA_PAPER_SECRET_KEY",
+        "ALPACA_SECRET_KEY",
+        "APCA_API_SECRET_KEY",
+    )
     if key_id is None or secret_key is None:
         raise DownloadError(
             "direct Alpaca market-data credentials are required"

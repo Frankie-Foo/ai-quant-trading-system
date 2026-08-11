@@ -10,9 +10,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
-
 from data_plane.providers.alpaca import market_data_provider_from_env
+from operations.local_env import load_project_env, project_data_root
 
 ROOT = Path(__file__).resolve().parents[1]
 CLOUD_PROVIDER_ENV = (
@@ -177,12 +176,20 @@ def _credential_check() -> dict[str, object]:
         missing = []
         if not any(
             os.getenv(name, "").strip()
-            for name in ("ALPACA_API_KEY_ID", "ALPACA_PAPER_KEY_ID")
+            for name in (
+                "ALPACA_API_KEY_ID",
+                "ALPACA_PAPER_KEY_ID",
+                "ALPACA_API_KEY",
+            )
         ):
             missing.append("ALPACA_API_KEY_ID or ALPACA_PAPER_KEY_ID")
         if not any(
             os.getenv(name, "").strip()
-            for name in ("ALPACA_API_SECRET_KEY", "ALPACA_PAPER_SECRET_KEY")
+            for name in (
+                "ALPACA_API_SECRET_KEY",
+                "ALPACA_PAPER_SECRET_KEY",
+                "ALPACA_SECRET_KEY",
+            )
         ):
             missing.append("ALPACA_API_SECRET_KEY or ALPACA_PAPER_SECRET_KEY")
     else:
@@ -224,9 +231,9 @@ def evaluate_health(
 
 
 def main() -> None:
-    load_dotenv(ROOT / ".env")
+    load_project_env(ROOT)
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-root", type=Path, default=ROOT / "data")
+    parser.add_argument("--data-root", type=Path, default=project_data_root(ROOT))
     parser.add_argument("--state-db", type=Path, default=ROOT / "runs" / "jobs.sqlite3")
     parser.add_argument("--check-credentials", action="store_true")
     parser.add_argument("--require-success", action="store_true")

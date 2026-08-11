@@ -287,9 +287,10 @@ class DirectAlpacaMarketDataClient:
                     or article.created_at_utc > end_utc
                     or article.updated_at_utc > end_utc
                 ):
-                    raise DirectMarketDataError(
-                        "Alpaca news row violated the causal request window"
-                    )
+                    # Alpaca may return a symbol-matched row outside the requested
+                    # causal window. Exclude that row; do not let one non-causal
+                    # article discard otherwise usable evidence from the page.
+                    continue
                 articles.append(article)
             next_token = payload.get("next_page_token")
             if next_token is None:

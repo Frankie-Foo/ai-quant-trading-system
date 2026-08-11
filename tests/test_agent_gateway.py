@@ -5,7 +5,7 @@ import json
 import os
 import shutil
 import sys
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -39,7 +39,12 @@ from research.monthly_evolution_agents import (
     ProposalDraft,
     materialize_proposals,
 )
-from research.pdca_agents import LessonDraft, PostmarketLessonReview, materialize_lessons
+from research.pdca_agents import (
+    LessonDraft,
+    PostmarketLessonReview,
+    materialize_lessons,
+    materialize_selection_memory,
+)
 from scripts.run_monthly_evolution import _build_package
 from scripts.run_structured_pdca import _pdca_fact_package
 
@@ -427,6 +432,68 @@ def test_pdca_materialization_cannot_invent_metrics_or_execution_lessons() -> No
         )
 
 
+def test_selection_memory_keeps_supported_and_missed_cases_but_not_uncertain_cases() -> None:
+    selected_metric = Fact(
+        name="close_return",
+        value=0.12,
+        availability=Availability.AVAILABLE,
+        provenance="synthetic.postmortem|close_return",
+    )
+    missed_metric = Fact(
+        name="close_return",
+        value=0.2,
+        availability=Availability.AVAILABLE,
+        provenance="synthetic.postmortem|close_return",
+    )
+    metric_index = {
+        "opportunity:case-selected:close_return": selected_metric,
+        "opportunity:case-missed:close_return": missed_metric,
+    }
+    rows = [
+        {
+            "case_id": "case-selected",
+            "root_cause": "selected",
+            "selection_status": "selected",
+            "pattern_key": "selected",
+            "facts": [selected_metric.model_dump(mode="json")],
+        },
+        {
+            "case_id": "case-missed",
+            "root_cause": "factor_gap",
+            "selection_status": "not_seen",
+            "pattern_key": "factor_gap:price_order_flow_or_sector",
+            "facts": [missed_metric.model_dump(mode="json")],
+        },
+        {
+            "case_id": "case-late",
+            "root_cause": "late_catalyst",
+            "selection_status": "not_seen",
+            "pattern_key": "late_catalyst:after_cutoff",
+            "facts": [missed_metric.model_dump(mode="json")],
+        },
+    ]
+
+    lessons = materialize_selection_memory(
+        rows,
+        trade_date=FUTURE_SESSION,
+        metric_index=metric_index,
+        source_record_ids=("synthetic-postmortem",),
+    )
+
+    assert len(lessons) == 2
+    assert {lesson.factor_profile[1] for lesson in lessons} == {
+        "root_cause:selected",
+        "root_cause:factor_gap",
+    }
+    assert all(
+        digit not in " ".join(
+            (lesson.hypothesis, lesson.observation, lesson.conclusion)
+        )
+        for lesson in lessons
+        for digit in "0123456789"
+    )
+
+
 def test_monthly_evolution_requires_evidence_cluster_and_stays_draft(
     gateway: AgentGatewayService,
 ) -> None:
@@ -434,7 +501,7 @@ def test_monthly_evolution_requires_evidence_cluster_and_stays_draft(
         lesson = Lesson(
             agent=AgentRole.PDCA,
             category=LessonCategory.SELECTION_REVIEW,
-            trade_date=FUTURE_SESSION,
+            trade_date=FUTURE_SESSION + timedelta(days=index),
             hypothesis="Catalyst breadth may distinguish robust selections.",
             observation="The anonymous cohort shared a narrow evidence pattern.",
             conclusion="Treat the pattern as fragile until independently replicated.",
@@ -456,6 +523,8 @@ def test_monthly_evolution_requires_evidence_cluster_and_stays_draft(
     assert len(clusters) == 1
     cluster_id = next(iter(clusters))
     count_ref = f"{cluster_id}:observation_count"
+    session_count_ref = f"{cluster_id}:independent_session_count"
+    assert metrics[session_count_ref].value == 10
     lesson_id = next(iter(clusters[cluster_id]))
     review = MonthlyProposalReview(
         proposals=(
@@ -481,6 +550,36 @@ def test_monthly_evolution_requires_evidence_cluster_and_stays_draft(
     )
     assert proposals[0].status == "draft"
     assert proposals[0].production_eligible is False
+
+
+def test_monthly_evolution_rejects_many_rows_from_one_session(
+    gateway: AgentGatewayService,
+) -> None:
+    for index in range(10):
+        gateway.lessons_write(
+            agent_name="pdca",
+            lesson=Lesson(
+                agent=AgentRole.PDCA,
+                category=LessonCategory.SELECTION_REVIEW,
+                trade_date=FUTURE_SESSION,
+                hypothesis="Catalyst breadth may distinguish robust selections.",
+                observation="The anonymous cohort shared a narrow evidence pattern.",
+                conclusion="Treat the pattern as fragile until independently replicated.",
+                metrics=(
+                    Fact(
+                        name="cohort_outcome",
+                        value=float(index),
+                        availability=Availability.AVAILABLE,
+                        provenance=f"synthetic.same_session.{index}",
+                    ),
+                ),
+                source_record_ids=(f"same-session-{index}",),
+                factor_profile=("narrow_catalyst", "high_elasticity"),
+            ),
+        )
+
+    _, clusters, _, _ = _build_package(gateway)
+    assert clusters == {}
 
 
 def test_proposals_and_tradeplan_submissions_remain_non_executable(

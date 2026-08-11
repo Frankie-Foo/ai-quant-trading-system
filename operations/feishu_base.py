@@ -12,6 +12,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -99,9 +100,7 @@ class FeishuBaseSettings:
         raw = {key: values.get(name, "").strip() for key, name in names.items()}
         missing = tuple(key for key, value in raw.items() if not value)
         if missing:
-            raise RuntimeError(
-                "incomplete dedicated Feishu configuration: " + ", ".join(missing)
-            )
+            raise RuntimeError("incomplete dedicated Feishu configuration: " + ", ".join(missing))
         table_ids = tuple(raw[key] for key in ("selection", "monitor", "trade", "review"))
         if any(not table_id.startswith("tbl") for table_id in table_ids):
             raise RuntimeError("investment Feishu table IDs must start with tbl")
@@ -211,9 +210,7 @@ class FeishuBaseEventClient:
                 projected_fields,
             )
             if len(existing) > 1:
-                raise FeishuBaseDuplicateError(
-                    f"duplicate Feishu event identity: {normalized_id}"
-                )
+                raise FeishuBaseDuplicateError(f"duplicate Feishu event identity: {normalized_id}")
             if existing:
                 self._verify_fields(normalized_id, existing[0], normalized_fields)
                 return str(existing[0]["record_id"])
@@ -354,16 +351,12 @@ class FeishuBaseEventClient:
         command = (*arguments, "--format", "json")
         try:
             raw = (
-                self._runner(command)
-                if self._runner is not None
-                else self._run_subprocess(command)
+                self._runner(command) if self._runner is not None else self._run_subprocess(command)
             )
         except FeishuBaseError:
             raise
         except (OSError, subprocess.SubprocessError) as exc:
-            raise FeishuBaseError(
-                f"lark-cli failed: {type(exc).__name__}"
-            ) from exc
+            raise FeishuBaseError(f"lark-cli failed: {type(exc).__name__}") from exc
         payload = _json_safe_mapping(raw)
         if payload.get("ok") is not True:
             error = payload.get("error")
@@ -376,8 +369,36 @@ class FeishuBaseEventClient:
         return payload
 
     def _run_subprocess(self, arguments: Sequence[str]) -> Mapping[str, object]:
+        command_arguments = list(arguments)
+        temporary_json: Path | None = None
+        if "--json" in command_arguments:
+            json_index = command_arguments.index("--json") + 1
+            if json_index >= len(command_arguments):
+                raise FeishuBaseError("lark-cli JSON payload is missing")
+            descriptor, temporary_name = tempfile.mkstemp(
+                dir=Path.cwd(),
+                prefix=".lark-json-",
+                suffix=".json",
+                text=True,
+            )
+            temporary_json = Path(temporary_name)
+            try:
+                with os.fdopen(
+                    descriptor,
+                    "w",
+                    encoding="utf-8",
+                    newline="\n",
+                ) as handle:
+                    handle.write(command_arguments[json_index])
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                command_arguments[json_index] = f"@./{temporary_json.name}"
+            except Exception:
+                temporary_json.unlink(missing_ok=True)
+                raise
         completed = subprocess.run(
-            [self._command, *arguments],
+            [self._command, *command_arguments],
             capture_output=True,
             check=False,
             text=True,
@@ -386,14 +407,18 @@ class FeishuBaseEventClient:
             timeout=45,
         )
         try:
-            payload = json.loads(completed.stdout or "{}")
-        except json.JSONDecodeError as exc:
-            raise FeishuBaseError("lark-cli returned invalid JSON") from exc
-        if not isinstance(payload, dict):
-            raise FeishuBaseError("lark-cli response contract is invalid")
-        if completed.returncode != 0:
-            raise FeishuBaseError("lark-cli command returned a non-zero exit code")
-        return cast(dict[str, object], payload)
+            try:
+                payload = json.loads(completed.stdout or "{}")
+            except json.JSONDecodeError as exc:
+                raise FeishuBaseError("lark-cli returned invalid JSON") from exc
+            if not isinstance(payload, dict):
+                raise FeishuBaseError("lark-cli response contract is invalid")
+            if completed.returncode != 0:
+                raise FeishuBaseError("lark-cli command returned a non-zero exit code")
+            return cast(dict[str, object], payload)
+        finally:
+            if temporary_json is not None:
+                temporary_json.unlink(missing_ok=True)
 
     def _verify_fields(
         self,
@@ -407,9 +432,7 @@ class FeishuBaseEventClient:
         for field, expected_value in expected.items():
             actual_value = actual.get(field)
             if _cell_text(actual_value) != _cell_text(expected_value):
-                raise FeishuBaseError(
-                    f"Feishu readback mismatch for event {event_id}: {field}"
-                )
+                raise FeishuBaseError(f"Feishu readback mismatch for event {event_id}: {field}")
 
 
 def _truthy(value: str | None) -> bool:

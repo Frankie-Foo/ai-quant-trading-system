@@ -11,7 +11,6 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import polars as pl
-from dotenv import load_dotenv
 from pydantic import SecretStr
 
 from data_plane.calendar import build_xnys_schedule
@@ -34,6 +33,7 @@ from data_plane.quality import BAR_SCHEMA_VERSION, audit_minute_bars, canonicali
 from data_plane.storage import persist_snapshot
 from kernel.config import load_config
 from kernel.features.momentum import premarket_window_utc, rvol
+from operations.local_env import load_project_env
 
 ROOT = Path(__file__).resolve().parents[1]
 BEIJING = ZoneInfo("Asia/Shanghai")
@@ -46,7 +46,9 @@ DIRECT_RAW_SOURCE = "alpaca_direct.sip.premarket_1m"
 FEATURE_SOURCE = "kernel.premarket.rvol_candidates"
 FACTOR_FEATURE_SOURCE = "kernel.premarket.factor_rvol_candidates"
 # Keep historical proxy requests below the upstream gateway's payload limit.
-SYMBOL_BATCH_SIZE = 25
+# Alpaca accepts multi-symbol bar requests; larger bounded batches avoid a
+# needless one-request-per-25-symbol latency while keeping query URLs manageable.
+SYMBOL_BATCH_SIZE = 100
 BarFetcher = Callable[[tuple[str, ...], datetime, datetime], pl.DataFrame]
 
 
@@ -374,7 +376,7 @@ def _counts(frame: pl.DataFrame, column: str) -> dict[str, int]:
 
 
 def main() -> None:
-    load_dotenv(ROOT / ".env")
+    load_project_env(ROOT)
     parser = argparse.ArgumentParser()
     parser.add_argument("--trade-date", type=_parse_date, required=True)
     parser.add_argument("--decision-asof", type=_parse_utc)
@@ -400,8 +402,14 @@ def main() -> None:
         policy = AlpacaStockDataPolicy(feed="sip", delay_minutes=0, is_realtime=True)
         raw_source = DIRECT_RAW_SOURCE
         provider_name = "alpaca_direct"
-        key_id = os.getenv("ALPACA_API_KEY_ID", "").strip()
-        secret_key = os.getenv("ALPACA_API_SECRET_KEY", "").strip()
+        key_id = (
+            os.getenv("ALPACA_API_KEY_ID", "").strip()
+            or os.getenv("ALPACA_API_KEY", "").strip()
+        )
+        secret_key = (
+            os.getenv("ALPACA_API_SECRET_KEY", "").strip()
+            or os.getenv("ALPACA_SECRET_KEY", "").strip()
+        )
         if not key_id or not secret_key:
             raise RuntimeError("direct Alpaca credentials are missing")
 

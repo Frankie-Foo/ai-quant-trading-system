@@ -19,3 +19,12 @@ facts, rejects missing paths or costs, enforces sample thresholds, and creates o
 allowlisted sandbox specifications. Research and Critic run only after those gates pass.
 They receive separate prompt contexts over the same no-lookahead fact package. An API
 failure is recorded without converting unavailable analysis into approval.
+
+## User-facing slow-loop role
+
+The project-level `复盘` role is backed by the
+`plugins/quant-agent/skills/intraday-selection-postmortem` skill. It owns the
+read-only close review: selected candidates, missed movers, sector context,
+data/classifier gaps, and ticker-anonymous sandbox hypotheses. It must preserve
+the LIVE/REPLAY/EXEC boundary, never place orders, never relax hard gates, and
+never promote a production change.

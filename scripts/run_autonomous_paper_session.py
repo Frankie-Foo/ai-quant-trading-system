@@ -10,7 +10,6 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
-from dotenv import load_dotenv
 from pydantic import SecretStr
 
 from execution.alpaca_paper import (
@@ -43,6 +42,7 @@ from operations.autonomous_paper_runtime import AutonomousPaperRuntime
 from operations.autonomous_policy_adapter import load_runtime_safety_envelope
 from operations.feishu_base import FeishuBaseEventClient
 from operations.livermore_push import LivermorePushClient
+from operations.local_env import load_project_env
 from schedule.runtime import JsonEventLogger, ProcessLock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -104,13 +104,9 @@ def resolve_paper_authorization(
     if not arm_paper:
         return False
     if not broker_write_enabled:
-        raise RuntimeError(
-            "--arm-paper also requires BROKER_WRITE_ENABLED=true"
-        )
+        raise RuntimeError("--arm-paper also requires BROKER_WRITE_ENABLED=true")
     if trading_kill_switch:
-        raise RuntimeError(
-            "--arm-paper is blocked while the trading kill switch is active"
-        )
+        raise RuntimeError("--arm-paper is blocked while the trading kill switch is active")
     return True
 
 
@@ -122,12 +118,14 @@ def direct_paper_credentials(
         "ALPACA_PAPER_KEY_ID",
         "APCA_API_KEY_ID",
         "ALPACA_API_KEY_ID",
+        "ALPACA_API_KEY",
     )
     secret_key = _first_present(
         environment,
         "ALPACA_PAPER_SECRET_KEY",
         "APCA_API_SECRET_KEY",
         "ALPACA_API_SECRET_KEY",
+        "ALPACA_SECRET_KEY",
     )
     if key_id is None or secret_key is None:
         raise RuntimeError("Alpaca Paper credentials are incomplete")
@@ -169,8 +167,8 @@ def _broker(
         return DirectAlpacaPaperBroker(
             key_id=key_id,
             secret_key=secret_key,
-        writes_enabled=paper_authorized,
-    )
+            writes_enabled=paper_authorized,
+        )
     if mode == "ibkr":
         host, client_id, paper_account = ibkr_paper_profile(environment)
         broker = IBKRPaperBroker(
@@ -217,9 +215,7 @@ def _livermore_push(
 ) -> LivermorePushClient:
     return LivermorePushClient(
         app_id=environment.get("VPS_LIVERMORE_APP_ID", "").strip(),
-        app_secret=SecretStr(
-            environment.get("VPS_LIVERMORE_APP_SECRET", "")
-        ),
+        app_secret=SecretStr(environment.get("VPS_LIVERMORE_APP_SECRET", "")),
         channel_id=environment.get("VPS_LIVERMORE_CHANNEL_ID", "").strip(),
     )
 
@@ -243,8 +239,7 @@ def _market_adapter(
             sector_symbol=bundle.sector_symbol,
             catalyst_score=None if catalyst is None else catalyst / 100.0,
             provenance=(
-                f"{bundle.market_context_provenance}|"
-                f"{bundle.evidence.catalyst.provenance}"
+                f"{bundle.market_context_provenance}|{bundle.evidence.catalyst.provenance}"
             ),
         )
     return SipStoreMarketFactsAdapter(
@@ -254,7 +249,7 @@ def _market_adapter(
 
 
 def main() -> int:
-    load_dotenv(ROOT / ".env")
+    load_project_env(ROOT)
     args = _parser().parse_args()
     if args.max_seconds is not None and args.max_seconds <= 0:
         raise ValueError("max-seconds must be positive")
@@ -282,6 +277,7 @@ def main() -> int:
         push=push,
         ledger=AutonomousNotificationLedger(args.notification_db),
         base=base,
+        broker_identity=str(getattr(broker, "broker_identity", "unknown")),
     )
     orchestrator = PaperSessionOrchestrator(
         broker=broker,
@@ -298,11 +294,7 @@ def main() -> int:
     )
     plans_by_id = {bundle.plan.plan_id: bundle.plan for bundle in config.plans}
     logger = JsonEventLogger(service="autonomous_paper_session")
-    deadline = (
-        None
-        if args.max_seconds is None
-        else time.monotonic() + float(args.max_seconds)
-    )
+    deadline = None if args.max_seconds is None else time.monotonic() + float(args.max_seconds)
     try:
         with ProcessLock(args.lock_file):
             while True:
@@ -320,13 +312,9 @@ def main() -> int:
                             action=outcome.result.action.value,
                             reasons=list(outcome.result.reasons),
                             degraded_reasons=list(outcome.degraded_reasons),
-                            daily_return_pct=str(
-                                outcome.result.daily_return * 100
-                            ),
+                            daily_return_pct=str(outcome.result.daily_return * 100),
                             day_locked=outcome.result.day_locked,
-                            submitted_order_ids=list(
-                                outcome.result.submitted_order_ids
-                            ),
+                            submitted_order_ids=list(outcome.result.submitted_order_ids),
                             paper_writes_authorized=paper_authorized,
                             live_trading_authorized=False,
                         )
@@ -355,9 +343,7 @@ def main() -> int:
                                 symbol=outcome.symbol,
                                 failure_reason=delivery.failure_reason,
                                 fallback_action=(
-                                    None
-                                    if fallback is None
-                                    else fallback.action.value
+                                    None if fallback is None else fallback.action.value
                                 ),
                                 live_trading_authorized=False,
                             )

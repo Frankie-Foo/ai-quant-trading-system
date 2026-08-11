@@ -24,6 +24,7 @@ from research.providers.deepseek import DeepSeekClient
 
 ROOT = Path(__file__).resolve().parents[1]
 MIN_CLUSTER_OBSERVATIONS = 10
+MIN_CLUSTER_SESSIONS = 10
 MIN_CLUSTER_PROVENANCE = "quant-agent-plugin-v1.2|pdca.minimum_cluster_observations"
 
 
@@ -92,7 +93,12 @@ def _build_package(
     eligible: dict[str, frozenset[str]] = {}
     clusters: list[dict[str, object]] = []
     for profile, rows in sorted(groups.items()):
-        if len(rows) < MIN_CLUSTER_OBSERVATIONS:
+        sessions = {
+            str(row.get("trade_date"))
+            for row in rows
+            if row.get("trade_date")
+        }
+        if len(rows) < MIN_CLUSTER_OBSERVATIONS or len(sessions) < MIN_CLUSTER_SESSIONS:
             continue
         cluster_id = f"cluster-{hashlib.sha256('|'.join(profile).encode()).hexdigest()[:16]}"
         lesson_ids = frozenset(str(row["record_id"]) for row in rows)
@@ -108,6 +114,16 @@ def _build_package(
             ),
         )
         metric_index[count_ref] = count_fact
+        session_count_ref = f"{cluster_id}:independent_session_count"
+        metric_index[session_count_ref] = Fact(
+            name=session_count_ref,
+            value=len(sessions),
+            availability=Availability.AVAILABLE,
+            provenance=(
+                "agent_gateway.store.lessons|independent_session_cluster.v1|"
+                f"eligibility:{MIN_CLUSTER_PROVENANCE}"
+            ),
+        )
         lesson_payload: list[dict[str, object]] = []
         for row in rows:
             lesson_id = str(row["record_id"])
@@ -135,6 +151,7 @@ def _build_package(
                 "cluster_id": cluster_id,
                 "factor_profile": profile,
                 "observation_count_ref": count_ref,
+                "independent_session_count_ref": session_count_ref,
                 "lessons": lesson_payload,
             }
         )

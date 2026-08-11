@@ -100,8 +100,16 @@ def fetch_alpaca_news_direct(
         return empty_catalyst_frame()
     if not 1 <= chunk_size <= 100:
         raise ValueError("chunk_size must be between 1 and 100")
-    key_id = os.getenv("ALPACA_API_KEY_ID", "").strip()
-    secret_key = os.getenv("ALPACA_API_SECRET_KEY", "").strip()
+    key_id = (
+        os.getenv("ALPACA_API_KEY_ID", "").strip()
+        or os.getenv("ALPACA_API_KEY", "").strip()
+        or os.getenv("APCA_API_KEY_ID", "").strip()
+    )
+    secret_key = (
+        os.getenv("ALPACA_API_SECRET_KEY", "").strip()
+        or os.getenv("ALPACA_SECRET_KEY", "").strip()
+        or os.getenv("APCA_API_SECRET_KEY", "").strip()
+    )
     if not key_id or not secret_key:
         raise DownloadError("direct Alpaca credentials are missing")
     client = DirectAlpacaMarketDataClient(

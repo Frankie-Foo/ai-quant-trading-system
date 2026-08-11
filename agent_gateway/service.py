@@ -170,7 +170,24 @@ class AgentGatewayService:
         return f"case-{digest[:16]}"
 
     def _redact_for_pdca(self, value: object) -> object:
-        known = self.snapshots.known_symbols() - TECHNICAL_TOKEN_ALLOWLIST
+        # Query rows already carry the symbols that need anonymizing. Building a
+        # repository-wide symbol index here makes every PDCA query rescan hundreds
+        # of parquet snapshots and can stall the postmarket scheduler.
+        known: set[str] = set()
+
+        def collect_symbols(item: object) -> None:
+            if isinstance(item, dict):
+                symbol = item.get("symbol")
+                if isinstance(symbol, str):
+                    known.add(symbol.strip().upper())
+                for nested in item.values():
+                    collect_symbols(nested)
+            elif isinstance(item, list | tuple):
+                for nested in item:
+                    collect_symbols(nested)
+
+        collect_symbols(value)
+        known -= TECHNICAL_TOKEN_ALLOWLIST
         mapping = {symbol: self._anonymous_case(symbol) for symbol in known if len(symbol) >= 2}
 
         def redact(item: object) -> object:
@@ -876,7 +893,16 @@ class AgentGatewayService:
                     *lesson.factor_profile,
                 )
             )
-            known = self.snapshots.known_symbols() - TECHNICAL_TOKEN_ALLOWLIST
+            try:
+                known = {
+                    str(value).upper()
+                    for value in self.snapshots.selection_for_date(lesson.trade_date)
+                    .frame.get_column("symbol")
+                    .to_list()
+                }
+            except LookupError:
+                known = set()
+            known -= TECHNICAL_TOKEN_ALLOWLIST
             hits = sorted(
                 symbol
                 for symbol in known

@@ -191,6 +191,17 @@ def test_direct_news_is_paginated_bounded_and_symbol_filtered() -> None:
                             "url": "https://example.com/101",
                             "symbols": ["AAPL"],
                             "source": "benzinga",
+                        },
+                        {
+                            "id": 102,
+                            "headline": "AAPL updated after as-of",
+                            "summary": "This row is not causal at the requested as-of.",
+                            "author": "Desk",
+                            "created_at": "2026-07-29T13:30:30Z",
+                            "updated_at": "2026-07-29T13:32:01Z",
+                            "url": "https://example.com/102",
+                            "symbols": ["AAPL"],
+                            "source": "benzinga",
                         }
                     ],
                     "next_page_token": "page-2",

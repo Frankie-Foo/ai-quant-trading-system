@@ -13,19 +13,19 @@ from pathlib import Path
 from typing import Any, cast
 
 import polars as pl
-from dotenv import load_dotenv
 
 from data_plane.calendar import build_xnys_schedule
 from data_plane.contracts import DatasetSnapshot
 from kernel.config import load_config
 from operations.feishu_base import FeishuBaseError, FeishuBaseEventClient
 from operations.feishu_investment_events import record_postmarket_review
+from operations.local_env import load_project_env, project_data_root
 from schedule.runtime import JsonEventLogger, LockUnavailableError, ProcessLock
 from schedule.state import JobLedger
 
 ROOT = Path(__file__).resolve().parents[1]
 JOB_NAME = "postmarket_review"
-JOB_VERSION = "postmarket_review.v7"
+JOB_VERSION = "postmarket_review.v8"
 
 
 def _truthy(value: str | None) -> bool:
@@ -274,7 +274,7 @@ def _run_one(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trade-date", type=_parse_date)
-    parser.add_argument("--data-root", type=Path, default=ROOT / "data")
+    parser.add_argument("--data-root", type=Path, default=project_data_root(ROOT))
     parser.add_argument("--state-db", type=Path, default=ROOT / "runs" / "jobs.sqlite3")
     parser.add_argument("--lock-file", type=Path, default=ROOT / "runs" / "postmarket.lock")
     parser.add_argument(
@@ -286,7 +286,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def run(argv: list[str] | None = None) -> int:
-    load_dotenv(ROOT / ".env")
+    load_project_env(ROOT)
     args = _parser().parse_args(argv)
     logger = JsonEventLogger(service="postmarket")
     try:
@@ -301,9 +301,13 @@ def _run_locked(args: argparse.Namespace, logger: JsonEventLogger) -> int:
     now_utc = datetime.now(UTC)
     cfg = load_config(ROOT / "config.yaml")
     data_grace_minutes = cfg.market_data.postmarket_data_grace_minutes
-    candidates = (
-        (args.trade_date,) if args.trade_date is not None else _selection_dates(args.data_root)
-    )
+    if args.trade_date is not None:
+        candidates = (args.trade_date,)
+        skipped_historical_dates = 0
+    else:
+        available_dates = _selection_dates(args.data_root)
+        candidates = (max(available_dates),) if available_dates else ()
+        skipped_historical_dates = max(0, len(available_dates) - len(candidates))
     due_dates = [
         value
         for value in candidates
@@ -325,6 +329,7 @@ def _run_locked(args: argparse.Namespace, logger: JsonEventLogger) -> int:
         job_version=JOB_VERSION,
         data_grace_minutes=data_grace_minutes,
         llm_mode=args.llm_mode,
+        skipped_historical_dates=skipped_historical_dates,
         orders_submitted=0,
     )
     for trade_date in due_dates:

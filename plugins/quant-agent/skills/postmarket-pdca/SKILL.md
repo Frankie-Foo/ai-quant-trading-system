@@ -66,8 +66,10 @@ Act as `pdca` and query:
 For each supported pattern, decide whether the original logic was supported, refuted, or noise.
 Keep this verdict separate from profit or loss. Group by factor profile such as sector heat,
 life-cycle state, elasticity, catalyst type, priced-in state, and direction logic. Do not group by
-instrument identity. Treat one missed mover as an observation rather than a lesson. Never label an
-after-cutoff catalyst or incomplete evidence as a factor failure.
+instrument identity. Persist complete selected, intentional-gate, data/classifier-gap, and
+factor-gap rows as ticker-free `selection_review` learning records; one record remains only an
+observation until the monthly independent-session gate is met. Never label an after-cutoff
+catalyst or incomplete evidence as a factor failure or write it as a lesson.
 
 Write only these lesson categories with `lessons_write`:
 

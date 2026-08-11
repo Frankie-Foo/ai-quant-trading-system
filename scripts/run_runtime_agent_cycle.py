@@ -8,13 +8,13 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from dotenv import load_dotenv
 from pydantic import SecretStr
 
 from data_plane.providers.alpaca_direct import DirectAlpacaMarketDataClient
 from execution.alpaca_paper import DirectAlpacaPaperBroker
 from operations.autonomous_paper_config import load_autonomous_paper_config
 from operations.livermore_push import LivermorePushClient
+from operations.local_env import load_project_env
 from operations.runtime_agent_cycle import run_runtime_agent_cycle
 from operations.runtime_agent_safety import RuntimeAgentRole
 from research.providers.deepseek import DEEPSEEK_MODEL, DeepSeekClient
@@ -53,7 +53,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    load_dotenv(ROOT / ".env")
+    load_project_env(ROOT)
     args = _parser().parse_args()
     if not 10 <= args.interval_seconds <= 30:
         raise ValueError("interval-seconds must be in [10, 30]")

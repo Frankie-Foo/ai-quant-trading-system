@@ -18,8 +18,12 @@ Two validated plugin skills are active:
 - `monthly-evolution`: evidence clustering and draft-only research proposals.
 
 The postmarket systemd job invokes structured PDCA after immutable Episode creation and
-the deterministic program gate. The monthly timer runs only on the first XNYS session.
-Provider calls and every MCP tool request/result are retained in the audit fact store.
+the deterministic program gate. Complete selection outcomes are also materialized into the
+ticker-free `lessons` ledger even when the LLM program gate is closed; after-cutoff and
+incomplete-evidence rows remain only in the immutable postmortem snapshot. The monthly timer
+runs only on the first XNYS session and requires both enough observations and independent
+trading sessions before it can ask for a draft proposal. Provider calls and every MCP
+tool request/result are retained in the audit fact store.
 
 ## Safety boundary
 
@@ -32,6 +36,8 @@ Provider calls and every MCP tool request/result are retained in the audit fact 
   the program resolves back to frozen provenance-bearing values.
 - Monthly proposals are constrained to `draft` and `production_eligible=false` in Pydantic,
   service logic, SQLite checks, and PostgreSQL checks.
+- Selection lessons are evidence, not automatic parameter changes. Monthly proposals remain
+  draft-only and require human review plus sandbox validation.
 
 ## Deliberately unavailable today
 

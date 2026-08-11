@@ -52,6 +52,7 @@ class BrokerOrder(FrozenModel):
     qty: int = Field(gt=0)
     filled_qty: str
     status: str
+    filled_avg_price: str | None = None
 
     @field_validator("symbol")
     @classmethod
@@ -82,15 +83,11 @@ class PaperOrderRequest(BaseModel):
             "type": self.order_type,
             "time_in_force": self.time_in_force,
             "extended_hours": self.extended_hours,
-            "order_class": (
-                "bracket" if self.take_profit_price is not None else "oto"
-            ),
+            "order_class": ("bracket" if self.take_profit_price is not None else "oto"),
             "stop_loss": {"stop_price": self.stop_loss_price},
         }
         if self.take_profit_price is not None:
-            payload["take_profit"] = {
-                "limit_price": self.take_profit_price
-            }
+            payload["take_profit"] = {"limit_price": self.take_profit_price}
         if self.order_type == "limit":
             if self.limit_price is None:
                 raise ValueError("limit order requires limit_price")
@@ -180,6 +177,8 @@ class PaperExtendedLimitRequest(BaseModel):
 
 
 class CloudPaperBroker:
+    broker_identity = "cloud.paper"
+
     def __init__(
         self,
         *,
@@ -233,9 +232,7 @@ class CloudPaperBroker:
     def cancel_order(self, order_id: str) -> bool:
         if not self.writes_enabled:
             raise BrokerWritesDisabledError("paper broker writes are disabled")
-        payload = self._request(
-            "DELETE", f"/{PLATFORM_API_VERSION}/paper/orders/cancel/{order_id}"
-        )
+        payload = self._request("DELETE", f"/{PLATFORM_API_VERSION}/paper/orders/cancel/{order_id}")
         return payload.get("cancelled") is True
 
     def submit_order_idempotent(self, request: PaperOrderRequest) -> BrokerOrder:
@@ -248,9 +245,7 @@ class CloudPaperBroker:
         )
         return BrokerOrder.model_validate(payload.get("order"))
 
-    def submit_close_order_idempotent(
-        self, request: PaperCloseRequest
-    ) -> BrokerOrder:
+    def submit_close_order_idempotent(self, request: PaperCloseRequest) -> BrokerOrder:
         if not self.writes_enabled:
             raise BrokerWritesDisabledError("paper broker writes are disabled")
         payload = self._request(
@@ -276,9 +271,7 @@ class CloudPaperBroker:
         )
         return BrokerOrder.model_validate(payload.get("order"))
 
-    def submit_extended_limit_idempotent(
-        self, request: PaperExtendedLimitRequest
-    ) -> BrokerOrder:
+    def submit_extended_limit_idempotent(self, request: PaperExtendedLimitRequest) -> BrokerOrder:
         if not self.writes_enabled:
             raise BrokerWritesDisabledError("paper broker writes are disabled")
         payload = self._request(
@@ -319,6 +312,7 @@ class CloudPaperBroker:
 class DirectAlpacaPaperBroker:
     """Temporary direct adapter pinned to Alpaca's Paper-only trading host."""
 
+    broker_identity = "alpaca.paper.direct"
     PAPER_BASE_URL = "https://paper-api.alpaca.markets"
 
     def __init__(
@@ -500,13 +494,9 @@ class DirectAlpacaPaperBroker:
                 json=json_body,
             )
         except (httpx.HTTPError, OSError) as exc:
-            raise BrokerError(
-                f"Alpaca Paper request failed: {type(exc).__name__}"
-            ) from exc
+            raise BrokerError(f"Alpaca Paper request failed: {type(exc).__name__}") from exc
         if response.status_code not in allowed_statuses:
-            raise BrokerError(
-                f"Alpaca Paper request failed with HTTP {response.status_code}"
-            )
+            raise BrokerError(f"Alpaca Paper request failed with HTTP {response.status_code}")
         return response
 
     @staticmethod

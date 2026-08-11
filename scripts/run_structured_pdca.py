@@ -25,6 +25,7 @@ from data_plane.contracts import DatasetSnapshot
 from research.pdca_agents import (
     lesson_review_prompt,
     materialize_lessons,
+    materialize_selection_memory,
     parse_lesson_review,
 )
 from research.program_review import ProgramReview
@@ -78,6 +79,37 @@ def _data(envelope: dict[str, object]) -> list[dict[str, object]]:
     return [cast(dict[str, object], row) for row in value if isinstance(row, dict)]
 
 
+def _selection_memory_package(
+    service: AgentGatewayService, trade_date: date
+) -> tuple[list[dict[str, object]], dict[str, Fact], tuple[str, ...]]:
+    opportunities = service.postgres_query(
+        agent_name="pdca",
+        query=StoreQuery(
+            entity=QueryEntity.INTRADAY_SELECTION_POSTMORTEMS,
+            trade_date=trade_date,
+            limit=200,
+        ),
+    )
+    if opportunities.get("availability") != "available":
+        return [], {}, ()
+    rows = _data(opportunities)
+    metric_index: dict[str, Fact] = {}
+    for row in rows:
+        case_id = row.get("case_id")
+        facts = row.get("facts")
+        if not isinstance(case_id, str) or not isinstance(facts, list):
+            raise ValueError("anonymous opportunity row is malformed")
+        for raw_fact in facts:
+            fact = Fact.model_validate(raw_fact)
+            reference = f"opportunity:{case_id}:{fact.name}"
+            metric_index[reference] = fact
+    return (
+        rows,
+        metric_index,
+        tuple(str(value) for value in cast(list[object], opportunities.get("snapshot_ids", []))),
+    )
+
+
 def _run_discipline(service: AgentGatewayService, trade_date: date) -> tuple[str, tuple[str, ...]]:
     entities = (
         QueryEntity.TRADE_PLANS,
@@ -127,18 +159,8 @@ def _pdca_fact_package(
     if episode.get("availability") != "available":
         raise ValueError("accepted trading episode is unavailable")
     rows = _data(episode)
-    opportunities = service.postgres_query(
-        agent_name="pdca",
-        query=StoreQuery(
-            entity=QueryEntity.INTRADAY_SELECTION_POSTMORTEMS,
-            trade_date=trade_date,
-            limit=200,
-        ),
-    )
-    opportunity_rows = (
-        _data(opportunities)
-        if opportunities.get("availability") == "available"
-        else []
+    opportunity_rows, opportunity_metrics, opportunity_snapshot_ids = (
+        _selection_memory_package(service, trade_date)
     )
     metric_index: dict[str, Fact] = {}
     for row in rows:
@@ -152,6 +174,7 @@ def _pdca_fact_package(
             metric_index[reference] = fact
             if isinstance(raw_fact, dict):
                 raw_fact["fact_ref"] = reference
+    metric_index.update(opportunity_metrics)
     for row in opportunity_rows:
         case_id = row.get("case_id")
         facts = row.get("facts")
@@ -159,15 +182,16 @@ def _pdca_fact_package(
             raise ValueError("anonymous opportunity row is malformed")
         for raw_fact in facts:
             fact = Fact.model_validate(raw_fact)
-            reference = f"opportunity:{case_id}:{fact.name}"
-            metric_index[reference] = fact
             if isinstance(raw_fact, dict):
-                raw_fact["fact_ref"] = reference
+                raw_fact["fact_ref"] = f"opportunity:{case_id}:{fact.name}"
     snapshot_ids = tuple(
         dict.fromkeys(
             str(value)
-            for envelope in (episode, opportunities)
-            for value in cast(list[object], envelope.get("snapshot_ids", []))
+            for values in (
+                cast(list[object], episode.get("snapshot_ids", [])),
+                opportunity_snapshot_ids,
+            )
+            for value in values
         )
     )
     package = {
@@ -175,7 +199,7 @@ def _pdca_fact_package(
         "snapshot_ids": snapshot_ids,
         "anonymous_cases": rows,
         "missed_opportunities": opportunity_rows,
-        "opportunity_availability": opportunities.get("availability", "N/A"),
+        "opportunity_availability": "available" if opportunity_snapshot_ids else "N/A",
     }
     return (
         json.dumps(package, ensure_ascii=False, sort_keys=True, default=str),
@@ -204,6 +228,24 @@ def run(argv: list[str] | None = None) -> int:
         "orders_submitted": 0,
         "production_changes": 0,
     }
+    opportunity_rows, opportunity_metrics, opportunity_snapshot_ids = (
+        _selection_memory_package(service, args.trade_date)
+    )
+    selection_lessons = materialize_selection_memory(
+        opportunity_rows,
+        trade_date=args.trade_date,
+        metric_index=opportunity_metrics,
+        source_record_ids=opportunity_snapshot_ids,
+    )
+    selection_lesson_ids: list[str] = []
+    for lesson in selection_lessons:
+        stored = service.lessons_write(agent_name="pdca", lesson=lesson)
+        selection_lesson_ids.append(str(cast(dict[str, object], stored["data"])["record_id"]))
+    result["lesson_ids"] = selection_lesson_ids
+    result["selection_lesson_ids"] = selection_lesson_ids
+    result["selection_memory_status"] = (
+        "written" if selection_lesson_ids else "no_eligible_complete_observations"
+    )
     if args.llm_mode is LlmMode.OFF:
         result["status"] = "llm_off"
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -250,7 +292,7 @@ def run(argv: list[str] | None = None) -> int:
             stored = service.lessons_write(agent_name="pdca", lesson=lesson)
             lesson_ids.append(str(cast(dict[str, object], stored["data"])["record_id"]))
         result["status"] = "complete"
-        result["lesson_ids"] = lesson_ids
+        result["lesson_ids"] = [*selection_lesson_ids, *lesson_ids]
     except Exception as exc:
         service.store.record_audit(
             actor=AgentRole.PDCA,

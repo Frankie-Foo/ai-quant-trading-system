@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 import polars as pl
-from dotenv import load_dotenv
 
 from data_plane.calendar import CALENDAR_SCHEMA_VERSION, build_xnys_schedule
 from data_plane.contracts import DataQualityCheck, QualitySeverity
@@ -17,6 +16,7 @@ from data_plane.daily import DAILY_SCHEMA_VERSION, audit_daily_bars
 from data_plane.providers import alpaca, huggingface, massive, reference, yahoo
 from data_plane.quality import BAR_SCHEMA_VERSION, audit_minute_bars
 from data_plane.storage import persist_snapshot
+from operations.local_env import load_project_env
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_ROOT = ROOT / "data"
@@ -310,7 +310,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    load_dotenv(ROOT / ".env")
+    load_project_env(ROOT)
     args = build_parser().parse_args(argv)
     data_root: Path = args.data_root
 

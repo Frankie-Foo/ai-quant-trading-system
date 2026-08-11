@@ -1172,3 +1172,73 @@ Paper key aliases, remain in environment variables, and are never logged.
 - Acceptance: full test suite 570 passed in 34.70 seconds; 51 targeted provider,
   health, deployment, and notification tests passed; Ruff and strict mypy clean
   on the changed production modules. No broker order was submitted.
+
+## M42 Paper fill confirmation and Feishu projection integrity - 2026-08-11
+
+Status: closed the gap where a Feishu row could show a simulated fill without
+broker fill facts or a matching Paper position. Broker reconciliation now
+requires the reported filled quantity to equal the requested quantity for a
+`filled` status; filled and partial results also require a positive average fill
+price and a unique long-position readback before they can be projected as a
+holding. Replayed active orders are re-read from the broker instead of trusting
+the local terminal state.
+
+- Trade projections now include fill price, notional, position confirmation, and
+  broker identity. Submitted autonomous actions remain pending rather than being
+  mislabeled as failed or filled.
+- Historical Feishu rows are preserved as immutable audit evidence; they are not
+  rewritten. Future rows fail closed when the broker/account cannot be verified.
+- Acceptance: full test suite 578 passed; 27 targeted execution/projection tests
+  passed; Ruff and formatting clean on changed modules.
+
+## M43 Read-only `复盘` role and 2026-08-10 market review - 2026-08-11
+
+Status: made the project-level post-close role visible as `复盘`. Its default
+prompt now compares selected candidates, missed movers, and sector context while
+preserving LIVE/REPLAY/EXEC evidence boundaries. It remains read-only: no order,
+production mutation, hard-gate relaxation, or production promotion is allowed.
+
+- Independent Alpaca SIP replay covered 1,362 point-in-time eligible common-stock
+  symbols; 1,362 returned bars and 1,259 met the review dollar-volume floor.
+  Top close-to-close movers included ABCL +33.77%, NESR +23.33%, FSLY +20.78%,
+  BSP +16.09%, and CLMT +15.37%.
+- Sector cross-check: XOP +5.70%, OIH +5.78%, XLE +4.48%; IGV +1.99% and XLV
+  +1.78%; SPY -0.04%, QQQ -0.30%, SMH -2.25%, and XLK -0.89%.
+- The 184-row selection-gates snapshot had 5 passes and 179 rejects; 179 rows
+  lacked market cap, 72 lacked RVOL, 85 had observed RVOL at or below 3, and
+  155 had a non-confirmed premarket price condition. These gaps make many
+  missed-mover attributions `incomplete_evidence`, not proven intentional gates.
+- ABCL's live evidence was 105.56 RVOL, +17.49% premarket return, price above
+  VWAP, directional-volume confirmation, three event records, and two sources.
+  Its premarket reference 8.80 to regular close 9.27 replayed at +5.34%; no
+  Paper order existed.
+
+## M44 Selection-first review presentation - 2026-08-11
+
+Status: narrowed the user-facing `复盘` role and the comprehensive HTML review
+to selection diagnosis. The primary view now shows correct picks, incorrect
+signals, missed themes, missed movers, and next selection research. Infrastructure,
+execution, and data-pipeline findings remain internal unless they change the
+selection attribution.
+
+- Updated `plugins/quant-agent/skills/intraday-selection-postmortem/agents/openai.yaml`
+  with the selection-first prompt and display contract.
+- Updated `AI量化综合选股因果复盘-2026-08-10.html` to replace system/flight-wheel
+  detail with four selection problems: volume-price divergence, premarket
+  reversal, low elasticity, and missing sector-relative-strength ranking.
+- Acceptance: HTML structure check passed (doctype, closing tag, four timeline
+  events); role YAML parsed and asserted as `复盘`; `git diff --check` clean.
+
+## M45 Governed selection memory and independent-session evolution gate - 2026-08-11
+
+Status: connected the immutable selection postmortem to the existing PDCA `lessons`
+ledger. Complete selected, intentional-gate, data/classifier-gap, and factor-gap
+outcomes now become ticker-free, provenance-bound learning records even when the
+LLM program gate is closed. Late catalysts and incomplete evidence remain excluded
+from lessons and stay in the postmortem snapshot.
+
+- Monthly evolution now requires both the minimum observation count and the minimum
+  independent-session count, preventing one session's many movers from becoming a
+  false recurring pattern. Proposals remain draft-only and production-ineligible.
+- Acceptance: 33 targeted tests passed; full suite 580 passed with an isolated
+  `ibapi` test dependency; Ruff, compileall, and `git diff --check` clean.

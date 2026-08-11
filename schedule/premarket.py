@@ -12,15 +12,18 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import polars as pl
+
 from data_plane.calendar import build_xnys_schedule
 from kernel.config import load_config
+from operations.local_env import load_project_env, project_data_root
 from schedule.runtime import JsonEventLogger, LockUnavailableError, ProcessLock
 from schedule.state import JobLedger, JobStatus
 
 ROOT = Path(__file__).resolve().parents[1]
 BEIJING = ZoneInfo("Asia/Shanghai")
 LOCK_JOB = "premarket_catalyst_lock"
-LOCK_VERSION = "premarket_catalyst_lock.v4"
+LOCK_VERSION = "premarket_catalyst_lock.v5"
 SELECTION_JOB = "premarket_final_selection"
 SELECTION_VERSION = "premarket_final_selection.v4"
 SHADOW_JOB = "premarket_multisignal_shadow"
@@ -110,6 +113,21 @@ def _previous_session(trade_date: date) -> date:
     return value
 
 
+def _has_reference_snapshot(data_root: Path, asof_date: date) -> bool:
+    """Avoid re-downloading an immutable point-in-time reference snapshot."""
+
+    for path in (data_root / "accepted").glob(
+        "massive.reference_tickers.cs-*/data.parquet"
+    ):
+        try:
+            value = pl.read_parquet(path, columns=["asof_date"])["asof_date"].max()
+        except (OSError, pl.exceptions.PolarsError):
+            continue
+        if value == asof_date:
+            return True
+    return False
+
+
 def _lock_stage(trade_date: date, data_root: Path, logger: JsonEventLogger) -> tuple[str, ...]:
     previous = _previous_session(trade_date)
     artifacts: list[str] = []
@@ -129,20 +147,26 @@ def _lock_stage(trade_date: date, data_root: Path, logger: JsonEventLogger) -> t
             logger=logger,
         )
     )
-    artifacts.extend(
-        _run(
-            [
-                "-m",
-                "data_plane.cli",
-                "--data-root",
-                str(data_root),
-                "massive-reference",
-                "--date",
-                previous.isoformat(),
-            ],
-            logger=logger,
+    if not _has_reference_snapshot(data_root, previous):
+        artifacts.extend(
+            _run(
+                [
+                    "-m",
+                    "data_plane.cli",
+                    "--data-root",
+                    str(data_root),
+                    "massive-reference",
+                    "--date",
+                    previous.isoformat(),
+                ],
+                logger=logger,
+            )
         )
-    )
+    else:
+        logger.emit(
+            "reference_snapshot_reused",
+            asof_date=previous.isoformat(),
+        )
     for module in (
         "scripts.build_daily_universe",
         "scripts.build_catalyst_snapshot",
@@ -208,13 +232,14 @@ def _shadow_stage(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trade-date", type=_parse_date)
-    parser.add_argument("--data-root", type=Path, default=ROOT / "data")
+    parser.add_argument("--data-root", type=Path, default=project_data_root(ROOT))
     parser.add_argument("--state-db", type=Path, default=ROOT / "runs/jobs.sqlite3")
     parser.add_argument("--lock-file", type=Path, default=ROOT / "runs/premarket.lock")
     return parser
 
 
 def run(argv: list[str] | None = None, *, now_utc: datetime | None = None) -> int:
+    load_project_env(ROOT)
     args = _parser().parse_args(argv)
     logger = JsonEventLogger(service="premarket")
     try:

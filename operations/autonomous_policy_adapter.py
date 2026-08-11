@@ -6,6 +6,7 @@ import json
 import math
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_FLOOR, Decimal, InvalidOperation
@@ -143,16 +144,14 @@ class AutonomousPolicySnapshotFactory:
             value=facts.order_flow_confirmation_score,
             asof_utc=observed_at,
             provenance=(
-                facts.order_flow_provenance
-                or "kernel.order_flow_confirmation.unavailable"
+                facts.order_flow_provenance or "kernel.order_flow_confirmation.unavailable"
             ),
         )
         execution = DecisionMetric(
             value=_execution_score(plan, facts) if data_healthy else None,
             asof_utc=facts.quote_ts_utc,
             provenance=(
-                f"{facts.quote_provenance or 'quote.provenance.unavailable'}"
-                "|spread_quality.v1"
+                f"{facts.quote_provenance or 'quote.provenance.unavailable'}|spread_quality.v1"
             ),
         )
         policy = PolicySnapshot(
@@ -166,22 +165,14 @@ class AutonomousPolicySnapshotFactory:
             right_tail=evidence.right_tail,
             technical_structure_valid=technical_structure_valid,
             negative_news_clear=(
-                current_envelope.negative_news_clear
-                if current_envelope is not None
-                else None
+                current_envelope.negative_news_clear if current_envelope is not None else None
             ),
             material_negative=(
-                current_envelope.material_negative
-                if current_envelope is not None
-                else False
+                current_envelope.material_negative if current_envelope is not None else False
             ),
             data_healthy=data_healthy,
-            agents_healthy=bool(
-                current_envelope is not None and current_envelope.agents_healthy
-            ),
-            push_healthy=bool(
-                current_envelope is not None and current_envelope.push_healthy
-            ),
+            agents_healthy=bool(current_envelope is not None and current_envelope.agents_healthy),
+            push_healthy=bool(current_envelope is not None and current_envelope.push_healthy),
             has_position=position_qty > 0,
             position_fraction=position_fraction,
             average_entry_price=average_entry,
@@ -198,12 +189,8 @@ class AutonomousPolicySnapshotFactory:
             bid=Decimal(str(facts.bid)),
             ask=Decimal(str(facts.ask)),
             quote_asof_utc=facts.quote_ts_utc,
-            quote_provenance=(
-                facts.quote_provenance or "quote.provenance.unavailable"
-            ),
-            below_anchored_vwap_5m_bars=(
-                facts.below_anchored_vwap_5m_bars
-            ),
+            quote_provenance=(facts.quote_provenance or "quote.provenance.unavailable"),
+            below_anchored_vwap_5m_bars=(facts.below_anchored_vwap_5m_bars),
             failed_vwap_reclaim=facts.failed_vwap_reclaim,
             chandelier_stop_hit=facts.chandelier_stop_hit,
             tail_hard_breakdown=facts.tail_hard_breakdown,
@@ -256,7 +243,14 @@ def write_runtime_safety_envelope(
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        for attempt in range(5):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.1)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -291,14 +285,10 @@ def load_runtime_safety_envelope(path: Path) -> RuntimeSafetyEnvelope:
     if values["schema_version"] != SCHEMA_VERSION:
         raise ValueError("unsupported runtime safety envelope schema")
     source_ids = values["source_snapshot_ids"]
-    if not isinstance(source_ids, list) or not all(
-        isinstance(item, str) for item in source_ids
-    ):
+    if not isinstance(source_ids, list) or not all(isinstance(item, str) for item in source_ids):
         raise ValueError("runtime safety source_snapshot_ids must be strings")
     negative_news_clear = values["negative_news_clear"]
-    if negative_news_clear is not None and not isinstance(
-        negative_news_clear, bool
-    ):
+    if negative_news_clear is not None and not isinstance(negative_news_clear, bool):
         raise ValueError("negative_news_clear must be boolean or null")
     for name in ("material_negative", "agents_healthy", "push_healthy"):
         if not isinstance(values[name], bool):
@@ -362,12 +352,8 @@ def _full_position_quantity(
         return 0
     risk_budget = equity * plan.full_risk_fraction
     notional_budget = equity * plan.max_notional_fraction
-    by_risk = int(
-        (risk_budget / risk_per_share).to_integral_value(rounding=ROUND_FLOOR)
-    )
-    by_notional = int(
-        (notional_budget / entry_price).to_integral_value(rounding=ROUND_FLOOR)
-    )
+    by_risk = int((risk_budget / risk_per_share).to_integral_value(rounding=ROUND_FLOOR))
+    by_notional = int((notional_budget / entry_price).to_integral_value(rounding=ROUND_FLOOR))
     return min(by_risk, by_notional)
 
 

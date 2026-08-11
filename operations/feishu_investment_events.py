@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from typing import Protocol
 
@@ -35,8 +36,7 @@ def record_locked_selection(
     snapshot = selection.snapshot
     for candidate in selection.candidates:
         event_id = (
-            f"selection:{selection.trade_date.isoformat()}:"
-            f"{snapshot.dataset_id}:{candidate.symbol}"
+            f"selection:{selection.trade_date.isoformat()}:{snapshot.dataset_id}:{candidate.symbol}"
         )
         fields = {
             "运行ID": event_id,
@@ -48,10 +48,7 @@ def record_locked_selection(
             "模拟动作": "候选",
             "状态": "新信号",
             "触发理由": _selection_reason(candidate),
-            "下一动作": (
-                "启动盯盘；实时条件与风控门通过后自动提交模拟盘买入；"
-                "条件失效则放弃"
-            ),
+            "下一动作": ("启动盯盘；实时条件与风控门通过后自动提交模拟盘买入；条件失效则放弃"),
             "执行摘要": (
                 f"排名={candidate.selection_rank}；"
                 f"参考价={candidate.price:.2f}；"
@@ -136,12 +133,31 @@ def record_simulated_trade(
     message: str,
     requested_shares: int | None = None,
     filled_shares: int | None = None,
+    filled_avg_price: str | None = None,
+    position_confirmed: bool = False,
+    broker_identity: str = "unknown",
 ) -> str:
     """Record a simulated order/state transition, not every market tick."""
 
     _require_utc(observed_at_utc)
     if not event_id.strip() or not symbol.strip() or not plan_id.strip():
         raise ValueError("simulated trade identity fields are required")
+    if filled_shares is not None and filled_shares < 0:
+        raise ValueError("filled shares cannot be negative")
+    if filled_shares and not position_confirmed:
+        raise ValueError("filled shares require position confirmation")
+    if filled_shares and (filled_avg_price is None or not filled_avg_price.strip()):
+        raise ValueError("filled shares require average fill price confirmation")
+    if filled_avg_price is not None:
+        try:
+            price = Decimal(filled_avg_price)
+        except InvalidOperation as exc:
+            raise ValueError("average fill price must be numeric") from exc
+        if not price.is_finite() or price <= 0:
+            raise ValueError("average fill price must be positive and finite")
+    clean_broker = broker_identity.strip()
+    if not clean_broker:
+        raise ValueError("broker identity is required")
     fields: dict[str, object] = {
         "运行ID": event_id.strip(),
         "成交时间": observed_at_utc,
@@ -154,9 +170,13 @@ def record_simulated_trade(
         "持仓状态": "持仓中" if filled_shares else "取消",
         "触发来源": f"{operation.strip()}|{plan_id.strip()}",
         "下一动作": "继续盯盘；订单完成后进入复盘" if filled_shares else "等待修复或重试",
-        "数据源状态": source.strip(),
+        "数据源状态": f"{source.strip()}|broker={clean_broker}",
         "执行摘要": message,
     }
+    if filled_avg_price is not None and filled_shares:
+        price = Decimal(filled_avg_price)
+        fields["成交价格"] = filled_avg_price
+        fields["成交金额"] = format(price * filled_shares, "f")
     clean_orders = tuple(item.strip() for item in order_ids if item.strip())
     if clean_orders:
         fields["执行摘要"] = f"{fields['执行摘要']}；订单={','.join(clean_orders)}"
@@ -171,6 +191,7 @@ def record_autonomous_trade(
     observed_at_utc: datetime,
     action_name: str,
     message: str,
+    broker_identity: str = "unknown",
 ) -> str:
     """Project an autonomous session result into the simulated-trade table."""
 
@@ -192,6 +213,7 @@ def record_autonomous_trade(
         reason=";".join(result.reasons) or "N/A",
         source=f"{plan.provenance}|{result.provenance}",
         message=message,
+        broker_identity=broker_identity,
     )
 
 
@@ -231,6 +253,9 @@ def record_paper_execution(
         ),
         requested_shares=lifecycle.requested_shares,
         filled_shares=lifecycle.filled_shares,
+        filled_avg_price=result.filled_avg_price,
+        position_confirmed=result.position_confirmed,
+        broker_identity=result.broker_identity,
     )
 
 
@@ -251,10 +276,7 @@ def record_postmarket_review(
     clean_evidence = tuple(item.strip() for item in evidence_ids if item.strip())
     if not clean_evidence:
         raise ValueError("postmarket review evidence IDs are required")
-    event_id = (
-        f"review:{trade_date.isoformat()}:{program_review_id}:"
-        f"{selection_review_id}"
-    )
+    event_id = f"review:{trade_date.isoformat()}:{program_review_id}:{selection_review_id}"
     fields = {
         "运行ID": event_id,
         "复盘时间": observed_at_utc,
@@ -298,9 +320,7 @@ def _require_utc(value: datetime) -> None:
 def _selection_reason(candidate: LockedCandidate) -> str:
     categories = ",".join(candidate.catalyst_categories) or "N/A"
     above_vwap = (
-        candidate.premarket_above_vwap
-        if candidate.premarket_above_vwap is not None
-        else "N/A"
+        candidate.premarket_above_vwap if candidate.premarket_above_vwap is not None else "N/A"
     )
     return (
         f"排名={candidate.selection_rank};催化剂={categories};"
@@ -357,6 +377,15 @@ def _trade_order_status(value: str) -> str:
     normalized = value.strip().lower()
     if normalized == "filled":
         return "模拟成交"
+    if normalized in {
+        "entry_submitted",
+        "reduce_submitted",
+        "exit_submitted",
+        "stop_exit_submitted",
+        "protection_submitted",
+        "hard_loss_flatten",
+    }:
+        return "待执行"
     if normalized in {"rejected", "cancelled"}:
         return "拒绝"
     if normalized in {

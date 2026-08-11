@@ -222,9 +222,7 @@ def test_failed_delivery_immediately_invokes_runtime_fail_closed(
         observed_at_utc=NOW,
         notifier=AutonomousPaperNotifier(
             push=FailingPush(),
-            ledger=AutonomousNotificationLedger(
-                tmp_path / "notifications.sqlite3"
-            ),
+            ledger=AutonomousNotificationLedger(tmp_path / "notifications.sqlite3"),
         ),
         push_health_path=tmp_path / "push-health.json",
         fail_closed=fail_closed,
@@ -234,9 +232,7 @@ def test_failed_delivery_immediately_invokes_runtime_fail_closed(
     assert delivery.failure_reason == "notification_push_failed"
     assert delivery.fail_closed_result is not None
     assert fail_closed.reasons == ["notification_push_failed"]
-    assert load_push_health_evidence(
-        tmp_path / "push-health.json"
-    ).healthy is False
+    assert load_push_health_evidence(tmp_path / "push-health.json").healthy is False
 
 
 def test_inflight_delivery_fails_closed_without_a_duplicate_push(tmp_path: Path) -> None:
@@ -258,3 +254,30 @@ def test_inflight_delivery_fails_closed_without_a_duplicate_push(tmp_path: Path)
     assert delivery.failure_reason == "notification_delivery_in_flight"
     assert push.messages == []
     assert fail_closed.reasons == ["notification_delivery_in_flight"]
+
+
+def test_non_order_state_does_not_push_or_create_notification_audit(
+    tmp_path: Path,
+) -> None:
+    push = FakePush()
+    ledger = AutonomousNotificationLedger(tmp_path / "notifications.sqlite3")
+    result = PaperSessionResult(
+        action=SessionAction.DATA_BLOCKED,
+        decision=None,
+        daily_return=Decimal("0"),
+        day_locked=False,
+        new_entries_allowed=False,
+        cancelled_order_ids=(),
+        flatten_order_ids=(),
+        reasons=("market_data_unhealthy",),
+        provenance="test.data-blocked",
+    )
+
+    notified = AutonomousPaperNotifier(
+        push=push,
+        ledger=ledger,
+    ).notify(_plan(), result, observed_at_utc=NOW)
+
+    assert notified is False
+    assert push.messages == []
+    assert ledger.list_records() == ()

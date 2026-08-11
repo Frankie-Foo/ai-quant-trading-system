@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import operations.autonomous_policy_adapter as policy_adapter
 from execution.alpaca_paper import PaperPosition
 from execution.autonomous_paper_session import AutonomousPaperPlan
 from kernel.adaptive_trade_plan import RealtimePlanFacts
@@ -117,9 +118,7 @@ def test_fresh_safety_envelope_builds_auditable_entry_snapshot() -> None:
 
     assert snapshot.policy.catalyst.value == 88.0
     assert snapshot.policy.order_flow.value == 81.0
-    assert snapshot.policy.order_flow.provenance.endswith(
-        "nbbo_top_of_book.v1"
-    )
+    assert snapshot.policy.order_flow.provenance.endswith("nbbo_top_of_book.v1")
     assert snapshot.policy.execution.value is not None
     assert snapshot.policy.execution.value > 90.0
     assert snapshot.policy.technical_structure_valid is True
@@ -219,6 +218,30 @@ def test_runtime_safety_envelope_round_trips_through_strict_atomic_json(
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="unexpected fields"):
         load_runtime_safety_envelope(path)
+
+
+def test_runtime_safety_envelope_retries_transient_windows_replace_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "runtime-safety.json"
+    real_replace = policy_adapter.os.replace
+    attempts = 0
+
+    def flaky_replace(source: str | Path, destination: str | Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PermissionError("transient Windows file sharing violation")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(policy_adapter.os, "replace", flaky_replace)
+    monkeypatch.setattr(policy_adapter.time, "sleep", lambda _: None)
+
+    write_runtime_safety_envelope(path, _envelope())
+
+    assert attempts == 2
+    assert load_runtime_safety_envelope(path) == _envelope()
 
 
 def test_runtime_safety_envelope_rejects_future_generation_time() -> None:
