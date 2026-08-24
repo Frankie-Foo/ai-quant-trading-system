@@ -137,3 +137,37 @@ def test_position_quantity_rejects_stop_above_two_percent() -> None:
             all_in_stop_pct=0.0201,
             buying_power=100_000,
         )
+
+
+def test_aggregate_risk_blocks_new_entries_at_every_confirmed_limit() -> None:
+    POLICY.validate_entry_risk(
+        proposed_risk_fraction=0.003,
+        symbol_open_risk=0.0,
+        sector_open_risk=0.0,
+        portfolio_open_risk=0.0,
+        daily_return=0.0,
+        sector_main_has_profit=False,
+    )
+    blocked = (
+        {"symbol_open_risk": 0.003},
+        {"sector_open_risk": 0.005, "sector_main_has_profit": True},
+        {"portfolio_open_risk": 0.013},
+        {"daily_return": -0.015},
+        {"sector_open_risk": 0.001, "sector_main_has_profit": False},
+    )
+    defaults: dict[str, object] = {
+        "proposed_risk_fraction": 0.003,
+        "symbol_open_risk": 0.0,
+        "sector_open_risk": 0.0,
+        "portfolio_open_risk": 0.0,
+        "daily_return": 0.0,
+        "sector_main_has_profit": False,
+    }
+    for overrides in blocked:
+        with pytest.raises(RuntimeError):
+            POLICY.validate_entry_risk(**(defaults | overrides))  # type: ignore[arg-type]
+
+
+def test_two_percent_daily_loss_requires_immediate_flatten() -> None:
+    assert not POLICY.must_flatten_for_daily_return(-0.0199)
+    assert POLICY.must_flatten_for_daily_return(-0.02)

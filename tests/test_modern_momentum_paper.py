@@ -11,6 +11,7 @@ from scripts.monitor_modern_momentum_paper import (
     pullback_reentry,
     reentry_exit_reason,
     risk_fraction,
+    session_control_times,
 )
 
 
@@ -23,6 +24,18 @@ def test_modern_paper_source_never_submits_an_unprotected_entry() -> None:
     assert "validate_arming" in source
     assert "PaperOrderRequest(" not in source
     assert "submit_stop_order_idempotent" not in source
+    assert "PaperStateStore" in source
+
+
+def test_session_controls_stop_entries_and_force_flatten_before_close() -> None:
+    opened = datetime(2026, 8, 24, 13, 30, tzinfo=UTC)
+    closed = datetime(2026, 8, 24, 20, 0, tzinfo=UTC)
+
+    entry_cutoff, cancel_at, flatten_at = session_control_times(opened, closed)
+
+    assert entry_cutoff == datetime(2026, 8, 24, 19, 0, tzinfo=UTC)
+    assert cancel_at == datetime(2026, 8, 24, 19, 45, tzinfo=UTC)
+    assert flatten_at == datetime(2026, 8, 24, 19, 50, tzinfo=UTC)
 
 
 def test_paper_identity_and_position_size_are_bounded() -> None:

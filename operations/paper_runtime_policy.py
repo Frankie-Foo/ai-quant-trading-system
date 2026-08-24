@@ -121,6 +121,38 @@ class PaperRuntimePolicy:
             raise ValueError("available Paper risk budget cannot fund one share")
         return quantity
 
+    def validate_entry_risk(
+        self,
+        *,
+        proposed_risk_fraction: float,
+        symbol_open_risk: float,
+        sector_open_risk: float,
+        portfolio_open_risk: float,
+        daily_return: float,
+        sector_main_has_profit: bool,
+    ) -> None:
+        values = (
+            proposed_risk_fraction,
+            symbol_open_risk,
+            sector_open_risk,
+            portfolio_open_risk,
+        )
+        if proposed_risk_fraction <= 0 or any(value < 0 for value in values):
+            raise ValueError("Paper risk fractions must be non-negative")
+        if daily_return <= -self.stop_new_entries_fraction:
+            raise RuntimeError("daily loss stops new Paper entries")
+        if symbol_open_risk + proposed_risk_fraction > self.symbol_risk_fraction:
+            raise RuntimeError("symbol Paper risk limit would be exceeded")
+        if sector_open_risk > 0 and not sector_main_has_profit:
+            raise RuntimeError("same-sector backup requires profit in the main symbol")
+        if sector_open_risk + proposed_risk_fraction > self.sector_risk_fraction:
+            raise RuntimeError("sector Paper risk limit would be exceeded")
+        if portfolio_open_risk + proposed_risk_fraction > self.portfolio_risk_fraction:
+            raise RuntimeError("portfolio Paper risk limit would be exceeded")
+
+    def must_flatten_for_daily_return(self, daily_return: float) -> bool:
+        return daily_return <= -self.flatten_account_fraction
+
     @staticmethod
     def _clock(now_et: datetime) -> time:
         if now_et.tzinfo is None or now_et.utcoffset() is None:
