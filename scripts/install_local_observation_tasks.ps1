@@ -39,17 +39,22 @@ function Register-ObservationTask {
         -Force | Out-Null
 }
 
-Register-ObservationTask `
-    -TaskName "Trading System V2 - Premarket" `
-    -Runner (Join-Path $PSScriptRoot "run_premarket_tick.ps1") `
-    -IntervalMinutes 5 `
-    -ExecutionHours 12 `
-    -DailyAt "20:00" `
-    -Description "Idempotent point-in-time data refresh and locked selection."
-
-if (Get-ScheduledTask -TaskName "Trading System V2 - Paper Session" -ErrorAction SilentlyContinue) {
-    Disable-ScheduledTask -TaskName "Trading System V2 - Paper Session" | Out-Null
+$legacyTasks = @(
+    "Trading System V2 - Premarket",
+    "Trading System V2 - Paper Session"
+)
+foreach ($taskName in $legacyTasks) {
+    if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+        Disable-ScheduledTask -TaskName $taskName | Out-Null
+    }
 }
+
+Register-ObservationTask `
+    -TaskName "Trading System V2 - AI Quant Funnel" `
+    -Runner (Join-Path $PSScriptRoot "run_modern_funnel_tick.ps1") `
+    -IntervalMinutes 1 `
+    -ExecutionHours 1 `
+    -Description "Durable ET/XNYS three-stage funnel; order execution remains fail-closed."
 
 Register-ObservationTask `
     -TaskName "Trading System V2 - Postmarket Review" `

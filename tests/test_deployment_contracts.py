@@ -110,8 +110,10 @@ def test_windows_observation_tasks_cover_all_daily_phases_without_order_flags() 
     paper = (ROOT / "scripts/run_paper_tick.ps1").read_text(encoding="utf-8")
     postmarket = (ROOT / "scripts/run_postmarket_tick.ps1").read_text(encoding="utf-8")
 
-    assert "Trading System V2 - Premarket" in installer
-    assert "Trading System V2 - Paper Session" in installer
+    assert 'TaskName "Trading System V2 - AI Quant Funnel"' in installer
+    assert 'Runner (Join-Path $PSScriptRoot "run_modern_funnel_tick.ps1")' in installer
+    assert "-IntervalMinutes 1" in installer
+    assert 'Register-ObservationTask `\n    -TaskName "Trading System V2 - Paper Session"' not in installer
     assert "Trading System V2 - Postmarket Review" in installer
     assert "MultipleInstances IgnoreNew" in installer
     assert "schedule.premarket" in premarket
