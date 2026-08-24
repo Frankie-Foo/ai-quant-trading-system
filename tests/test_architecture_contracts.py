@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 from datetime import UTC, date, datetime
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -25,6 +27,48 @@ from research.registry import (
 
 NOW = datetime(2026, 7, 16, 10, 0, tzinfo=UTC)
 HASH = "a" * 64
+ROOT = Path(__file__).parents[1]
+
+
+def test_buffett_monitor_is_structurally_read_only() -> None:
+    path = ROOT / "scripts" / "monitor_trade_plan.py"
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported_roots = {
+        alias.name.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {
+        (node.module or "").split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+    }
+    assert "execution" not in imported_roots
+    assert "submit_order" not in source
+    assert "AlpacaPaperBroker" not in source
+
+
+def test_production_supervisor_has_no_legacy_paper_lane() -> None:
+    source = (ROOT / "schedule" / "supervisor.py").read_text(encoding="utf-8")
+    assert '"schedule.modern_funnel"' in source
+    assert '"schedule.paper"' not in source
+    assert '"schedule.premarket"' not in source
+
+
+def test_obsolete_single_symbol_monitors_are_removed() -> None:
+    obsolete = (
+        "monitor_alab.py",
+        "monitor_dis.py",
+        "monitor_lly.py",
+        "monitor_mrvl.py",
+        "monitor_nvda.py",
+        "monitor_on.py",
+        "monitor_direct_readonly.py",
+        "monitor_h30_plan.py",
+        "monitor_intraday_attack.py",
+    )
+    assert not any((ROOT / "scripts" / name).exists() for name in obsolete)
 
 
 def test_dataset_snapshot_requires_timezone_aware_asof() -> None:

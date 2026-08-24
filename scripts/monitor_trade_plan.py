@@ -30,7 +30,7 @@ from data_plane.providers.alpaca import (
     stock_data_policy_from_env,
 )
 from operations.feishu_base import FeishuBaseError, FeishuBaseEventClient
-from operations.feishu_investment_events import record_monitor_trigger
+from operations.feishu_investment_events import InvestmentEventPort, record_monitor_trigger
 from operations.local_env import load_project_env
 from schedule.runtime import ProcessLock
 
@@ -285,7 +285,13 @@ def load_positions(path: Path) -> tuple[Position, ...]:
             shares=int(row["shares"]),
             stop=float(row["stop"]),
         )
-        if position.entry <= 0 or position.shares <= 0 or position.stop <= 0 or position.stop >= position.entry:
+        if (
+            position.entry is None
+            or position.entry <= 0
+            or position.shares <= 0
+            or position.stop <= 0
+            or position.stop >= position.entry
+        ):
             raise ValueError("active position has invalid entry/shares/stop")
         positions.append(position)
     symbols = [position.symbol for position in positions]
@@ -385,8 +391,8 @@ def _higher_highs_and_lows(
         completed.append(
             (
                 bucket,
-                max(float(row["high"]) for row in rows),
-                min(float(row["low"]) for row in rows),
+                max(float(cast(float, row["high"])) for row in rows),
+                min(float(cast(float, row["low"])) for row in rows),
             )
         )
     if len(completed) < 3:
@@ -891,21 +897,22 @@ def _delivery_body(signal: Signal) -> str:
     """Render outgoing Chinese independently of legacy terminal-encoded text."""
 
     templates = {
-        "buy_ready": "\u4e70\u5165\u6761\u4ef6\u89e6\u53d1\u3002\u8bf7\u6309\u9884\u6848\u786e\u8ba4\u8d8b\u52bf\u3001\u4ef7\u683c\u3001\u4ed3\u4f4d\u548c\u6b62\u635f\u3002\u672c\u7cfb\u7edf\u4e0d\u4e0b\u5355\u3002",
-        "add_ready": "\u52a0\u4ed3\u6761\u4ef6\u89e6\u53d1\u3002\u8bf7\u786e\u8ba4\u5df2\u6d6e\u76c8\u3001\u91cf\u80fd\u3001\u9ad8\u4f4e\u70b9\u548c\u603b\u98ce\u9669\u540e\u518d\u51b3\u5b9a\u3002\u672c\u7cfb\u7edf\u4e0d\u4e0b\u5355\u3002",
-        "abandon": "\u4e70\u5165\u6761\u4ef6\u5931\u6548\u3002\u4eca\u65e5\u4e0d\u4e70\u3002",
-        "stop_loss": "\u89e6\u53d1\u6b62\u635f\u3002\u8bf7\u6309\u9884\u6848\u9000\u51fa\u3002",
-        "take_profit_1": "\u89e6\u53d1\u7b2c\u4e00\u6863\u6b62\u76c8\u3002\u8bf7\u6309\u9884\u6848\u51cf\u4ed3\u3002",
-        "take_profit_2": "\u89e6\u53d1\u7b2c\u4e8c\u6863\u6b62\u76c8\u3002\u8bf7\u6309\u9884\u6848\u51cf\u4ed3\u3002",
-        "force_exit": "\u5230\u65e5\u5185\u5f3a\u5236\u9000\u51fa\u65f6\u95f4\u3002\u8bf7\u6e05\u4ed3\u3002",
-        "exit_now": "\u6301\u4ed3\u5f3a\u5ea6\u4e0d\u8db3\u3002\u8bf7\u7acb\u5373\u6e05\u4ed3\u3002",
-        "overnight_violation": "\u65e5\u5185\u6301\u4ed3\u903e\u65f6\u3002\u8bf7\u7acb\u5373\u5904\u7406\u3002",
-        "hold_to_force_exit": "\u6301\u4ed3\u5f3a\u5ea6\u901a\u8fc7\u3002\u7ee7\u7eed\u6301\u6709\u81f3\u5f3a\u5236\u9000\u51fa\u65f6\u95f4\u3002",
+        "buy_ready": "买入条件触发。请按预案确认趋势、价格、仓位和止损。本系统不下单。",
+        "add_ready": "加仓条件触发。请确认已有浮盈、量能、高低点和总风险。本系统不下单。",
+        "abandon": "买入条件失效。今日不买。",
+        "stop_loss": "触发止损。请按预案退出。",
+        "take_profit_1": "触发第一档止盈。请按预案减仓。",
+        "take_profit_2": "触发第二档止盈。请按预案减仓。",
+        "force_exit": "到日内强制退出时间。请清仓。",
+        "exit_now": "持仓强度不足。请立即清仓。",
+        "overnight_violation": "日内持仓逾时。请立即处理。",
+        "hold_to_force_exit": "持仓强度通过。继续持有至强制退出时间。",
     }
-    prefix = "\u3010\u5df4\u83f2\u7279\u4e28\u5b9e\u76d8\u53ea\u8bfb\u3011"
+    prefix = "【巴菲特｜实盘只读】"
     if signal.event == "plan_summary":
         return signal.message
-    return f"{prefix}{signal.symbol}\uff1a{templates.get(signal.event, '\u52a8\u4f5c\u4fe1\u53f7\u89e6\u53d1\u3002\u8bf7\u6309\u9884\u6848\u590d\u6838\u3002')}"
+    message = templates.get(signal.event, "动作信号触发。请按预案复核。")
+    return f"{prefix}{signal.symbol}：{message}"
 
 
 def _fetch_market(
@@ -950,7 +957,7 @@ def run_once(
     log_path: Path,
     push: bool,
     now_utc: datetime | None = None,
-    feishu: FeishuBaseEventClient | None = None,
+    feishu: InvestmentEventPort | None = None,
 ) -> tuple[Signal, ...]:
     observed_at = now_utc or datetime.now(UTC)
     state = _read_json(
@@ -1082,7 +1089,11 @@ def run_once(
                     trigger_price=quote.bid if quote is not None else None,
                     position_shares=(
                         next(
-                            (position.shares for position in positions if position.symbol == signal.symbol),
+                            (
+                                position.shares
+                                for position in positions
+                                if position.symbol == signal.symbol
+                            ),
                             None,
                         )
                     ),

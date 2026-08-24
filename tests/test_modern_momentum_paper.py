@@ -3,13 +3,12 @@ from pathlib import Path
 
 from execution.alpaca_paper import BrokerOrder
 from research.h30_challenger import _FiveMinuteBar
+from research.modern_momentum import pullback_reentry, reentry_exit_reason
 from scripts.monitor_modern_momentum_paper import (
     _record_fill_best_effort,
     attempt_risk_fraction,
     order_id,
     position_size,
-    pullback_reentry,
-    reentry_exit_reason,
     risk_fraction,
     session_control_times,
 )
@@ -70,6 +69,18 @@ def test_paper_identity_and_position_size_are_bounded() -> None:
             remaining_slots=3,
         )
         == 666
+    )
+    assert (
+        position_size(
+            entry_price=50.0,
+            all_in_stop_pct=0.02,
+            equity=1_000_000.0,
+            buying_power=1_000_000.0,
+            risk_fraction=0.005,
+            remaining_slots=3,
+            max_notional=100.0,
+        )
+        == 2
     )
 
 

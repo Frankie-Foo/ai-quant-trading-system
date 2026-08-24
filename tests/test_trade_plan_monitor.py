@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from datetime import time as clock_time
 from pathlib import Path
@@ -16,8 +17,8 @@ from scripts.monitor_trade_plan import (
     Quote,
     Signal,
     SymbolPlan,
-    _position_size,
     _higher_highs_and_lows,
+    _position_size,
     _send_vps,
     build_position_plan_message,
     evaluate_position_stop,
@@ -377,13 +378,13 @@ def test_run_once_records_delivered_signal_in_feishu_monitor_table(
 ) -> None:
     class FakeFeishu:
         def __init__(self) -> None:
-            self.calls: list[tuple[object, str, dict[str, object]]] = []
+            self.calls: list[tuple[InvestmentTable, str, Mapping[str, object]]] = []
 
         def record_event(
             self,
-            table: object,
+            table: InvestmentTable,
             event_id: str,
-            fields: dict[str, object],
+            fields: Mapping[str, object],
         ) -> str:
             self.calls.append((table, event_id, fields))
             return "rec-monitor"

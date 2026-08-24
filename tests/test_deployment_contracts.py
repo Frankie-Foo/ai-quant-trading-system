@@ -113,7 +113,10 @@ def test_windows_observation_tasks_cover_all_daily_phases_without_order_flags() 
     assert 'TaskName "Trading System V2 - AI Quant Funnel"' in installer
     assert 'Runner (Join-Path $PSScriptRoot "run_modern_funnel_tick.ps1")' in installer
     assert "-IntervalMinutes 1" in installer
-    assert 'Register-ObservationTask `\n    -TaskName "Trading System V2 - Paper Session"' not in installer
+    legacy_paper_registration = (
+        'Register-ObservationTask `\n    -TaskName "Trading System V2 - Paper Session"'
+    )
+    assert legacy_paper_registration not in installer
     assert "Trading System V2 - Postmarket Review" in installer
     assert "MultipleInstances IgnoreNew" in installer
     assert "schedule.premarket" in premarket

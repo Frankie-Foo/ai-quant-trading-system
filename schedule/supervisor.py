@@ -1,4 +1,4 @@
-"""Current-user fallback supervisor for the three local observation lanes."""
+"""Current-user fallback supervisor for the production observation lanes."""
 
 from __future__ import annotations
 
@@ -33,16 +33,10 @@ def default_lanes(root: Path = ROOT) -> tuple[Lane, ...]:
     runs = root / "runs"
     return (
         Lane(
-            "schedule.premarket",
-            5 * 60,
-            runs / "premarket_supervisor.out.log",
-            runs / "premarket_supervisor.err.log",
-        ),
-        Lane(
-            "schedule.paper",
-            5 * 60,
-            runs / "paper_supervisor.out.log",
-            runs / "paper_supervisor.err.log",
+            "schedule.modern_funnel",
+            60,
+            runs / "modern_funnel_supervisor.out.log",
+            runs / "modern_funnel_supervisor.err.log",
         ),
         Lane(
             "schedule.postmarket",

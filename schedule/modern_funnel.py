@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import sqlite3
+import subprocess
+import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 from zoneinfo import ZoneInfo
 
 from data_plane.calendar import build_xnys_schedule
@@ -42,6 +46,65 @@ class FunnelTickResult:
 
 class FunnelStageExecutor(Protocol):
     def execute(self, stage: FunnelStage, trade_date: date) -> dict[str, str]: ...
+
+
+class CompletedStageProcess(Protocol):
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+StageRunner = Callable[..., CompletedStageProcess]
+
+
+@dataclass(frozen=True)
+class ProductionFunnelExecutor:
+    """Run one explicit stage process and accept only a verifiable receipt."""
+
+    root: Path
+    runner: StageRunner = subprocess.run
+
+    def execute(self, stage: FunnelStage, trade_date: date) -> dict[str, str]:
+        command = [
+            sys.executable,
+            "-m",
+            "scripts.run_modern_funnel_stage",
+            "--stage",
+            stage.value,
+            "--trade-date",
+            trade_date.isoformat(),
+        ]
+        completed = self.runner(
+            command,
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+            timeout=3600,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"{stage.value} process failed with exit code {completed.returncode}"
+            )
+        receipt = _last_json_object(completed.stdout)
+        if receipt.get("ok") is not True or not str(receipt.get("receipt_id", "")).strip():
+            raise RuntimeError(f"{stage.value} did not produce a success receipt")
+        return {
+            str(key): str(value)
+            for key, value in receipt.items()
+            if isinstance(value, (str, int, float, bool))
+        }
+
+
+def _last_json_object(stdout: str) -> dict[str, object]:
+    for line in reversed(stdout.splitlines()):
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return cast(dict[str, object], value)
+    raise RuntimeError("funnel stage produced no JSON receipt")
 
 
 def _stage_for(local_time: time) -> FunnelStage | None:
@@ -219,3 +282,41 @@ def run_tick(
             receipt=receipt,
         )
         return FunnelTickResult(FunnelTickStatus.SUCCEEDED, stage)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--ledger-path",
+        type=Path,
+        default=Path(__file__).resolve().parents[1] / "runs" / "modern-funnel.sqlite3",
+    )
+    return parser
+
+
+def main() -> int:
+    args = _parser().parse_args()
+    root = Path(__file__).resolve().parents[1]
+    result = run_tick(
+        ledger_path=args.ledger_path,
+        executor=ProductionFunnelExecutor(root=root),
+    )
+    print(
+        json.dumps(
+            {
+                "status": result.status.value,
+                "stage": result.stage.value if result.stage is not None else None,
+                "detail": result.detail,
+            },
+            sort_keys=True,
+        )
+    )
+    failed = {
+        FunnelTickStatus.FAILED,
+        FunnelTickStatus.PREREQUISITE_MISSING,
+    }
+    return 1 if result.status in failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

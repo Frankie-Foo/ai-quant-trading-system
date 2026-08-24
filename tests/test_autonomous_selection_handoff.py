@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import polars as pl
+import pytest
 
 from data_plane.storage import persist_snapshot
 from operations.autonomous_selection_handoff import (
+    create_open_confirmation,
     format_selection_plan_message,
     load_open_confirmation,
     prepare_autonomous_selection_handoff,
 )
+from operations.feishu_base import InvestmentTable
 
 
 class _Push:
@@ -29,9 +33,9 @@ class _Audit:
 
     def record_event(
         self,
-        table: object,
+        table: InvestmentTable,
         event_id: str,
-        fields: dict[str, object],
+        fields: Mapping[str, object],
     ) -> str:
         del table, fields
         record_id = f"record-{len(self.records) + 1}"
@@ -203,3 +207,35 @@ def test_handoff_requires_audit_and_push_receipts_before_open_authorization(
     confirmation = load_open_confirmation(confirmation_path)
     assert confirmation.authorization == receipt.authorization
     assert confirmation.config_path == receipt.config_path
+
+
+def test_existing_open_confirmation_rejects_changed_plan_bytes(tmp_path: Path) -> None:
+    plan = tmp_path / "plan.json"
+    confirmation = tmp_path / "open.json"
+    plan.write_text('{"version": 1}', encoding="utf-8")
+    generated_at = datetime(2026, 8, 24, 13, 35, tzinfo=UTC)
+    create_open_confirmation(
+        confirmation_path=confirmation,
+        config_path=plan,
+        trade_date=date(2026, 8, 24),
+        selection_snapshot_id="selection-1",
+        candidate_pool=("ABC",),
+        feishu_record_ids=("record-1",),
+        livermore_message_id="message-1",
+        strategy_version="modern-h15.v1",
+        generated_at_utc=generated_at,
+    )
+    plan.write_text('{"version": 2}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="config hash"):
+        create_open_confirmation(
+            confirmation_path=confirmation,
+            config_path=plan,
+            trade_date=date(2026, 8, 24),
+            selection_snapshot_id="selection-1",
+            candidate_pool=("ABC",),
+            feishu_record_ids=("record-1",),
+            livermore_message_id="message-1",
+            strategy_version="modern-h15.v1",
+            generated_at_utc=generated_at,
+        )

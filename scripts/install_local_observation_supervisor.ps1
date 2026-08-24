@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $runner = Join-Path $PSScriptRoot "run_local_observation_supervisor.ps1"
 $legacyTasks = @(
+    "Trading System V2 - AI Quant Funnel",
     "Trading System V2 - Premarket",
     "Trading System V2 - Paper Session",
     "Trading System V2 - Postmarket Review"

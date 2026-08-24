@@ -2,7 +2,15 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from schedule.modern_funnel import FunnelStage, FunnelTickStatus, run_tick
+import pytest
+
+from schedule.modern_funnel import (
+    CompletedStageProcess,
+    FunnelStage,
+    FunnelTickStatus,
+    ProductionFunnelExecutor,
+    run_tick,
+)
 
 EASTERN = ZoneInfo("America/New_York")
 TRADE_DATE = date(2026, 8, 24)
@@ -101,3 +109,44 @@ def test_open_confirmation_window_ends_at_0945(tmp_path: Path) -> None:
     result = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 45))
     assert result.status is FunnelTickStatus.NOT_DUE
     assert FunnelStage.OPEN_CONFIRMATION not in executor.calls
+
+
+def test_production_executor_requires_a_json_success_receipt(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], **_: object) -> CompletedStageProcess:
+        calls.append(command)
+
+        class Completed:
+            returncode = 0
+            stdout = '{"ok": true, "receipt_id": "first-1"}\n'
+            stderr = ""
+
+        return Completed()
+
+    executor = ProductionFunnelExecutor(root=tmp_path, runner=runner)
+    receipt = executor.execute(FunnelStage.FIRST_WAVE, TRADE_DATE)
+
+    assert receipt["receipt_id"] == "first-1"
+    assert calls[0][-4:] == [
+        "--stage",
+        "first_wave",
+        "--trade-date",
+        TRADE_DATE.isoformat(),
+    ]
+
+
+def test_production_executor_rejects_empty_or_failed_stage_receipt(tmp_path: Path) -> None:
+    def runner(command: list[str], **_: object) -> CompletedStageProcess:
+        del command
+
+        class Completed:
+            returncode = 0
+            stdout = '{"ok": false}\n'
+            stderr = ""
+
+        return Completed()
+
+    executor = ProductionFunnelExecutor(root=tmp_path, runner=runner)
+    with pytest.raises(RuntimeError, match="did not produce a success receipt"):
+        executor.execute(FunnelStage.SECOND_WAVE, TRADE_DATE)

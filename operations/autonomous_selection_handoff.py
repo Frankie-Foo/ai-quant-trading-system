@@ -199,6 +199,35 @@ def _existing_or_new_authorization(
 ) -> ExecutionAuthorization | None:
     if confirmation_path is None or not feishu_record_ids or not livermore_message_id.strip():
         return None
+    return create_open_confirmation(
+        confirmation_path=confirmation_path,
+        config_path=config_path,
+        trade_date=trade_date,
+        selection_snapshot_id=selection_snapshot_id,
+        candidate_pool=candidate_pool,
+        feishu_record_ids=feishu_record_ids,
+        livermore_message_id=livermore_message_id,
+        strategy_version=strategy_version,
+        generated_at_utc=generated_at_utc,
+    )
+
+
+def create_open_confirmation(
+    *,
+    confirmation_path: Path,
+    config_path: Path,
+    trade_date: date,
+    selection_snapshot_id: str,
+    candidate_pool: tuple[str, ...],
+    feishu_record_ids: tuple[str, ...],
+    livermore_message_id: str,
+    strategy_version: str,
+    generated_at_utc: datetime,
+) -> ExecutionAuthorization:
+    """Create one immutable third-stage authorization from external receipts."""
+
+    if not feishu_record_ids or not livermore_message_id.strip():
+        raise ValueError("Feishu and Livermore receipts are required")
     if confirmation_path.exists():
         existing = load_open_confirmation(confirmation_path).authorization
         if (
@@ -231,7 +260,7 @@ def _existing_or_new_authorization(
         config_sha256=config_sha256,
     )
     if not authorization.is_complete():
-        return None
+        raise ValueError("open confirmation authorization is incomplete")
     payload: dict[str, object] = {
         "schema_version": OPEN_CONFIRMATION_SCHEMA,
         "generated_at_utc": generated_at_utc.isoformat(),

@@ -101,6 +101,7 @@ def position_size(
     buying_power: float,
     risk_fraction: float,
     remaining_slots: int,
+    max_notional: float | None = None,
 ) -> int:
     if (
         entry_price <= 0
@@ -109,12 +110,15 @@ def position_size(
         or buying_power <= 0
         or not 0 < risk_fraction < 1
         or remaining_slots <= 0
+        or (max_notional is not None and max_notional <= 0)
     ):
         raise ValueError("valid account, entry, stop, and slot inputs are required")
     quantity = min(
         int((equity * risk_fraction) / (entry_price * all_in_stop_pct)),
         int((buying_power / remaining_slots) / entry_price),
     )
+    if max_notional is not None:
+        quantity = min(quantity, int(max_notional / entry_price))
     if quantity < 1:
         raise ValueError("available Paper buying power cannot fund one share")
     return quantity
@@ -174,6 +178,16 @@ def _latest_sip_nbbo(symbol: str, observed_at_utc: datetime) -> FreshNbboQuote:
         asof_utc=asof,
         feed=feed,
     )
+
+
+def _optional_positive_env(name: str) -> float | None:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    value = float(raw)
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
+    return value
 
 
 def _latest_sip_nbbo_now(symbol: str) -> FreshNbboQuote:
@@ -321,6 +335,7 @@ def main() -> None:
     parser.add_argument("--confirmation-path", type=Path)
     args = parser.parse_args()
     data_root = project_data_root(ROOT)
+    smoke_max_notional = _optional_positive_env("AI_QUANT_PAPER_SMOKE_MAX_NOTIONAL")
     pool = _latest_pool(data_root, args.trade_date)
     session = build_xnys_schedule(args.trade_date, args.trade_date).row(0, named=True)
     opened = session["market_open_utc"]
@@ -370,6 +385,7 @@ def main() -> None:
                     "paper_writes_enabled": broker.writes_enabled,
                     "live_trading_enabled": False,
                     "sizing": "account_equity_and_buying_power",
+                    "smoke_max_notional": smoke_max_notional,
                 },
                 default=str,
             )
@@ -413,6 +429,7 @@ def main() -> None:
             "other_catalyst_equity_fraction": risk_fraction(hard_catalyst=False),
             "buying_power_allocation": "equal_across_remaining_entry_slots",
             "fixed_dollar_cap": None,
+            "smoke_max_notional": smoke_max_notional,
             "attempt_risk_weights": ATTEMPT_WEIGHTS,
         },
         "status": "waiting",
@@ -954,6 +971,7 @@ def main() -> None:
                             buying_power=float(current_account.buying_power),
                             risk_fraction=allocation_fraction,
                             remaining_slots=remaining_slots,
+                            max_notional=smoke_max_notional,
                         )
                         entry_client_id = order_id(
                             args.trade_date.isoformat(),
