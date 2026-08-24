@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, overload
 
 import httpx
 from pydantic import SecretStr
@@ -120,6 +120,28 @@ class DirectAlpacaMarketDataClient:
     def close(self) -> None:
         if self._owns_client:
             self._client.close()
+
+    @overload
+    def fetch_bars(
+        self,
+        symbols: tuple[str, ...],
+        *,
+        start_utc: datetime,
+        end_utc: datetime,
+        timeframe: Literal["1Day"],
+        adjustment: BarAdjustment = "split",
+    ) -> tuple[DailySipBar, ...]: ...
+
+    @overload
+    def fetch_bars(
+        self,
+        symbols: tuple[str, ...],
+        *,
+        start_utc: datetime,
+        end_utc: datetime,
+        timeframe: Literal["1Min"] = "1Min",
+        adjustment: BarAdjustment = "split",
+    ) -> tuple[SipBar, ...]: ...
 
     def fetch_bars(
         self,

@@ -12,4 +12,6 @@ def test_payoff_metrics_allow_lower_win_rate() -> None:
 
     assert metrics["win_rate"] == 0.4
     assert metrics["average_win_loss"] == 2.75
-    assert metrics["profit_factor"] > 1.0
+    profit_factor = metrics["profit_factor"]
+    assert isinstance(profit_factor, float)
+    assert profit_factor > 1.0

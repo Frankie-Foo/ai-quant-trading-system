@@ -15,8 +15,8 @@ def _dates(count: int) -> list[date]:
 def test_signal_skips_the_most_recent_observations() -> None:
     dates = _dates(8)
     prices = {
-        "A": [10, 11, 12, 13, 14, 15, 1, 1],
-        "B": [10, 10, 10, 10, 10, 10, 20, 20],
+        "A": [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 1.0, 1.0],
+        "B": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 20.0, 20.0],
     }
     config = MomentumConfig(lookback_days=5, skip_days=2, holdings=1, max_weight=1.0)
 
@@ -27,7 +27,7 @@ def test_signal_skips_the_most_recent_observations() -> None:
 
 def test_backtest_executes_signal_on_the_following_return() -> None:
     dates = _dates(5)
-    prices = {"A": [100, 100, 100, 110, 121]}
+    prices = {"A": [100.0, 100.0, 100.0, 110.0, 121.0]}
     targets = [
         {"A": 0.0},
         {"A": 0.0},
@@ -45,7 +45,7 @@ def test_backtest_executes_signal_on_the_following_return() -> None:
 
 def test_turnover_cost_charges_initial_entry_and_rotation() -> None:
     dates = _dates(4)
-    prices = {"A": [100] * 4, "B": [100] * 4}
+    prices = {"A": [100.0] * 4, "B": [100.0] * 4}
     targets = [
         {"A": 0.0, "B": 0.0},
         {"A": 1.0, "B": 0.0},
@@ -63,7 +63,10 @@ def test_turnover_cost_charges_initial_entry_and_rotation() -> None:
 
 def test_absolute_filter_keeps_cash_when_every_score_is_negative() -> None:
     dates = _dates(8)
-    prices = {"A": [10, 9, 8, 7, 6, 5, 4, 3], "B": [10, 9, 8, 7, 6, 5, 4, 3]}
+    prices = {
+        "A": [10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0],
+        "B": [10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0],
+    }
     config = MomentumConfig(
         lookback_days=5,
         skip_days=1,

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-import operations.autonomous_policy_adapter as policy_adapter
 from execution.alpaca_paper import PaperPosition
 from execution.autonomous_paper_session import AutonomousPaperPlan
 from kernel.adaptive_trade_plan import RealtimePlanFacts
@@ -225,7 +225,7 @@ def test_runtime_safety_envelope_retries_transient_windows_replace_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "runtime-safety.json"
-    real_replace = policy_adapter.os.replace
+    real_replace = os.replace
     attempts = 0
 
     def flaky_replace(source: str | Path, destination: str | Path) -> None:
@@ -235,8 +235,8 @@ def test_runtime_safety_envelope_retries_transient_windows_replace_error(
             raise PermissionError("transient Windows file sharing violation")
         real_replace(source, destination)
 
-    monkeypatch.setattr(policy_adapter.os, "replace", flaky_replace)
-    monkeypatch.setattr(policy_adapter.time, "sleep", lambda _: None)
+    monkeypatch.setattr("operations.autonomous_policy_adapter.os.replace", flaky_replace)
+    monkeypatch.setattr("operations.autonomous_policy_adapter.time.sleep", lambda _: None)
 
     write_runtime_safety_envelope(path, _envelope())
 

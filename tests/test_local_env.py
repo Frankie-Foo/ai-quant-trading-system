@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+
+import pytest
 
 from operations.local_env import load_project_env, project_data_root
 
 
 def test_load_project_env_promotes_alpaca_aliases_and_scopes_shared_env(
-    tmp_path, monkeypatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()

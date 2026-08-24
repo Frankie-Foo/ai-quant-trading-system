@@ -17,10 +17,6 @@ VENDOR = ROOT / "runtime" / "ai-quant" / "research" / "vendor" / "zarattini-2024
 SOURCE = "research.alpaca_sip.spy_rth_1m"
 sys.path.insert(0, str(VENDOR))
 
-from src.backtest import check_times  # noqa: E402
-from src.noise_area import _day_key, build_indicators, session_closes  # noqa: E402
-from src.sizing import daily_sigma, target_units  # noqa: E402
-
 
 @dataclass(frozen=True)
 class Trade:
@@ -34,6 +30,12 @@ class Trade:
 
 
 def run_long_only(bars: pd.DataFrame) -> pd.DataFrame:
+    if not VENDOR.is_dir():
+        raise FileNotFoundError(f"pinned Noise-Area vendor checkout is missing: {VENDOR}")
+    from src.backtest import check_times
+    from src.noise_area import _day_key, build_indicators, session_closes
+    from src.sizing import daily_sigma, target_units
+
     indicators = build_indicators(bars, lookback=14)
     volatility = daily_sigma(session_closes(indicators), lookback=14)
     equity = 100_000.0

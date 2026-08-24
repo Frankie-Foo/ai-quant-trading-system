@@ -13,7 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import NoReturn
 
-from execution.alpaca_paper import PaperOrderRequest
+from execution.alpaca_paper import BrokerOrder, PaperOrderRequest, PaperPosition
 from execution.engine import PaperExecutionEngine
 from execution.ledger import OrderLedger
 from execution.order_state import OrderState
@@ -46,6 +46,13 @@ class _TripwireBroker:
         del request
         self.calls += 1
         raise AssertionError("kill switch allowed a broker write")
+
+    def get_order_by_client_id(self, client_order_id: str) -> BrokerOrder | None:
+        del client_order_id
+        return None
+
+    def list_positions(self) -> tuple[PaperPosition, ...]:
+        return ()
 
 
 def _run_kill_switch(config_path: Path, working_dir: Path) -> tuple[bool, int]:
