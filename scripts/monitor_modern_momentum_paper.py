@@ -8,6 +8,7 @@ import os
 import time
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 
 import polars as pl
@@ -29,6 +30,7 @@ from operations.livermore_push import LivermorePushClient, configured_identity
 from operations.local_env import load_project_env, project_data_root
 from operations.paper_runtime_policy import PaperRuntimePolicy
 from operations.paper_state import OutboxClaim, PaperStateStore
+from operations.runtime_alerts import RuntimeAlertManager, bounded_retry
 from research.h30_challenger import _five_minute_bars
 from research.modern_momentum import (
     ModernMomentumConfig,
@@ -172,6 +174,10 @@ def _latest_sip_nbbo(symbol: str, observed_at_utc: datetime) -> FreshNbboQuote:
         asof_utc=asof,
         feed=feed,
     )
+
+
+def _latest_sip_nbbo_now(symbol: str) -> FreshNbboQuote:
+    return _latest_sip_nbbo(symbol, datetime.now(UTC))
 
 
 def _bracket_child(order: BrokerOrder, order_type: str) -> BrokerOrder:
@@ -453,6 +459,7 @@ def main() -> None:
     message_ids: list[str] = []
     last_minute: datetime | None = None
     push = _push_client()
+    alerts = RuntimeAlertManager(run_dir / "runtime-alerts.sqlite3", push=push)
     base = FeishuBaseEventClient.from_environment()
     try:
         while datetime.now(UTC) < market_close:
@@ -857,7 +864,7 @@ def main() -> None:
                         continue
                     candidate_position = positions.get(symbol)
                     if candidate_position is None:
-                        if now >= entry_cutoff:
+                        if now >= entry_cutoff or alerts.is_frozen("modern-paper-loop"):
                             continue
                         previous_attempt = attempts.get(symbol, 0)
                         attempt = previous_attempt + 1
@@ -889,8 +896,10 @@ def main() -> None:
                                 entry_price * 0.985,
                             )
                             signal_ts_utc = reentry.signal_ts_utc
+                        quote = bounded_retry(
+                            partial(_latest_sip_nbbo_now, symbol)
+                        )
                         quote_observed_at = datetime.now(UTC)
-                        quote = _latest_sip_nbbo(symbol, quote_observed_at)
                         actual_all_in_stop_pct = (
                             float((quote.ask - Decimal(str(stop_level))) / quote.ask)
                             + config.stop_slippage_reserve_pct
@@ -1124,6 +1133,14 @@ def main() -> None:
                     }
                 )
                 _save(state_path, state)
+                try:
+                    alerts.report_recovery(
+                        "modern-paper-loop",
+                        component="Modern H15 Paper",
+                        observed_at_utc=datetime.now(UTC),
+                    )
+                except Exception:
+                    pass
                 time.sleep(1)
             except Exception as exc:
                 state.update(
@@ -1135,6 +1152,15 @@ def main() -> None:
                     }
                 )
                 _save(state_path, state)
+                try:
+                    alerts.report_failure(
+                        "modern-paper-loop",
+                        component="Modern H15 Paper",
+                        error_type=type(exc).__name__,
+                        observed_at_utc=datetime.now(UTC),
+                    )
+                except Exception:
+                    pass
                 time.sleep(5)
         remaining_positions = broker.list_positions()
         remaining_orders = broker.list_open_orders()

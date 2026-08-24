@@ -59,6 +59,12 @@ class LivermorePushClient:
     def push(self, body: str) -> str:
         if not body.strip():
             raise ValueError("Livermore message body is required")
+        if (
+            "\ufffd" in body
+            or "??" in body
+            or body.encode("utf-8").decode("utf-8") != body
+        ):
+            raise ValueError("Livermore message must contain reversible UTF-8 text")
         request_body = json.dumps(
             {"channel_id": self.channel_id, "body": body},
             ensure_ascii=False,
