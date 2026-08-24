@@ -57,6 +57,8 @@ def compile_autonomous_paper_plans(
         reference = _price(row, "premarket_close")
         _require_candidate_gates(row)
         gate_asof = _utc_timestamp(row, "gate_asof_utc")
+        catalyst_score = _finite_number(row.get("earnings_intensity_score"))
+        sector_symbol = _optional_symbol(row.get("sector_symbol")) or "N/A"
         hard_stop = (reference * (Decimal(1) - HARD_STOP_FRACTION)).quantize(
             Decimal("0.01"), rounding=ROUND_HALF_UP
         )
@@ -72,6 +74,8 @@ def compile_autonomous_paper_plans(
                 hard_stop=hard_stop,
                 selection_snapshot_id=snapshot.dataset_id,
                 gate_asof=gate_asof,
+                catalyst_score=catalyst_score,
+                sector_symbol=sector_symbol,
                 safety_envelope=f"safety/{plan_id}.json",
             )
         )
@@ -107,6 +111,8 @@ def compile_autonomous_paper_plan(
     reference = _price(row, "premarket_close")
     _require_candidate_gates(row)
     gate_asof = _utc_timestamp(row, "gate_asof_utc")
+    catalyst_score = _finite_number(row.get("earnings_intensity_score"))
+    sector_symbol = _optional_symbol(row.get("sector_symbol")) or "N/A"
     hard_stop = (reference * (Decimal(1) - HARD_STOP_FRACTION)).quantize(
         Decimal("0.01"),
         rounding=ROUND_HALF_UP,
@@ -122,6 +128,8 @@ def compile_autonomous_paper_plan(
         hard_stop=hard_stop,
         selection_snapshot_id=snapshot.dataset_id,
         gate_asof=gate_asof,
+        catalyst_score=catalyst_score,
+        sector_symbol=sector_symbol,
     )
     _write_atomic_json(output_path, payload)
     return PreparedAutonomousPaperPlan(
@@ -180,7 +188,6 @@ def _eligible_candidates(frame: pl.DataFrame) -> list[dict[str, Any]]:
         "premarket_close",
         "premarket_above_vwap",
         "directional_volume_confirmed",
-        "earnings_intensity_score",
         "gate_asof_utc",
     }
     if required - set(frame.columns):
@@ -210,8 +217,7 @@ def _require_candidate_gates(row: dict[str, Any]) -> None:
         or rvol <= 3.0
         or price is None
         or price <= 0
-        or intensity is None
-        or not 0 <= intensity <= 100
+        or (intensity is not None and not 0 <= intensity <= 100)
         or row.get("premarket_above_vwap") is not True
         or row.get("directional_volume_confirmed") is not True
     ):
@@ -224,6 +230,17 @@ def _symbol(row: dict[str, Any]) -> str:
         raise ValueError("no eligible current selection candidate")
     normalized = value.strip().upper()
     if not normalized or normalized != value or len(normalized) > 16:
+        raise ValueError("no eligible current selection candidate")
+    return normalized
+
+
+def _optional_symbol(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("no eligible current selection candidate")
+    normalized = value.strip().upper()
+    if not normalized or len(normalized) > 16:
         raise ValueError("no eligible current selection candidate")
     return normalized
 
@@ -260,6 +277,8 @@ def _payload(
     hard_stop: Decimal,
     selection_snapshot_id: str,
     gate_asof: datetime,
+    catalyst_score: float | None,
+    sector_symbol: str,
 ) -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -273,6 +292,8 @@ def _payload(
                 hard_stop=hard_stop,
                 selection_snapshot_id=selection_snapshot_id,
                 gate_asof=gate_asof,
+                catalyst_score=catalyst_score,
+                sector_symbol=sector_symbol,
                 safety_envelope=f"../safety/{plan_id}.json",
             )
         ],
@@ -288,6 +309,8 @@ def _plan_payload(
     hard_stop: Decimal,
     selection_snapshot_id: str,
     gate_asof: datetime,
+    catalyst_score: float | None,
+    sector_symbol: str,
     safety_envelope: str,
 ) -> dict[str, object]:
     provenance = (
@@ -312,11 +335,12 @@ def _plan_payload(
         "policy_evidence": {
             "route": "catalyst",
             "catalyst": {
-                "value": 75.0,
+                "value": catalyst_score,
                 "asof_utc": gate_asof.isoformat(),
                 "provenance": (
-                    f"{selection_snapshot_id}|"
-                    "selection_gate_passed=catalyst_score_floor_75"
+                    f"{selection_snapshot_id}|earnings_intensity_score"
+                    if catalyst_score is not None
+                    else f"{selection_snapshot_id}|catalyst_score_unavailable"
                 ),
             },
             "factor": {
@@ -339,8 +363,12 @@ def _plan_payload(
         },
         "market_context": {
             "benchmark_symbol": "SPY",
-            "sector_symbol": "SPY",
-            "provenance": "market_context=SPY_fallback",
+            "sector_symbol": sector_symbol,
+            "provenance": (
+                f"{selection_snapshot_id}|sector_symbol"
+                if sector_symbol != "N/A"
+                else f"{selection_snapshot_id}|sector_symbol_unavailable"
+            ),
         },
         "safety_envelope": safety_envelope,
     }

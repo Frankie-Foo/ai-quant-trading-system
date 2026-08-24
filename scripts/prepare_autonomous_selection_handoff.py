@@ -50,6 +50,7 @@ def main() -> int:
             data_root=args.data_root,
             trade_date=trade_date,
             output_path=day_root / "autonomous_paper.json",
+            confirmation_path=day_root / "open_confirmation.json",
             notification_db=day_root / "notifications.sqlite3",
             push=push,
             audit=FeishuBaseEventClient.from_environment(os.environ),
@@ -66,6 +67,11 @@ def main() -> int:
                 "symbols": list(receipt.symbols),
                 "selection_snapshot_id": receipt.selection_snapshot_id,
                 "message_id": receipt.message_id,
+                "open_confirmation_id": (
+                    receipt.authorization.open_confirmation_id
+                    if receipt.authorization is not None
+                    else None
+                ),
                 "orders_submitted": 0,
             },
             ensure_ascii=False,

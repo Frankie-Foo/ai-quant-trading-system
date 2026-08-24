@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, time
 
@@ -16,9 +17,11 @@ class ExecutionAuthorization:
     feishu_record_id: str
     livermore_message_id: str
     strategy_version: str
+    candidate_pool: tuple[str, ...]
+    config_sha256: str
 
     def is_complete(self) -> bool:
-        return all(
+        scalar_fields_complete = all(
             value.strip()
             for value in (
                 self.selection_snapshot_id,
@@ -28,6 +31,11 @@ class ExecutionAuthorization:
                 self.strategy_version,
             )
         )
+        pool_complete = bool(self.candidate_pool) and len(self.candidate_pool) == len(
+            set(self.candidate_pool)
+        ) and all(symbol == symbol.strip().upper() for symbol in self.candidate_pool)
+        hash_complete = re.fullmatch(r"[0-9a-f]{64}", self.config_sha256) is not None
+        return scalar_fields_complete and pool_complete and hash_complete
 
 
 @dataclass(frozen=True)
@@ -51,6 +59,8 @@ class PaperRuntimePolicy:
         trading_kill_switch: bool,
         broker_base_url: str,
         authorization: ExecutionAuthorization,
+        expected_candidate_pool: tuple[str, ...],
+        expected_strategy_version: str,
     ) -> None:
         if not broker_write_enabled:
             raise RuntimeError("Paper writes are disabled")
@@ -60,6 +70,10 @@ class PaperRuntimePolicy:
             raise RuntimeError("automated trading requires the Alpaca Paper host")
         if authorization.trade_date != trade_date or not authorization.is_complete():
             raise RuntimeError("complete same-day third-stage authorization is required")
+        if authorization.candidate_pool != expected_candidate_pool:
+            raise RuntimeError("third-stage candidate pool does not match Paper plans")
+        if authorization.strategy_version != expected_strategy_version:
+            raise RuntimeError("third-stage strategy version does not match Paper runtime")
 
     def entry_allowed_at(self, now_et: datetime) -> bool:
         clock = self._clock(now_et)

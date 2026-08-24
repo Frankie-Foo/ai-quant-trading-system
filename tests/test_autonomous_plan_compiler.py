@@ -68,13 +68,34 @@ def test_compiler_freezes_top_current_selection_into_one_paper_plan(
     assert str(bundle.plan.max_notional_fraction) == "0.10"
     assert str(bundle.plan.full_risk_fraction) == "0.0035"
     assert bundle.benchmark_symbol == "SPY"
-    assert bundle.sector_symbol == "SPY"
-    assert bundle.evidence.catalyst.value == 75.0
+    assert bundle.sector_symbol == "N/A"
+    assert bundle.evidence.catalyst.value == 88.0
     assert bundle.evidence.first_target_reward_r == 2.5
     assert bundle.evidence.weighted_expected_reward_r == 3.0
     raw = output_path.read_text(encoding="utf-8").lower()
     assert "secret" not in raw
     assert "api_key" not in raw
+
+
+def test_compiler_marks_missing_observations_unavailable_instead_of_inventing_them(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    rows = _rows()
+    rows["earnings_intensity_score"] = [None, None]
+    _persist_selection(data_root, rows)
+
+    compile_autonomous_paper_plan(
+        data_root=data_root,
+        trade_date=TRADE_DATE,
+        output_path=tmp_path / "approved.json",
+    )
+
+    bundle = load_autonomous_paper_config(tmp_path / "approved.json").plans[0]
+    assert bundle.evidence.catalyst.value is None
+    assert bundle.sector_symbol == "N/A"
+    assert "unavailable" in bundle.evidence.catalyst.provenance
+    assert "fallback" not in bundle.market_context_provenance
 
 
 def test_compiler_rejects_incomplete_survivor_instead_of_inventing_plan(

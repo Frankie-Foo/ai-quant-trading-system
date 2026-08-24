@@ -16,6 +16,8 @@ def _authorization(**overrides: object) -> ExecutionAuthorization:
         "feishu_record_id": "record-1",
         "livermore_message_id": "message-1",
         "strategy_version": "modern-h15-v1",
+        "candidate_pool": ("AAPL",),
+        "config_sha256": "a" * 64,
     }
     values.update(overrides)
     return ExecutionAuthorization(**values)  # type: ignore[arg-type]
@@ -49,6 +51,8 @@ def test_arming_fails_closed_without_every_gate(
             trading_kill_switch=kill_switch,
             broker_base_url=base_url,
             authorization=authorization,
+            expected_candidate_pool=("AAPL",),
+            expected_strategy_version="modern-h15-v1",
         )
 
 
@@ -59,7 +63,32 @@ def test_arming_accepts_complete_paper_authorization() -> None:
         trading_kill_switch=False,
         broker_base_url="https://paper-api.alpaca.markets",
         authorization=_authorization(),
+        expected_candidate_pool=("AAPL",),
+        expected_strategy_version="modern-h15-v1",
     )
+
+
+@pytest.mark.parametrize(
+    ("candidate_pool", "strategy_version"),
+    [
+        (("MSFT",), "modern-h15-v1"),
+        (("AAPL",), "modern-h15-v2"),
+    ],
+)
+def test_arming_rejects_confirmation_for_another_pool_or_strategy(
+    candidate_pool: tuple[str, ...],
+    strategy_version: str,
+) -> None:
+    with pytest.raises(RuntimeError, match="does not match"):
+        POLICY.validate_arming(
+            trade_date=TRADE_DATE,
+            broker_write_enabled=True,
+            trading_kill_switch=False,
+            broker_base_url="https://paper-api.alpaca.markets",
+            authorization=_authorization(),
+            expected_candidate_pool=candidate_pool,
+            expected_strategy_version=strategy_version,
+        )
 
 
 @pytest.mark.parametrize(
