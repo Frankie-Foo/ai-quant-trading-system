@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Literal
 
 import httpx
@@ -53,6 +56,9 @@ class BrokerOrder(FrozenModel):
     filled_qty: str
     status: str
     filled_avg_price: str | None = None
+    side: str | None = None
+    order_type: str | None = Field(default=None, alias="type")
+    legs: tuple[BrokerOrder, ...] = ()
 
     @field_validator("symbol")
     @classmethod
@@ -75,7 +81,7 @@ class PaperOrderRequest(BaseModel):
     stop_loss_price: str | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
-    def require_stop_for_take_profit(self) -> "PaperOrderRequest":
+    def require_stop_for_take_profit(self) -> PaperOrderRequest:
         if self.take_profit_price is not None and self.stop_loss_price is None:
             raise ValueError("take-profit entry requires stop_loss_price")
         return self
@@ -104,6 +110,117 @@ class PaperOrderRequest(BaseModel):
         elif self.limit_price is not None:
             raise ValueError("market order cannot include limit_price")
         return payload
+
+
+@dataclass(frozen=True)
+class FreshNbboQuote:
+    symbol: str
+    bid: Decimal
+    ask: Decimal
+    asof_utc: datetime
+    feed: str
+
+    def __post_init__(self) -> None:
+        if not self.symbol or self.symbol != self.symbol.strip().upper():
+            raise ValueError("NBBO symbol must be normalized uppercase")
+        if self.bid <= 0 or self.ask < self.bid:
+            raise ValueError("NBBO prices are invalid")
+        if self.asof_utc.tzinfo is None or self.asof_utc.utcoffset() != UTC.utcoffset(
+            self.asof_utc
+        ):
+            raise ValueError("NBBO timestamp must be UTC")
+
+
+class ProtectedPaperEntryRequest(BaseModel):
+    """Regular-hours Paper entry that is protected atomically at submission."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    client_order_id: str = Field(min_length=1, max_length=128)
+    symbol: str = Field(min_length=1, max_length=16, pattern=r"^[A-Z][A-Z0-9.-]*$")
+    qty: int = Field(gt=0)
+    limit_price: str = Field(min_length=1)
+    stop_loss_price: str = Field(min_length=1)
+    take_profit_price: str = Field(min_length=1)
+    side: Literal["buy"] = "buy"
+    order_type: Literal["limit"] = "limit"
+    time_in_force: Literal["day"] = "day"
+    extended_hours: Literal[False] = False
+
+    def broker_payload(self) -> dict[str, object]:
+        return {
+            "client_order_id": self.client_order_id,
+            "symbol": self.symbol,
+            "qty": str(self.qty),
+            "side": self.side,
+            "type": self.order_type,
+            "time_in_force": self.time_in_force,
+            "extended_hours": self.extended_hours,
+            "limit_price": self.limit_price,
+            "order_class": "bracket",
+            "stop_loss": {"stop_price": self.stop_loss_price},
+            "take_profit": {"limit_price": self.take_profit_price},
+        }
+
+
+def build_protected_entry(
+    *,
+    client_order_id: str,
+    symbol: str,
+    qty: int,
+    signal_reference: Decimal,
+    structural_stop: Decimal,
+    quote: FreshNbboQuote,
+    observed_at_utc: datetime,
+    maximum_spread_or_slippage: Decimal = Decimal("0.001"),
+    maximum_quote_age_seconds: Decimal = Decimal("2"),
+    maximum_all_in_stop: Decimal = Decimal("0.02"),
+    stop_slippage_reserve: Decimal = Decimal("0"),
+    target_r: Decimal = Decimal("3"),
+) -> ProtectedPaperEntryRequest:
+    """Build one marketable limit bracket from an immediate Alpaca SIP NBBO."""
+    if observed_at_utc.tzinfo is None or observed_at_utc.utcoffset() != UTC.utcoffset(
+        observed_at_utc
+    ):
+        raise ValueError("entry observation timestamp must be UTC")
+    normalized_symbol = symbol.strip().upper()
+    if quote.symbol != normalized_symbol:
+        raise ValueError("NBBO symbol does not match entry symbol")
+    if quote.feed.strip().lower() != "sip":
+        raise ValueError("Alpaca SIP NBBO is required for Paper entry")
+    age_seconds = Decimal(str((observed_at_utc - quote.asof_utc).total_seconds()))
+    if age_seconds < 0 or age_seconds > maximum_quote_age_seconds:
+        raise ValueError("immediate NBBO is stale")
+    midpoint = (quote.bid + quote.ask) / Decimal(2)
+    spread = (quote.ask - quote.bid) / midpoint
+    if spread > maximum_spread_or_slippage:
+        raise ValueError("immediate NBBO spread exceeds 0.10%")
+    if signal_reference <= 0 or quote.ask > signal_reference * (
+        Decimal(1) + maximum_spread_or_slippage
+    ):
+        raise ValueError("immediate NBBO slippage exceeds 0.10%")
+    if structural_stop <= 0 or structural_stop >= quote.ask:
+        raise ValueError("protective stop must be below the entry ask")
+    all_in_stop = (quote.ask - structural_stop) / quote.ask + stop_slippage_reserve
+    if all_in_stop > maximum_all_in_stop:
+        raise ValueError("all-in stop exceeds 2%")
+    limit_price = _price_text(quote.ask, rounding=ROUND_CEILING)
+    stop_price = _price_text(structural_stop, rounding=ROUND_FLOOR)
+    target = quote.ask + target_r * (quote.ask - structural_stop)
+    target_price = _price_text(target, rounding=ROUND_CEILING)
+    return ProtectedPaperEntryRequest(
+        client_order_id=client_order_id,
+        symbol=normalized_symbol,
+        qty=qty,
+        limit_price=limit_price,
+        stop_loss_price=stop_price,
+        take_profit_price=target_price,
+    )
+
+
+def _price_text(value: Decimal, *, rounding: str) -> str:
+    tick = Decimal("0.0001") if value < 1 else Decimal("0.01")
+    return format(value.quantize(tick, rounding=rounding), "f")
 
 
 class PaperCloseRequest(BaseModel):
@@ -254,6 +371,19 @@ class CloudPaperBroker:
         )
         return BrokerOrder.model_validate(payload.get("order"))
 
+    def submit_protected_entry_idempotent(
+        self,
+        request: ProtectedPaperEntryRequest,
+    ) -> BrokerOrder:
+        if not self.writes_enabled:
+            raise BrokerWritesDisabledError("paper broker writes are disabled")
+        payload = self._request(
+            "POST",
+            f"/{PLATFORM_API_VERSION}/paper/orders",
+            json_body={"kind": "entry", "request": request.model_dump(mode="json")},
+        )
+        return BrokerOrder.model_validate(payload.get("order"))
+
     def submit_close_order_idempotent(self, request: PaperCloseRequest) -> BrokerOrder:
         if not self.writes_enabled:
             raise BrokerWritesDisabledError("paper broker writes are disabled")
@@ -373,7 +503,7 @@ class DirectAlpacaPaperBroker:
         response = self._request_raw(
             "GET",
             "/v2/orders:by_client_order_id",
-            params={"client_order_id": client_order_id},
+            params={"client_order_id": client_order_id, "nested": "true"},
             allowed_statuses=frozenset({200, 404}),
         )
         if response.status_code == 404:
@@ -390,6 +520,15 @@ class DirectAlpacaPaperBroker:
         return response.status_code == 204
 
     def submit_order_idempotent(self, request: PaperOrderRequest) -> BrokerOrder:
+        return self._submit_idempotent(
+            client_order_id=request.client_order_id,
+            payload=request.broker_payload(),
+        )
+
+    def submit_protected_entry_idempotent(
+        self,
+        request: ProtectedPaperEntryRequest,
+    ) -> BrokerOrder:
         return self._submit_idempotent(
             client_order_id=request.client_order_id,
             payload=request.broker_payload(),

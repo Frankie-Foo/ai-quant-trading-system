@@ -14,17 +14,19 @@ import polars as pl
 from pydantic import SecretStr
 
 from data_plane.calendar import build_xnys_schedule
-from data_plane.providers.alpaca import fetch_bars
+from data_plane.providers.alpaca import fetch_bars, fetch_quotes
 from execution.alpaca_paper import (
     BrokerOrder,
     DirectAlpacaPaperBroker,
+    FreshNbboQuote,
     PaperCloseRequest,
-    PaperOrderRequest,
-    PaperStopRequest,
+    build_protected_entry,
 )
+from operations.autonomous_selection_handoff import load_open_confirmation
 from operations.feishu_base import FeishuBaseEventClient, InvestmentTable
 from operations.livermore_push import LivermorePushClient, configured_identity
 from operations.local_env import load_project_env, project_data_root
+from operations.paper_runtime_policy import PaperRuntimePolicy
 from research.h30_challenger import _five_minute_bars
 from research.modern_momentum import (
     ModernMomentumConfig,
@@ -39,6 +41,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MAX_DAILY_ENTRIES = 3
 TERMINAL = frozenset({"filled", "canceled", "expired", "rejected"})
 ATTEMPT_WEIGHTS = {1: 0.6, 2: 0.4}
+STRATEGY_VERSION = "modern-h15.v1"
 
 
 def _attempt(position: dict[str, object]) -> int:
@@ -118,6 +121,44 @@ def _broker(*, writes_enabled: bool) -> DirectAlpacaPaperBroker:
 
 def _filled(order: BrokerOrder) -> bool:
     return order.status.lower() == "filled" and Decimal(order.filled_qty) > 0
+
+
+def _latest_sip_nbbo(symbol: str, observed_at_utc: datetime) -> FreshNbboQuote:
+    frame = fetch_quotes(
+        (symbol,),
+        observed_at_utc - timedelta(seconds=10),
+        observed_at_utc + timedelta(microseconds=1),
+        feed="sip",
+    ).sort("ts_utc")
+    if frame.is_empty():
+        raise RuntimeError("immediate Alpaca SIP NBBO is unavailable")
+    row = frame.tail(1).row(0, named=True)
+    bid = row.get("bid_price")
+    ask = row.get("ask_price")
+    asof = row.get("ts_utc")
+    feed = row.get("feed")
+    if not isinstance(bid, (int, float)) or not isinstance(ask, (int, float)):
+        raise RuntimeError("immediate Alpaca SIP NBBO prices are unavailable")
+    if not isinstance(asof, datetime) or not isinstance(feed, str):
+        raise RuntimeError("immediate Alpaca SIP NBBO identity is unavailable")
+    return FreshNbboQuote(
+        symbol=symbol,
+        bid=Decimal(str(bid)),
+        ask=Decimal(str(ask)),
+        asof_utc=asof,
+        feed=feed,
+    )
+
+
+def _bracket_child(order: BrokerOrder, order_type: str) -> BrokerOrder:
+    matches = tuple(
+        leg
+        for leg in order.legs
+        if (leg.order_type or "").lower() == order_type and (leg.side or "").lower() == "sell"
+    )
+    if len(matches) != 1:
+        raise RuntimeError(f"protected Paper entry is missing its {order_type} child")
+    return matches[0]
 
 
 def _record_fill(
@@ -205,6 +246,7 @@ def main() -> None:
     parser.add_argument("--trade-date", required=True, type=date.fromisoformat)
     parser.add_argument("--arm-paper", action="store_true")
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--confirmation-path", type=Path)
     args = parser.parse_args()
     data_root = project_data_root(ROOT)
     pool = _latest_pool(data_root, args.trade_date)
@@ -213,7 +255,29 @@ def main() -> None:
     start_at = opened + timedelta(minutes=26)
     stop_at = opened + timedelta(minutes=377)
     symbols = tuple(pool.get_column("symbol").to_list())
-    broker = _broker(writes_enabled=bool(args.arm_paper))
+    confirmation_path = args.confirmation_path or (
+        ROOT
+        / "runs"
+        / "autonomous"
+        / args.trade_date.isoformat()
+        / "open_confirmation.json"
+    )
+    confirmation = load_open_confirmation(confirmation_path)
+    broker_write_enabled = os.getenv("BROKER_WRITE_ENABLED", "").strip().lower() == "true"
+    kill_switch = os.getenv("TRADING_KILL_SWITCH", "true").strip().lower() != "false"
+    broker = _broker(
+        writes_enabled=bool(args.arm_paper and broker_write_enabled and not kill_switch)
+    )
+    if not args.check:
+        PaperRuntimePolicy().validate_arming(
+            trade_date=args.trade_date,
+            broker_write_enabled=broker_write_enabled and bool(args.arm_paper),
+            trading_kill_switch=kill_switch,
+            broker_base_url=broker.base_url,
+            authorization=confirmation.authorization,
+            expected_candidate_pool=symbols,
+            expected_strategy_version=STRATEGY_VERSION,
+        )
     account = broker.get_account()
     if account.status != "ACTIVE" or account.account_blocked or account.trading_blocked:
         raise RuntimeError("Alpaca Paper account is not tradable")
@@ -297,24 +361,13 @@ def main() -> None:
                             continue
                         attempt = _attempt(position)
                         quantity = int(Decimal(entry.filled_qty))
-                        stop_level = position["stop_level"]
-                        if not isinstance(stop_level, (int, float)):
-                            raise ValueError("Paper stop level is invalid")
                         filled_price = float(entry.filled_avg_price or 0)
-                        stop_level = max(stop_level, filled_price * 0.985)
-                        stop_client_id = order_id(
-                            args.trade_date.isoformat(), symbol, "stop", attempt=attempt
-                        )
-                        stop = broker.submit_stop_order_idempotent(
-                            PaperStopRequest(
-                                client_order_id=stop_client_id,
-                                symbol=symbol,
-                                qty=quantity,
-                                stop_price=f"{stop_level:.2f}",
-                            )
-                        )
-                        if stop.status.lower() in {"rejected", "canceled", "expired"}:
-                            raise RuntimeError("protective Paper stop was rejected")
+                        stop = _bracket_child(entry, "stop")
+                        target = _bracket_child(entry, "limit")
+                        raw_stop_level = position["stop_level"]
+                        if not isinstance(raw_stop_level, (int, float)):
+                            raise ValueError("Paper stop level is invalid")
+                        stop_level = float(raw_stop_level)
                         position.update(
                             {
                                 "phase": "active",
@@ -322,7 +375,8 @@ def main() -> None:
                                 "entry_px": filled_price,
                                 "stop_level": stop_level,
                                 "target_level": filled_price + 3 * (filled_price - stop_level),
-                                "stop_client_id": stop_client_id,
+                                "stop_client_id": stop.client_order_id,
+                                "target_client_id": target.client_order_id,
                             }
                         )
                         reason = (
@@ -366,28 +420,53 @@ def main() -> None:
                             }
                         )
                     elif phase == "active":
-                        current_stop = broker.get_order_by_client_id(
-                            str(position["stop_client_id"])
+                        exit_orders = (
+                            (
+                                "stop",
+                                broker.get_order_by_client_id(
+                                    str(position["stop_client_id"])
+                                ),
+                            ),
+                            (
+                                "target",
+                                broker.get_order_by_client_id(
+                                    str(position["target_client_id"])
+                                ),
+                            ),
                         )
-                        if current_stop is None or not _filled(current_stop):
+                        filled_exit = next(
+                            (
+                                (kind, order)
+                                for kind, order in exit_orders
+                                if order is not None and _filled(order)
+                            ),
+                            None,
+                        )
+                        if filled_exit is None:
                             continue
+                        exit_kind, current_exit = filled_exit
                         attempt = _attempt(position)
+                        bracket_exit_reason = (
+                            f"第{attempt}次入场保护止损"
+                            if exit_kind == "stop"
+                            else f"第{attempt}次入场3R止盈"
+                        )
                         message_ids.append(
                             _push_fill(
                                 push,
                                 symbol=symbol,
                                 direction="卖出",
-                                order=current_stop,
-                                reason=f"第{attempt}次入场保护止损",
+                                order=current_exit,
+                                reason=bracket_exit_reason,
                             )
                         )
                         feishu_error = _record_fill_best_effort(
                             base,
-                            client_order_id=str(position["stop_client_id"]),
+                            client_order_id=current_exit.client_order_id,
                             symbol=symbol,
                             direction="卖出",
-                            order=current_stop,
-                            reason=f"第{attempt}次入场保护止损",
+                            order=current_exit,
+                            reason=bracket_exit_reason,
                         )
                         if feishu_error is not None:
                             events.append(
@@ -401,14 +480,14 @@ def main() -> None:
                             )
                         events.append(
                             {
-                                "type": "paper_stop_filled",
+                                "type": f"paper_{exit_kind}_filled",
                                 "symbol": symbol,
                                 "attempt": attempt,
-                                "order": current_stop.id,
+                                "order": current_exit.id,
                             }
                         )
                         positions.pop(symbol)
-                        if attempt == 1:
+                        if attempt == 1 and exit_kind == "stop":
                             reentry_after[symbol] = datetime.now(UTC)
                         else:
                             completed.add(symbol)
@@ -499,7 +578,6 @@ def main() -> None:
                             continue
                         entry_price = trade.entry_px
                         stop_level = trade.stop_level
-                        all_in_stop_pct = trade.all_in_stop_pct
                         signal_ts_utc = trade.signal_ts_utc
                         if attempt == 2:
                             stopped_at = reentry_after.get(symbol)
@@ -521,11 +599,13 @@ def main() -> None:
                                 reentry.structural_stop,
                                 entry_price * 0.985,
                             )
-                            all_in_stop_pct = (
-                                (entry_price - stop_level) / entry_price
-                                + config.stop_slippage_reserve_pct
-                            )
                             signal_ts_utc = reentry.signal_ts_utc
+                        quote_observed_at = datetime.now(UTC)
+                        quote = _latest_sip_nbbo(symbol, quote_observed_at)
+                        actual_all_in_stop_pct = (
+                            float((quote.ask - Decimal(str(stop_level))) / quote.ask)
+                            + config.stop_slippage_reserve_pct
+                        )
                         current_account = broker.get_account()
                         remaining_slots = max(1, MAX_DAILY_ENTRIES - len(positions))
                         base_fraction = risk_fraction(
@@ -536,8 +616,8 @@ def main() -> None:
                             attempt=attempt,
                         )
                         quantity = position_size(
-                            entry_price=entry_price,
-                            all_in_stop_pct=all_in_stop_pct,
+                            entry_price=float(quote.ask),
+                            all_in_stop_pct=actual_all_in_stop_pct,
                             equity=float(current_account.equity),
                             buying_power=float(current_account.buying_power),
                             risk_fraction=allocation_fraction,
@@ -549,12 +629,20 @@ def main() -> None:
                             "entry",
                             attempt=attempt,
                         )
-                        entry = broker.submit_order_idempotent(
-                            PaperOrderRequest(
-                                client_order_id=entry_client_id,
-                                symbol=symbol,
-                                qty=quantity,
-                            )
+                        protected_entry = build_protected_entry(
+                            client_order_id=entry_client_id,
+                            symbol=symbol,
+                            qty=quantity,
+                            signal_reference=Decimal(str(entry_price)),
+                            structural_stop=Decimal(str(stop_level)),
+                            quote=quote,
+                            observed_at_utc=datetime.now(UTC),
+                            stop_slippage_reserve=Decimal(
+                                str(config.stop_slippage_reserve_pct)
+                            ),
+                        )
+                        entry = broker.submit_protected_entry_idempotent(
+                            protected_entry
                         )
                         if entry.status.lower() in {"rejected", "canceled", "expired"}:
                             raise RuntimeError("Alpaca Paper entry was rejected")
@@ -564,12 +652,12 @@ def main() -> None:
                             "entry_client_id": entry_client_id,
                             "entry_order_id": entry.id,
                             "signal_ts_utc": signal_ts_utc,
-                            "stop_level": stop_level,
-                            "target_level": entry_price + 3 * (entry_price - stop_level),
+                            "stop_level": float(protected_entry.stop_loss_price),
+                            "target_level": float(protected_entry.take_profit_price),
                             "sizing_equity": current_account.equity,
                             "sizing_buying_power": current_account.buying_power,
                             "risk_fraction": allocation_fraction,
-                            "all_in_stop_pct": all_in_stop_pct,
+                            "all_in_stop_pct": actual_all_in_stop_pct,
                         }
                         attempts[symbol] = attempt
                         if attempt == 1:
@@ -604,11 +692,12 @@ def main() -> None:
                             continue
                     elif exit_reason in {"data_end", "stop"}:
                         continue
-                    stop_order = broker.get_order_by_client_id(
-                        str(candidate_position["stop_client_id"])
-                    )
-                    if stop_order is not None and stop_order.status.lower() not in TERMINAL:
-                        broker.cancel_order(stop_order.id)
+                    for child_key in ("stop_client_id", "target_client_id"):
+                        child_order = broker.get_order_by_client_id(
+                            str(candidate_position[child_key])
+                        )
+                        if child_order is not None and child_order.status.lower() not in TERMINAL:
+                            broker.cancel_order(child_order.id)
                     paper_positions = {item.symbol: item for item in broker.list_positions()}
                     paper_position = paper_positions.get(symbol)
                     if paper_position is None:

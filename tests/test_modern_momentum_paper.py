@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from pathlib import Path
 
 from execution.alpaca_paper import BrokerOrder
 from research.h30_challenger import _FiveMinuteBar
@@ -11,6 +12,17 @@ from scripts.monitor_modern_momentum_paper import (
     reentry_exit_reason,
     risk_fraction,
 )
+
+
+def test_modern_paper_source_never_submits_an_unprotected_entry() -> None:
+    source = Path(__file__).parents[1].joinpath(
+        "scripts", "monitor_modern_momentum_paper.py"
+    ).read_text(encoding="utf-8")
+    assert "build_protected_entry" in source
+    assert "load_open_confirmation" in source
+    assert "validate_arming" in source
+    assert "PaperOrderRequest(" not in source
+    assert "submit_stop_order_idempotent" not in source
 
 
 def test_paper_identity_and_position_size_are_bounded() -> None:
