@@ -67,6 +67,12 @@ walk-forward evaluation, Champion/Challenger comparison, and promotion remain co
 contracts. Missing minute paths are censored rather than interpolated. Agent output can
 reach only `eligible_for_sandbox_experiment`; it can never approve itself for the kernel.
 
+The research registry also applies the governed AI4S cycle described in
+`AI4S_RESEARCH_LOOP.md`. Every evaluated strategy claim records one falsifiable
+hypothesis, changed variable, control, validation plan, evidence package, and
+deterministic admission decision. Historical success can admit only a Paper experiment;
+Paper evidence can admit only human review. Neither stage grants production eligibility.
+
 Before either agent runs, a deterministic program review calculates history counts,
 censored paths, gross and net label availability, and allowlisted experiment metadata.
 History is restricted to sessions at or before the reviewed date; agent context contains

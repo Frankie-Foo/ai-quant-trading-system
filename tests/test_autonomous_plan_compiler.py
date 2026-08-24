@@ -8,7 +8,10 @@ import pytest
 
 from data_plane.storage import persist_snapshot
 from operations.autonomous_paper_config import load_autonomous_paper_config
-from operations.autonomous_plan_compiler import compile_autonomous_paper_plan
+from operations.autonomous_plan_compiler import (
+    compile_autonomous_paper_plan,
+    compile_autonomous_paper_plans,
+)
 
 TRADE_DATE = date(2026, 7, 31)
 
@@ -88,6 +91,28 @@ def test_compiler_rejects_incomplete_survivor_instead_of_inventing_plan(
             trade_date=TRADE_DATE,
             output_path=tmp_path / "approved.json",
         )
+
+
+def test_compiler_can_freeze_ranked_candidates_for_autonomous_monitoring(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    output_path = tmp_path / "runs" / "autonomous" / "paper.json"
+    _persist_selection(data_root, _rows())
+
+    prepared = compile_autonomous_paper_plans(
+        data_root=data_root,
+        trade_date=TRADE_DATE,
+        output_path=output_path,
+    )
+
+    config = load_autonomous_paper_config(output_path)
+    assert [item.symbol for item in prepared] == ["FIRST", "SECOND"]
+    assert config.poll_seconds == 1
+    assert [bundle.plan.symbol for bundle in config.plans] == ["FIRST", "SECOND"]
+    assert config.plans[0].safety_envelope_path == (
+        output_path.parent / "safety" / "auto-20260731-FIRST.json"
+    )
 
 
 def test_compiler_refuses_stale_selection_snapshot(tmp_path: Path) -> None:

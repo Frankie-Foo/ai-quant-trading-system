@@ -201,6 +201,34 @@ def test_regular_entry_can_attach_stop_without_forcing_full_take_profit() -> Non
     }
 
 
+def test_regular_entry_can_be_submitted_without_attached_legs() -> None:
+    request = PaperOrderRequest(
+        client_order_id="tsv2-AAPL-probe-entry",
+        symbol="AAPL",
+        qty=5,
+    )
+
+    assert request.broker_payload() == {
+        "client_order_id": "tsv2-AAPL-probe-entry",
+        "symbol": "AAPL",
+        "qty": "5",
+        "side": "buy",
+        "type": "market",
+        "time_in_force": "day",
+        "extended_hours": False,
+    }
+
+
+def test_take_profit_entry_requires_a_protective_stop() -> None:
+    with pytest.raises(ValueError, match="requires stop_loss_price"):
+        PaperOrderRequest(
+            client_order_id="tsv2-AAPL-invalid-entry",
+            symbol="AAPL",
+            qty=5,
+            take_profit_price="230.00",
+        )
+
+
 def test_regular_protective_stop_is_sell_only_and_cannot_open_a_long() -> None:
     request = PaperStopRequest(
         client_order_id="tsv2-AAPL-premarket-handoff",

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Literal
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 PLATFORM_API_VERSION = "v1"
 
@@ -72,7 +72,13 @@ class PaperOrderRequest(BaseModel):
     extended_hours: Literal[False] = False
     limit_price: str | None = None
     take_profit_price: str | None = Field(default=None, min_length=1)
-    stop_loss_price: str = Field(min_length=1)
+    stop_loss_price: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def require_stop_for_take_profit(self) -> "PaperOrderRequest":
+        if self.take_profit_price is not None and self.stop_loss_price is None:
+            raise ValueError("take-profit entry requires stop_loss_price")
+        return self
 
     def broker_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -83,11 +89,14 @@ class PaperOrderRequest(BaseModel):
             "type": self.order_type,
             "time_in_force": self.time_in_force,
             "extended_hours": self.extended_hours,
-            "order_class": ("bracket" if self.take_profit_price is not None else "oto"),
-            "stop_loss": {"stop_price": self.stop_loss_price},
         }
-        if self.take_profit_price is not None:
-            payload["take_profit"] = {"limit_price": self.take_profit_price}
+        if self.stop_loss_price is not None:
+            payload["order_class"] = (
+                "bracket" if self.take_profit_price is not None else "oto"
+            )
+            payload["stop_loss"] = {"stop_price": self.stop_loss_price}
+            if self.take_profit_price is not None:
+                payload["take_profit"] = {"limit_price": self.take_profit_price}
         if self.order_type == "limit":
             if self.limit_price is None:
                 raise ValueError("limit order requires limit_price")

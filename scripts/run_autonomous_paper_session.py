@@ -20,6 +20,7 @@ from execution.autonomous_paper_session import (
     AutonomousPaperBroker,
     PaperSessionLedger,
     PaperSessionOrchestrator,
+    SessionAction,
 )
 from execution.ibkr_paper_broker import IBKRPaperBroker
 from execution.ibkr_tws_adapter import OfficialIbapiPaperAdapter
@@ -41,7 +42,7 @@ from operations.autonomous_paper_config import (
 from operations.autonomous_paper_runtime import AutonomousPaperRuntime
 from operations.autonomous_policy_adapter import load_runtime_safety_envelope
 from operations.feishu_base import FeishuBaseEventClient
-from operations.livermore_push import LivermorePushClient
+from operations.livermore_push import LivermorePushClient, configured_identity
 from operations.local_env import load_project_env
 from schedule.runtime import JsonEventLogger, ProcessLock
 
@@ -213,10 +214,11 @@ def ibkr_paper_profile(
 def _livermore_push(
     environment: Mapping[str, str],
 ) -> LivermorePushClient:
+    app_id, channel_id = configured_identity(environment)
     return LivermorePushClient(
-        app_id=environment.get("VPS_LIVERMORE_APP_ID", "").strip(),
+        app_id=app_id,
         app_secret=SecretStr(environment.get("VPS_LIVERMORE_APP_SECRET", "")),
-        channel_id=environment.get("VPS_LIVERMORE_CHANNEL_ID", "").strip(),
+        channel_id=channel_id,
     )
 
 
@@ -279,9 +281,10 @@ def main() -> int:
         base=base,
         broker_identity=str(getattr(broker, "broker_identity", "unknown")),
     )
+    session_ledger = PaperSessionLedger(args.state_db)
     orchestrator = PaperSessionOrchestrator(
         broker=broker,
-        ledger=PaperSessionLedger(args.state_db),
+        ledger=session_ledger,
         paper_authorized=paper_authorized,
         owned_symbols=frozenset(bundle.plan.symbol for bundle in config.plans),
     )
@@ -305,6 +308,15 @@ def main() -> int:
                         observed_at_utc=observed_at,
                     )
                     for outcome in outcomes:
+                        plan = plans_by_id[outcome.plan_id]
+                        session_ledger.record_plan_evaluation(
+                            plan,
+                            action=outcome.result.action,
+                            reasons=outcome.result.reasons,
+                            degraded_reasons=outcome.degraded_reasons,
+                            submitted_order_ids=outcome.result.submitted_order_ids,
+                            at_utc=observed_at,
+                        )
                         logger.emit(
                             "autonomous_paper_plan_evaluated",
                             plan_id=outcome.plan_id,
@@ -356,6 +368,14 @@ def main() -> int:
                         live_trading_authorized=False,
                     )
                     for bundle in config.plans:
+                        session_ledger.record_plan_evaluation(
+                            bundle.plan,
+                            action=SessionAction.DATA_BLOCKED,
+                            reasons=("autonomous_runtime_failed",),
+                            degraded_reasons=("autonomous_runtime_failed",),
+                            submitted_order_ids=(),
+                            at_utc=observed_at,
+                        )
                         try:
                             fallback = runtime.fail_closed_plan(
                                 plan_id=bundle.plan.plan_id,

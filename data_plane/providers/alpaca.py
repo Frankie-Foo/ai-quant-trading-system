@@ -11,6 +11,8 @@ from pydantic import SecretStr
 
 from data_plane.http import DownloadError
 from data_plane.providers.alpaca_direct import (
+    BarAdjustment,
+    BarTimeframe,
     DirectAlpacaMarketDataClient,
     DirectMarketDataError,
 )
@@ -108,6 +110,8 @@ def _direct_bars(
     end_utc: datetime,
     *,
     feed: AlpacaStockFeed,
+    timeframe: BarTimeframe = "1Min",
+    adjustment: BarAdjustment = "split",
 ) -> pl.DataFrame:
     client = _direct_client(feed)
     try:
@@ -115,6 +119,8 @@ def _direct_bars(
             symbols,
             start_utc=start_utc,
             end_utc=end_utc,
+            timeframe=timeframe,
+            adjustment=adjustment,
         )
     except (DirectMarketDataError, ValueError) as exc:
         raise DownloadError("direct Alpaca market-data request failed") from exc
@@ -131,9 +137,13 @@ def _direct_bars(
             "volume": event.volume,
             "trade_count": event.trade_count,
             "vwap": event.vwap,
-            "source": "alpaca.sip.rest.bars",
+            "source": (
+                "alpaca.sip.rest.bars"
+                if timeframe == "1Min"
+                else "alpaca.sip.rest.bars.1day"
+            ),
             "feed": event.feed,
-            "adjustment": "split_adjusted",
+            "adjustment": "split_adjusted" if adjustment == "split" else "raw",
         }
         for event in events
     ]
@@ -369,6 +379,30 @@ def fetch_bars(
     frame = pl.DataFrame(rows) if rows else _empty_frame()
     return canonicalize_bars(frame).filter(
         (pl.col("ts_utc") >= start_utc) & (pl.col("ts_utc") < end_utc)
+    )
+
+
+def fetch_daily_bars(
+    symbols: tuple[str, ...],
+    start_utc: datetime,
+    end_utc: datetime,
+    *,
+    feed: AlpacaStockFeed | None = None,
+    adjustment: BarAdjustment = "split",
+) -> pl.DataFrame:
+    """Fetch split-adjusted daily SIP bars for research backfills."""
+    selected_feed = feed or stock_data_policy_from_env().feed
+    if not symbols:
+        raise ValueError("at least one symbol is required")
+    if market_data_provider_from_env() != "alpaca_direct":
+        raise RuntimeError("daily research backfill requires direct Alpaca SIP")
+    return _direct_bars(
+        symbols,
+        start_utc,
+        end_utc,
+        feed=selected_feed,
+        timeframe="1Day",
+        adjustment=adjustment,
     )
 
 

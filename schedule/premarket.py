@@ -28,6 +28,8 @@ SELECTION_JOB = "premarket_final_selection"
 SELECTION_VERSION = "premarket_final_selection.v4"
 SHADOW_JOB = "premarket_multisignal_shadow"
 SHADOW_VERSION = "premarket_multisignal_shadow.v1"
+RECOVERY_JOB = "selection_recovery_shadow"
+RECOVERY_VERSION = "selection_recovery_shadow.v1"
 
 
 def _parse_date(value: str) -> date:
@@ -229,6 +231,32 @@ def _shadow_stage(
     )
 
 
+def recovery_due(trade_date: date) -> datetime:
+    schedule = build_xnys_schedule(trade_date, trade_date)
+    if schedule.height != 1:
+        raise ValueError("trade date is not an XNYS session")
+    market_open = schedule.row(0, named=True)["market_open_utc"]
+    if not isinstance(market_open, datetime):
+        raise ValueError("market open is invalid")
+    return market_open + timedelta(minutes=35)
+
+
+def _recovery_stage(
+    trade_date: date, data_root: Path, logger: JsonEventLogger
+) -> tuple[str, ...]:
+    return _run(
+        [
+            "-m",
+            "scripts.run_selection_recovery_shadow",
+            "--trade-date",
+            trade_date.isoformat(),
+            "--data-root",
+            str(data_root),
+        ],
+        logger=logger,
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trade-date", type=_parse_date)
@@ -389,10 +417,52 @@ def _run_locked(
                     primary_selection_affected=False,
                     orders_submitted=0,
                 )
+    recovery_status = "not_due"
+    if now_utc >= recovery_due(trade_date):
+        recovery_status = "pending"
+        recovery_lease = ledger.acquire(
+            RECOVERY_JOB,
+            trade_date,
+            RECOVERY_VERSION,
+            max_attempts=cfg.scheduler.premarket_max_attempts,
+            retry_after=timedelta(minutes=cfg.scheduler.premarket_retry_minutes),
+        )
+        if recovery_lease is not None:
+            try:
+                recovery_artifacts = _recovery_stage(
+                    trade_date, args.data_root, logger
+                )
+                ledger.complete(recovery_lease, artifact_ids=recovery_artifacts)
+                recovery_status = "complete"
+            except Exception as exc:
+                ledger.fail(recovery_lease, error_code=type(exc).__name__)
+                recovery_status = "failed_retryable"
+                logger.emit(
+                    "selection_recovery_shadow_failed",
+                    level="warning",
+                    error_code=type(exc).__name__,
+                    primary_selection_affected=False,
+                    orders_submitted=0,
+                )
+        else:
+            recovery_record = ledger.get(
+                RECOVERY_JOB, trade_date, RECOVERY_VERSION
+            )
+            if (
+                recovery_record is not None
+                and recovery_record.status is JobStatus.SUCCEEDED
+            ):
+                recovery_status = "complete"
+            elif (
+                recovery_record is not None
+                and recovery_record.attempts >= cfg.scheduler.premarket_max_attempts
+            ):
+                recovery_status = "exhausted"
     logger.emit(
         "tick_completed",
         orders_submitted=0,
         multisignal_shadow_status=shadow_status,
+        selection_recovery_shadow_status=recovery_status,
     )
     return 0
 

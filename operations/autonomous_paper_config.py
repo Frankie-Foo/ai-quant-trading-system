@@ -123,9 +123,7 @@ def load_autonomous_paper_config(path: Path) -> AutonomousPaperRuntimeConfig:
 
 
 def _load_plan(values: dict[str, Any]) -> AutonomousPaperPlan:
-    _exact_keys(
-        values,
-        expected={
+    required = {
             "plan_id",
             "symbol",
             "trade_date",
@@ -136,9 +134,14 @@ def _load_plan(values: dict[str, Any]) -> AutonomousPaperPlan:
             "max_spread_ratio",
             "source_snapshot_ids",
             "provenance",
-        },
-        name="autonomous Paper plan",
-    )
+    }
+    optional = {"take_profit_1", "take_profit_2"}
+    unexpected = set(values) - required - optional
+    missing = required - set(values)
+    if unexpected:
+        raise ValueError("autonomous Paper plan has unexpected fields")
+    if missing:
+        raise ValueError("autonomous Paper plan is missing required fields")
     source_ids = values["source_snapshot_ids"]
     if not isinstance(source_ids, list) or not all(
         isinstance(item, str) for item in source_ids
@@ -155,7 +158,21 @@ def _load_plan(values: dict[str, Any]) -> AutonomousPaperPlan:
         source_snapshot_ids=tuple(source_ids),
         provenance=str(values["provenance"]),
         max_spread_ratio=Decimal(str(values["max_spread_ratio"])),
+        take_profit_1=_optional_decimal(values.get("take_profit_1"), name="take_profit_1"),
+        take_profit_2=_optional_decimal(values.get("take_profit_2"), name="take_profit_2"),
     )
+
+
+def _optional_decimal(value: object, *, name: str) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except Exception as exc:
+        raise ValueError(f"{name} is invalid") from exc
+    if not parsed.is_finite() or parsed <= 0:
+        raise ValueError(f"{name} must be finite and positive when available")
+    return parsed
 
 
 def _load_evidence(values: dict[str, Any]) -> AutonomousPolicyEvidence:

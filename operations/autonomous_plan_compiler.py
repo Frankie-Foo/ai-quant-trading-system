@@ -17,7 +17,7 @@ import polars as pl
 from data_plane.contracts import DatasetSnapshot
 from operations.autonomous_paper_config import SCHEMA_VERSION
 
-POLL_SECONDS = 15
+POLL_SECONDS = 1
 HARD_STOP_FRACTION = Decimal("0.02")
 MAX_NOTIONAL_FRACTION = Decimal("0.10")
 FULL_RISK_FRACTION = Decimal("0.0035")
@@ -33,6 +33,64 @@ class PreparedAutonomousPaperPlan:
     plan_id: str
     selection_snapshot_id: str
     output_path: Path
+
+
+def compile_autonomous_paper_plans(
+    *,
+    data_root: Path,
+    trade_date: date,
+    output_path: Path,
+    max_plans: int = 5,
+) -> tuple[PreparedAutonomousPaperPlan, ...]:
+    """Freeze the highest-ranked eligible selections into one Paper config."""
+
+    if max_plans < 1:
+        raise ValueError("max_plans must be positive")
+    snapshot, frame = _current_selection(data_root=data_root, trade_date=trade_date)
+    rows = _eligible_candidates(frame)[:max_plans]
+    if not rows:
+        raise ValueError("no eligible current selection candidate")
+    prepared: list[PreparedAutonomousPaperPlan] = []
+    plans: list[dict[str, object]] = []
+    for row in rows:
+        symbol = _symbol(row)
+        reference = _price(row, "premarket_close")
+        _require_candidate_gates(row)
+        gate_asof = _utc_timestamp(row, "gate_asof_utc")
+        hard_stop = (reference * (Decimal(1) - HARD_STOP_FRACTION)).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        if hard_stop <= 0 or hard_stop >= reference:
+            continue
+        plan_id = f"auto-{trade_date:%Y%m%d}-{symbol}"
+        plans.append(
+            _plan_payload(
+                trade_date=trade_date,
+                symbol=symbol,
+                plan_id=plan_id,
+                reference=reference,
+                hard_stop=hard_stop,
+                selection_snapshot_id=snapshot.dataset_id,
+                gate_asof=gate_asof,
+                safety_envelope=f"safety/{plan_id}.json",
+            )
+        )
+        prepared.append(
+            PreparedAutonomousPaperPlan(
+                trade_date=trade_date,
+                symbol=symbol,
+                plan_id=plan_id,
+                selection_snapshot_id=snapshot.dataset_id,
+                output_path=output_path,
+            )
+        )
+    if not plans:
+        raise ValueError("no eligible current selection candidate")
+    _write_atomic_json(
+        output_path,
+        {"schema_version": SCHEMA_VERSION, "poll_seconds": POLL_SECONDS, "plans": plans},
+    )
+    return tuple(prepared)
 
 
 def compile_autonomous_paper_plan(
@@ -106,6 +164,13 @@ def _current_selection(
 
 
 def _top_candidate(frame: pl.DataFrame) -> dict[str, Any]:
+    survivors = _eligible_candidates(frame)
+    if not survivors:
+        raise ValueError("no eligible current selection candidate")
+    return survivors[0]
+
+
+def _eligible_candidates(frame: pl.DataFrame) -> list[dict[str, Any]]:
     required = {
         "symbol",
         "selection_rank",
@@ -126,8 +191,10 @@ def _top_candidate(frame: pl.DataFrame) -> dict[str, Any]:
     )
     if survivors.is_empty() or survivors.height != survivors.get_column("symbol").n_unique():
         raise ValueError("no eligible current selection candidate")
-    row = survivors.row(0, named=True)
-    return {str(key): value for key, value in row.items()}
+    return [
+        {str(key): value for key, value in row.items()}
+        for row in survivors.iter_rows(named=True)
+    ]
 
 
 def _require_candidate_gates(row: dict[str, Any]) -> None:
@@ -194,6 +261,35 @@ def _payload(
     selection_snapshot_id: str,
     gate_asof: datetime,
 ) -> dict[str, object]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "poll_seconds": POLL_SECONDS,
+        "plans": [
+            _plan_payload(
+                trade_date=trade_date,
+                symbol=symbol,
+                plan_id=plan_id,
+                reference=reference,
+                hard_stop=hard_stop,
+                selection_snapshot_id=selection_snapshot_id,
+                gate_asof=gate_asof,
+                safety_envelope=f"../safety/{plan_id}.json",
+            )
+        ],
+    }
+
+
+def _plan_payload(
+    *,
+    trade_date: date,
+    symbol: str,
+    plan_id: str,
+    reference: Decimal,
+    hard_stop: Decimal,
+    selection_snapshot_id: str,
+    gate_asof: datetime,
+    safety_envelope: str,
+) -> dict[str, object]:
     provenance = (
         "operations.autonomous_plan_compiler.v1|"
         f"selection={selection_snapshot_id}|"
@@ -201,58 +297,52 @@ def _payload(
         "hard_stop=reference_minus_2pct"
     )
     return {
-        "schema_version": SCHEMA_VERSION,
-        "poll_seconds": POLL_SECONDS,
-        "plans": [
-            {
-                "plan": {
-                    "plan_id": plan_id,
-                    "symbol": symbol,
-                    "trade_date": trade_date.isoformat(),
-                    "reference_price": f"{reference:.2f}",
-                    "hard_stop": f"{hard_stop:.2f}",
-                    "max_notional_fraction": f"{MAX_NOTIONAL_FRACTION:.2f}",
-                    "full_risk_fraction": f"{FULL_RISK_FRACTION:.4f}",
-                    "max_spread_ratio": f"{MAX_SPREAD_RATIO:.4f}",
-                    "source_snapshot_ids": [selection_snapshot_id],
-                    "provenance": provenance,
-                },
-                "policy_evidence": {
-                    "route": "catalyst",
-                    "catalyst": {
-                        "value": 75.0,
-                        "asof_utc": gate_asof.isoformat(),
-                        "provenance": (
-                            f"{selection_snapshot_id}|"
-                            "selection_gate_passed=catalyst_score_floor_75"
-                        ),
-                    },
-                    "factor": {
-                        "value": None,
-                        "asof_utc": gate_asof.isoformat(),
-                        "provenance": "factor_route_unavailable",
-                    },
-                    "right_tail": {
-                        "value": None,
-                        "asof_utc": gate_asof.isoformat(),
-                        "provenance": "right_tail_unavailable",
-                    },
-                    "first_target_reward_r": 2.5,
-                    "weighted_expected_reward_r": 3.0,
-                    "reward_risk_provenance": (
-                        "operations.autonomous_plan_compiler.v1|"
-                        "fixed_reward_risk_floor=2.5R/3.0R"
-                    ),
-                    "a_plus_plus_approved": False,
-                },
-                "market_context": {
-                    "benchmark_symbol": "SPY",
-                    "sector_symbol": "SPY",
-                    "provenance": "market_context=SPY_fallback",
-                },
-                "safety_envelope": f"../safety/{plan_id}.json",
-            }
-        ],
+        "plan": {
+            "plan_id": plan_id,
+            "symbol": symbol,
+            "trade_date": trade_date.isoformat(),
+            "reference_price": f"{reference:.2f}",
+            "hard_stop": f"{hard_stop:.2f}",
+            "max_notional_fraction": f"{MAX_NOTIONAL_FRACTION:.2f}",
+            "full_risk_fraction": f"{FULL_RISK_FRACTION:.4f}",
+            "max_spread_ratio": f"{MAX_SPREAD_RATIO:.4f}",
+            "source_snapshot_ids": [selection_snapshot_id],
+            "provenance": provenance,
+        },
+        "policy_evidence": {
+            "route": "catalyst",
+            "catalyst": {
+                "value": 75.0,
+                "asof_utc": gate_asof.isoformat(),
+                "provenance": (
+                    f"{selection_snapshot_id}|"
+                    "selection_gate_passed=catalyst_score_floor_75"
+                ),
+            },
+            "factor": {
+                "value": None,
+                "asof_utc": gate_asof.isoformat(),
+                "provenance": "factor_route_unavailable",
+            },
+            "right_tail": {
+                "value": None,
+                "asof_utc": gate_asof.isoformat(),
+                "provenance": "right_tail_unavailable",
+            },
+            "first_target_reward_r": 2.5,
+            "weighted_expected_reward_r": 3.0,
+            "reward_risk_provenance": (
+                "operations.autonomous_plan_compiler.v1|"
+                "fixed_reward_risk_floor=2.5R/3.0R"
+            ),
+            "a_plus_plus_approved": False,
+        },
+        "market_context": {
+            "benchmark_symbol": "SPY",
+            "sector_symbol": "SPY",
+            "provenance": "market_context=SPY_fallback",
+        },
+        "safety_envelope": safety_envelope,
     }
 
 

@@ -6,17 +6,22 @@ function Register-ObservationTask {
         [Parameter(Mandatory = $true)][string]$Runner,
         [Parameter(Mandatory = $true)][int]$IntervalMinutes,
         [Parameter(Mandatory = $true)][int]$ExecutionHours,
+        [string]$DailyAt,
         [Parameter(Mandatory = $true)][string]$Description
     )
 
     $action = New-ScheduledTaskAction `
         -Execute "powershell.exe" `
         -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Runner`""
-    $trigger = New-ScheduledTaskTrigger `
-        -Once `
-        -At ((Get-Date).AddMinutes(1)) `
-        -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) `
-        -RepetitionDuration (New-TimeSpan -Days 3650)
+    $trigger = if ($DailyAt) {
+        New-ScheduledTaskTrigger -Daily -At $DailyAt
+    } else {
+        New-ScheduledTaskTrigger `
+            -Once `
+            -At ((Get-Date).AddMinutes(1)) `
+            -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) `
+            -RepetitionDuration (New-TimeSpan -Days 3650)
+    }
     $settings = New-ScheduledTaskSettingsSet `
         -StartWhenAvailable `
         -AllowStartIfOnBatteries `
@@ -38,15 +43,13 @@ Register-ObservationTask `
     -TaskName "Trading System V2 - Premarket" `
     -Runner (Join-Path $PSScriptRoot "run_premarket_tick.ps1") `
     -IntervalMinutes 5 `
-    -ExecutionHours 2 `
+    -ExecutionHours 12 `
+    -DailyAt "20:00" `
     -Description "Idempotent point-in-time data refresh and locked selection."
 
-Register-ObservationTask `
-    -TaskName "Trading System V2 - Paper Session" `
-    -Runner (Join-Path $PSScriptRoot "run_paper_tick.ps1") `
-    -IntervalMinutes 5 `
-    -ExecutionHours 12 `
-    -Description "DST-safe realtime SIP observation and fail-closed Paper session."
+if (Get-ScheduledTask -TaskName "Trading System V2 - Paper Session" -ErrorAction SilentlyContinue) {
+    Disable-ScheduledTask -TaskName "Trading System V2 - Paper Session" | Out-Null
+}
 
 Register-ObservationTask `
     -TaskName "Trading System V2 - Postmarket Review" `

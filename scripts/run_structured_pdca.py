@@ -24,6 +24,7 @@ from agent_gateway.service import AgentGatewayService
 from data_plane.contracts import DatasetSnapshot
 from research.pdca_agents import (
     lesson_review_prompt,
+    materialize_execution_memory,
     materialize_lessons,
     materialize_selection_memory,
     parse_lesson_review,
@@ -70,6 +71,27 @@ def _latest_program_review(
     if not isinstance(raw, str):
         raise ValueError("program review JSON is unavailable")
     return ProgramReview.model_validate_json(raw), manifest
+
+
+def _latest_no_trade_review(
+    data_root: Path, trade_date: date
+) -> tuple[list[dict[str, object]], tuple[str, ...]]:
+    matches: list[tuple[DatasetSnapshot, Path]] = []
+    for path in (data_root / "accepted").glob(
+        "research.paper_no_trade_review-*/data.parquet"
+    ):
+        frame = pl.read_parquet(path, columns=["session_date"])
+        if frame.get_column("session_date").unique().to_list() != [trade_date]:
+            continue
+        manifest = DatasetSnapshot.model_validate_json(
+            (path.parent / "manifest.json").read_text(encoding="utf-8")
+        )
+        manifest.assert_usable()
+        matches.append((manifest, path))
+    if not matches:
+        return [], ()
+    manifest, path = max(matches, key=lambda item: item[0].asof_utc)
+    return pl.read_parquet(path).to_dicts(), (manifest.dataset_id,)
 
 
 def _data(envelope: dict[str, object]) -> list[dict[str, object]]:
@@ -246,6 +268,25 @@ def run(argv: list[str] | None = None) -> int:
     result["selection_memory_status"] = (
         "written" if selection_lesson_ids else "no_eligible_complete_observations"
     )
+    execution_rows, execution_snapshot_ids = _latest_no_trade_review(
+        args.data_root, args.trade_date
+    )
+    execution_lessons = materialize_execution_memory(
+        execution_rows,
+        trade_date=args.trade_date,
+        source_record_ids=execution_snapshot_ids,
+    )
+    execution_lesson_ids: list[str] = []
+    for lesson in execution_lessons:
+        stored = service.lessons_write(agent_name="pdca", lesson=lesson)
+        execution_lesson_ids.append(
+            str(cast(dict[str, object], stored["data"])["record_id"])
+        )
+    result["lesson_ids"] = [*selection_lesson_ids, *execution_lesson_ids]
+    result["execution_lesson_ids"] = execution_lesson_ids
+    result["execution_memory_status"] = (
+        "written" if execution_lesson_ids else "no_execution_gap"
+    )
     if args.llm_mode is LlmMode.OFF:
         result["status"] = "llm_off"
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -292,7 +333,11 @@ def run(argv: list[str] | None = None) -> int:
             stored = service.lessons_write(agent_name="pdca", lesson=lesson)
             lesson_ids.append(str(cast(dict[str, object], stored["data"])["record_id"]))
         result["status"] = "complete"
-        result["lesson_ids"] = [*selection_lesson_ids, *lesson_ids]
+        result["lesson_ids"] = [
+            *selection_lesson_ids,
+            *execution_lesson_ids,
+            *lesson_ids,
+        ]
     except Exception as exc:
         service.store.record_audit(
             actor=AgentRole.PDCA,

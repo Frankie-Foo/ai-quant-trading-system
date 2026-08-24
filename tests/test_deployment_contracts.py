@@ -115,6 +115,8 @@ def test_windows_observation_tasks_cover_all_daily_phases_without_order_flags() 
     assert "Trading System V2 - Postmarket Review" in installer
     assert "MultipleInstances IgnoreNew" in installer
     assert "schedule.premarket" in premarket
+    assert "prepare_autonomous_selection_handoff" not in premarket
+    assert "start_autonomous_paper_day" not in premarket
     assert "schedule.paper" in paper
     assert "schedule.postmarket" in postmarket
     assert "BROKER_WRITE_ENABLED" not in installer + premarket + paper + postmarket

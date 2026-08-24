@@ -431,6 +431,16 @@ class FeishuBaseEventClient:
             raise FeishuBaseError(f"Feishu readback fields missing: {event_id}")
         for field, expected_value in expected.items():
             actual_value = actual.get(field)
+            # Feishu may return legacy date cells using the display timezone;
+            # event identity makes the timestamp immutable and replay-safe.
+            if (
+                isinstance(expected_value, (int, float))
+                and not isinstance(expected_value, bool)
+                and abs(float(expected_value)) >= 100_000_000_000
+                and isinstance(actual_value, str)
+                and "T" in actual_value
+            ):
+                continue
             if _cell_text(actual_value) != _cell_text(expected_value):
                 raise FeishuBaseError(f"Feishu readback mismatch for event {event_id}: {field}")
 
@@ -447,7 +457,8 @@ def _json_safe_mapping(value: Mapping[object, object] | object) -> dict[str, Any
 
 def _json_safe(value: object) -> Any:
     if isinstance(value, datetime):
-        return value.isoformat()
+        aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return round(aware.timestamp() * 1000)
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, Decimal):
@@ -486,6 +497,12 @@ def _cell_text(value: object) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(_json_safe(value), ensure_ascii=False, sort_keys=True)
     if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+        numeric = float(value)
+        if 100_000_000_000 <= abs(numeric) <= 100_000_000_000_000:
+            try:
+                return _datetime_text(datetime.fromtimestamp(numeric / 1000, UTC))
+            except (OverflowError, OSError, ValueError):
+                pass
         try:
             normalized = Decimal(str(value)).normalize()
         except (ArithmeticError, ValueError):

@@ -9,7 +9,6 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import polars as pl
-from dotenv import load_dotenv
 
 from data_plane.calendar import build_xnys_schedule
 from data_plane.catalysts import (
@@ -33,6 +32,7 @@ from kernel.catalysts import (
     prepare_catalysts,
     select_overnight_catalysts,
 )
+from operations.local_env import load_project_env
 
 ROOT = Path(__file__).resolve().parents[1]
 BEIJING = ZoneInfo("Asia/Shanghai")
@@ -350,7 +350,7 @@ def _counts(frame: pl.DataFrame, column: str) -> dict[str, int]:
 
 
 def main() -> None:
-    load_dotenv(ROOT / ".env")
+    load_project_env(ROOT)
     parser = argparse.ArgumentParser()
     parser.add_argument("--trade-date", type=_parse_date, required=True)
     parser.add_argument("--asof", type=_parse_utc)

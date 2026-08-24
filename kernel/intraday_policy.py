@@ -166,12 +166,12 @@ class IntradayPolicy:
 
     def evaluate(self, snapshot: PolicySnapshot) -> PolicyDecision:
         local = snapshot.observed_at_utc.astimezone(NEW_YORK)
-        if snapshot.has_position and local.time() >= time(13):
+        if snapshot.has_position and local.time() >= time(12):
             return PolicyDecision(
                 action=PolicyAction.EXIT,
                 target_position_fraction=0.0,
                 max_account_risk_fraction=0.0,
-                reasons=("intraday_force_exit_1300",),
+                reasons=("intraday_force_exit_1200",),
                 blockers=(),
             )
         if snapshot.has_position and snapshot.material_negative:

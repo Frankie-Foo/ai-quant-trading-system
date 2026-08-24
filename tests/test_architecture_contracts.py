@@ -13,7 +13,15 @@ from data_plane.contracts import (
     QualitySeverity,
 )
 from execution.order_state import OrderLifecycle, OrderState, apply_transition
-from research.registry import ResearchRun, ResearchSplit
+from research.registry import (
+    ExperimentEvidence,
+    ExperimentStage,
+    PerformanceEvidence,
+    ResearchRun,
+    ResearchSplit,
+    ScientificHypothesis,
+    evaluate_experiment,
+)
 
 NOW = datetime(2026, 7, 16, 10, 0, tzinfo=UTC)
 HASH = "a" * 64
@@ -88,6 +96,73 @@ def test_research_run_manifest_is_stable_and_auditable() -> None:
     )
     assert run.manifest_sha256() == run.manifest_sha256()
     assert len(run.manifest_sha256()) == 64
+
+
+def _performance(*, expectancy: float, profit_factor: float) -> PerformanceEvidence:
+    return PerformanceEvidence(
+        trades=100,
+        win_rate=0.40,
+        average_win_loss=1.80,
+        profit_factor=profit_factor,
+        expectancy=expectancy,
+        expectancy_ci95=(expectancy - 10, expectancy + 10),
+    )
+
+
+def test_ai4s_gate_rejects_negative_out_of_sample_evidence() -> None:
+    hypothesis = ScientificHypothesis(
+        hypothesis_id="modern-h15-pullback-only.v1",
+        statement="Waiting for pullback acceptance should improve net expectancy.",
+        mechanism="Accepted higher prices should reduce failed breakout entries.",
+        falsification="Reject when blind net expectancy is not positive after full costs.",
+        changed_variable="entry_mode",
+        control="first_breakout_entry",
+        validation_plan="Use chronological train, validation, blind, then Paper evidence.",
+        evidence_ids=("current_modern_h15_3y",),
+    )
+    evidence = ExperimentEvidence(
+        hypothesis=hypothesis,
+        full=_performance(expectancy=-92.08, profit_factor=0.67),
+        blind=_performance(expectancy=-34.26, profit_factor=0.87),
+        attempted_configurations=1,
+        blind_evaluations=1,
+        point_in_time=True,
+        quote_aware_costs=True,
+        critical_quality_passed=True,
+    )
+
+    decision = evaluate_experiment(evidence)
+
+    assert decision.stage is ExperimentStage.REJECTED
+    assert decision.production_eligible is False
+
+
+def test_ai4s_gate_requires_paper_forward_before_human_review() -> None:
+    hypothesis = ScientificHypothesis(
+        hypothesis_id="modern-h15-pullback-only.v1",
+        statement="Waiting for pullback acceptance should improve net expectancy.",
+        mechanism="Accepted higher prices should reduce failed breakout entries.",
+        falsification="Reject when blind net expectancy is not positive after full costs.",
+        changed_variable="entry_mode",
+        control="first_breakout_entry",
+        validation_plan="Use chronological train, validation, blind, then Paper evidence.",
+        evidence_ids=("future_backtest",),
+    )
+    evidence = ExperimentEvidence(
+        hypothesis=hypothesis,
+        full=_performance(expectancy=30, profit_factor=1.20),
+        blind=_performance(expectancy=20, profit_factor=1.10),
+        attempted_configurations=1,
+        blind_evaluations=1,
+        point_in_time=True,
+        quote_aware_costs=True,
+        critical_quality_passed=True,
+    )
+
+    assert evaluate_experiment(evidence).stage is ExperimentStage.ELIGIBLE_FOR_PAPER
+    reviewed = evaluate_experiment(evidence.model_copy(update={"paper_trading_days": 30}))
+    assert reviewed.stage is ExperimentStage.ELIGIBLE_FOR_HUMAN_REVIEW
+    assert reviewed.production_eligible is False
 
 
 def test_oms_state_machine_rejects_illegal_transition() -> None:

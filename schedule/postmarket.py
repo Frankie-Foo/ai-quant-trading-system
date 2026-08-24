@@ -25,7 +25,7 @@ from schedule.state import JobLedger
 
 ROOT = Path(__file__).resolve().parents[1]
 JOB_NAME = "postmarket_review"
-JOB_VERSION = "postmarket_review.v8"
+JOB_VERSION = "postmarket_review.v9"
 
 
 def _truthy(value: str | None) -> bool:
@@ -66,9 +66,7 @@ def postmarket_due(
         ).market_data.postmarket_data_grace_minutes
     if data_grace_minutes < 0:
         raise ValueError("postmarket data grace must not be negative")
-    return now_utc.astimezone(UTC) >= close + timedelta(
-        minutes=data_grace_minutes
-    )
+    return now_utc.astimezone(UTC) >= close + timedelta(minutes=data_grace_minutes)
 
 
 def _selection_dates(data_root: Path) -> tuple[date, ...]:
@@ -244,6 +242,65 @@ def _run_one(
     if opportunity_review is None:
         raise RuntimeError("accepted intraday selection postmortem was not produced")
 
+    no_trade_review = _latest_snapshot(
+        data_root,
+        "research.paper_no_trade_review-*/data.parquet",
+        trade_date,
+    )
+    autonomous_root = ROOT / "runs" / "autonomous" / trade_date.isoformat()
+    paper_config = autonomous_root / "autonomous_paper.json"
+    if no_trade_review is None and paper_config.exists():
+        _run_module(
+            "scripts.build_no_trade_review",
+            trade_date,
+            data_root=data_root,
+            logger=logger,
+            extra_args=(
+                "--config",
+                str(paper_config),
+                "--state-db",
+                str(autonomous_root / "paper.sqlite3"),
+            ),
+        )
+        no_trade_review = _latest_snapshot(
+            data_root,
+            "research.paper_no_trade_review-*/data.parquet",
+            trade_date,
+        )
+    if paper_config.exists() and no_trade_review is None:
+        raise RuntimeError("Paper no-trade review snapshot was not produced")
+
+    recovery_decision = _latest_snapshot(
+        data_root,
+        "research.selection_recovery_shadow-*/data.parquet",
+        trade_date,
+    )
+    recovery_outcome = _latest_snapshot(
+        data_root,
+        "research.selection_recovery_shadow_outcomes-*/data.parquet",
+        trade_date,
+    )
+    if recovery_decision is not None and (
+        recovery_outcome is None
+        or recovery_decision.dataset_id not in recovery_outcome.parent_snapshot_ids
+    ):
+        _run_module(
+            "scripts.label_selection_recovery_shadow",
+            trade_date,
+            data_root=data_root,
+            logger=logger,
+        )
+        recovery_outcome = _latest_snapshot(
+            data_root,
+            "research.selection_recovery_shadow_outcomes-*/data.parquet",
+            trade_date,
+        )
+    if recovery_decision is not None and (
+        recovery_outcome is None
+        or recovery_decision.dataset_id not in recovery_outcome.parent_snapshot_ids
+    ):
+        raise RuntimeError("selection recovery outcome was not produced")
+
     pdca_stdout = _run_module(
         "scripts.run_structured_pdca",
         trade_date,
@@ -267,6 +324,8 @@ def _run_one(
         episode.dataset_id,
         review.dataset_id,
         opportunity_review.dataset_id,
+        *((no_trade_review.dataset_id,) if no_trade_review is not None else ()),
+        *((recovery_outcome.dataset_id,) if recovery_outcome is not None else ()),
         *extra_artifacts,
     )
 
@@ -301,6 +360,7 @@ def _run_locked(args: argparse.Namespace, logger: JsonEventLogger) -> int:
     now_utc = datetime.now(UTC)
     cfg = load_config(ROOT / "config.yaml")
     data_grace_minutes = cfg.market_data.postmarket_data_grace_minutes
+    candidates: tuple[date, ...]
     if args.trade_date is not None:
         candidates = (args.trade_date,)
         skipped_historical_dates = 0

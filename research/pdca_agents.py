@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import date
 from typing import Any
 
@@ -82,7 +82,7 @@ def _selection_memory_narratives(root_cause: str) -> tuple[str, str, str]:
 
 
 def materialize_selection_memory(
-    opportunity_rows: list[Mapping[str, Any]],
+    opportunity_rows: Sequence[Mapping[str, Any]],
     *,
     trade_date: date,
     metric_index: Mapping[str, Fact],
@@ -104,8 +104,7 @@ def materialize_selection_memory(
         if not isinstance(case_id, str) or not case_id or not isinstance(raw_facts, list):
             raise ValueError("anonymous opportunity row is malformed")
         references = tuple(
-            f"opportunity:{case_id}:{Fact.model_validate(raw_fact).name}"
-            for raw_fact in raw_facts
+            f"opportunity:{case_id}:{Fact.model_validate(raw_fact).name}" for raw_fact in raw_facts
         )
         metrics = tuple(
             metric_index[reference].model_copy(update={"name": reference})
@@ -138,6 +137,74 @@ def materialize_selection_memory(
             )
         )
     return tuple(output)
+
+
+def materialize_execution_memory(
+    review_rows: Sequence[Mapping[str, Any]],
+    *,
+    trade_date: date,
+    source_record_ids: tuple[str, ...],
+) -> tuple[Lesson, ...]:
+    """Aggregate deterministic execution gaps into ticker-anonymous memory."""
+
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for row in review_rows:
+        cause = str(row.get("execution_root_cause") or "")
+        if not bool(row.get("requires_execution_fix")):
+            continue
+        grouped.setdefault(cause, []).append(row)
+    lessons: list[Lesson] = []
+    for cause, rows in sorted(grouped.items()):
+        provenance = f"research.paper_no_trade_review:{cause}"
+        metrics = (
+            Fact(
+                name="affected_plans",
+                value=len(rows),
+                availability=Availability.AVAILABLE,
+                provenance=provenance,
+            ),
+            Fact(
+                name="evaluation_count",
+                value=sum(int(row.get("evaluation_count") or 0) for row in rows),
+                availability=Availability.AVAILABLE,
+                provenance=provenance,
+            ),
+            Fact(
+                name="data_blocked_count",
+                value=sum(int(row.get("data_blocked_count") or 0) for row in rows),
+                availability=Availability.AVAILABLE,
+                provenance=provenance,
+            ),
+            Fact(
+                name="submitted_order_count",
+                value=sum(int(row.get("submitted_order_count") or 0) for row in rows),
+                availability=Availability.AVAILABLE,
+                provenance=provenance,
+            ),
+        )
+        lessons.append(
+            Lesson(
+                agent=AgentRole.PDCA,
+                category=LessonCategory.EXECUTION_GAP,
+                trade_date=trade_date,
+                hypothesis=(
+                    "The Paper runtime should preserve observable coverage through every "
+                    "eligible decision window."
+                ),
+                observation=(
+                    "Durable runtime evidence identified an execution gap independently of "
+                    "the post session strategy outcome."
+                ),
+                conclusion=(
+                    "Repair and validate this execution path in shadow mode before evaluating "
+                    "selection quality or changing production policy."
+                ),
+                metrics=metrics,
+                source_record_ids=source_record_ids,
+                factor_profile=(f"execution_root_cause:{_profile_token(cause)}",),
+            )
+        )
+    return tuple(lessons)
 
 
 def lesson_review_prompt(fact_package: str) -> tuple[str, str]:

@@ -13,6 +13,7 @@ from operations.feishu_base import (
     FeishuBaseSettings,
     FeishuTableSettings,
     InvestmentTable,
+    _cell_text,
 )
 
 
@@ -125,6 +126,10 @@ def test_settings_are_optional_only_when_completely_unconfigured() -> None:
 def test_legacy_configuration_is_rejected() -> None:
     with pytest.raises(RuntimeError, match="legacy"):
         FeishuBaseSettings.from_environment({"FEISHU_BASE_TOKEN": "old-base"})
+
+
+def test_cell_text_normalizes_feishu_millisecond_timestamps() -> None:
+    assert _cell_text(1786449600000) == "2026-08-11T12:00:00+00:00"
 
 
 def test_subprocess_json_payload_uses_utf8_file_for_windows_cli(

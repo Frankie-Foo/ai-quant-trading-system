@@ -7,12 +7,12 @@ from pathlib import Path
 from typing import Any
 
 import polars as pl
-from dotenv import load_dotenv
 
 from data_plane.catalysts import CATALYST_SCHEMA_VERSION, audit_catalysts
 from data_plane.contracts import DataQualityCheck, DatasetSnapshot, QualitySeverity
 from data_plane.providers.catalyst_news import fetch_massive_news
 from data_plane.storage import persist_snapshot
+from operations.local_env import load_project_env
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = "massive.news.history"
@@ -106,7 +106,7 @@ def _combined_checks(
 
 
 def main() -> None:
-    load_dotenv(ROOT / ".env")
+    load_project_env(ROOT)
     parser = argparse.ArgumentParser()
     parser.add_argument("--start", type=_parse_date, required=True)
     parser.add_argument("--end", type=_parse_date, required=True)

@@ -22,7 +22,6 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import polars as pl
-from dotenv import load_dotenv
 
 from data_plane.http import DownloadError
 from data_plane.providers.alpaca import (
@@ -30,6 +29,9 @@ from data_plane.providers.alpaca import (
     fetch_sparse_bars_for_monitoring,
     stock_data_policy_from_env,
 )
+from operations.feishu_base import FeishuBaseError, FeishuBaseEventClient
+from operations.feishu_investment_events import record_monitor_trigger
+from operations.local_env import load_project_env
 from schedule.runtime import ProcessLock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,8 +42,21 @@ DEFAULT_STATE = ROOT / "runs" / "trade-plan-monitor-state.json"
 DEFAULT_POSITION = ROOT / "runs" / "trade-plan-position.json"
 DEFAULT_LOG = ROOT / "runs" / "trade-plan-monitor.jsonl"
 DEFAULT_LOCK = ROOT / "runs" / "trade-plan-monitor.lock"
-LIVERMORE_APP_ID = "vbot_ROHePX5GpUs1cr9I"
-LIVERMORE_PUSH_URL = "https://vps-service.vertu.cn/v1/im/user-robots/push"
+BUFFETT_APP_ID = "vbot_pATI_VCgdkiJn1Sw"
+BUFFETT_PUSH_URL = "https://vps-service.vertu.cn/v1/im/user-robots/push"
+PUSHABLE_EVENTS = frozenset(
+    {
+        "buy_ready",
+        "add_ready",
+        "abandon",
+        "stop_loss",
+        "take_profit_1",
+        "take_profit_2",
+        "force_exit",
+        "exit_now",
+        "overnight_violation",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -49,7 +64,7 @@ class SymbolPlan:
     symbol: str
     priority: int
     premarket_high: float
-    premarket_vwap: float
+    premarket_vwap: float | None
     support_low: float
     support_high: float
     reclaim_price: float
@@ -60,6 +75,12 @@ class SymbolPlan:
     max_risk: float
     max_notional: float
     minimum_opening_dollar_volume: float
+    buy_stop: float | None = None
+    buy_limit: float | None = None
+    take_profit_1: float | None = None
+    take_profit_2: float | None = None
+    breakout_trigger: float | None = None
+    scout_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -121,7 +142,11 @@ def load_config(path: Path) -> MonitorConfig:
             symbol=str(item["symbol"]).upper(),
             priority=int(item["priority"]),
             premarket_high=float(item["premarket_high"]),
-            premarket_vwap=float(item["premarket_vwap"]),
+            premarket_vwap=(
+                None
+                if item.get("premarket_vwap") is None
+                else float(item["premarket_vwap"])
+            ),
             support_low=float(item["support_low"]),
             support_high=float(item["support_high"]),
             reclaim_price=float(item["reclaim_price"]),
@@ -134,6 +159,28 @@ def load_config(path: Path) -> MonitorConfig:
             minimum_opening_dollar_volume=float(
                 item["minimum_opening_dollar_volume"]
             ),
+            buy_stop=(
+                None if item.get("buy_stop") is None else float(item["buy_stop"])
+            ),
+            buy_limit=(
+                None if item.get("buy_limit") is None else float(item["buy_limit"])
+            ),
+            take_profit_1=(
+                None
+                if item.get("take_profit_1") is None
+                else float(item["take_profit_1"])
+            ),
+            take_profit_2=(
+                None
+                if item.get("take_profit_2") is None
+                else float(item["take_profit_2"])
+            ),
+            breakout_trigger=(
+                None
+                if item.get("breakout_trigger") is None
+                else float(item["breakout_trigger"])
+            ),
+            scout_only=bool(item.get("scout_only", False)),
         )
         for item in raw["plans"]
     )
@@ -155,10 +202,19 @@ def load_config(path: Path) -> MonitorConfig:
         daily_loss_limit=float(raw["daily_loss_limit"]),
         plans=tuple(sorted(plans, key=lambda item: item.priority)),
     )
-    if config.poll_seconds < 5:
-        raise ValueError("poll_seconds must be at least 5")
+    if config.poll_seconds < 1:
+        raise ValueError("poll_seconds must be at least 1")
     if not config.plans:
         raise ValueError("at least one symbol plan is required")
+    for plan in config.plans:
+        if (plan.buy_stop is None) != (plan.buy_limit is None):
+            raise ValueError(f"{plan.symbol} buy_stop and buy_limit must be paired")
+        if (
+            plan.buy_stop is not None
+            and plan.buy_limit is not None
+            and plan.buy_limit < plan.buy_stop
+        ):
+            raise ValueError(f"{plan.symbol} buy_limit must be >= buy_stop")
     return config
 
 
@@ -209,6 +265,33 @@ def load_position(path: Path) -> Position | None:
     ):
         raise ValueError("active position has invalid entry/shares/stop")
     return position
+
+
+def load_positions(path: Path) -> tuple[Position, ...]:
+    raw = _read_json(path, {})
+    rows = raw.get("positions")
+    if rows is None:
+        position = load_position(path)
+        return () if position is None else (position,)
+    if not isinstance(rows, list):
+        raise ValueError("positions must be a list")
+    positions: list[Position] = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("active") is not True:
+            continue
+        position = Position(
+            symbol=str(row["symbol"]).upper(),
+            entry=float(row["entry"]),
+            shares=int(row["shares"]),
+            stop=float(row["stop"]),
+        )
+        if position.entry <= 0 or position.shares <= 0 or position.stop <= 0 or position.stop >= position.entry:
+            raise ValueError("active position has invalid entry/shares/stop")
+        positions.append(position)
+    symbols = [position.symbol for position in positions]
+    if len(symbols) != len(set(symbols)):
+        raise ValueError("duplicate active position symbol")
+    return tuple(positions)
 
 
 def _latest_quotes(frame: pl.DataFrame) -> dict[str, Quote]:
@@ -278,6 +361,45 @@ def _volume_confirmed(bars: pl.DataFrame) -> bool:
     )
 
 
+def _higher_highs_and_lows(
+    bars: pl.DataFrame,
+    *,
+    market_open_utc: datetime,
+    now_utc: datetime,
+) -> bool:
+    """Require three complete, contiguous 5-minute bars with higher highs/lows."""
+
+    buckets: dict[int, list[dict[str, object]]] = {}
+    for row in bars.iter_rows(named=True):
+        timestamp = row["ts_utc"]
+        if not isinstance(timestamp, datetime) or timestamp < market_open_utc:
+            continue
+        offset = int((timestamp - market_open_utc).total_seconds() // 60)
+        if offset < 0 or offset % 1 or timestamp + timedelta(minutes=1) > now_utc:
+            continue
+        buckets.setdefault(offset // 5, []).append(row)
+    completed: list[tuple[int, float, float]] = []
+    for bucket, rows in sorted(buckets.items()):
+        if len(rows) != 5:
+            continue
+        completed.append(
+            (
+                bucket,
+                max(float(row["high"]) for row in rows),
+                min(float(row["low"]) for row in rows),
+            )
+        )
+    if len(completed) < 3:
+        return False
+    previous, middle, latest = completed[-3:]
+    return (
+        middle[0] == previous[0] + 1
+        and latest[0] == middle[0] + 1
+        and previous[1] < middle[1] < latest[1]
+        and previous[2] < middle[2] < latest[2]
+    )
+
+
 def _opening_range(
     bars: pl.DataFrame, market_open_utc: datetime
 ) -> tuple[float, float, float, float] | None:
@@ -342,7 +464,7 @@ def build_position_plan_message(
         )
     )
     return (
-        f"【利弗莫尔｜{position.symbol}持仓执行预案】\n"
+        f"【巴菲特｜实盘只读｜{position.symbol}持仓执行预案】\n"
         f"实际持仓：{position.symbol} {position.shares}股\n"
         f"成交均价：{entry:.2f}\n"
         f"账户仓位占比：约{allocation:.2f}%\n"
@@ -402,7 +524,7 @@ def evaluate_position_time_exit(
             symbol=position.symbol,
             reason="position_still_active_after_market_close",
             message=(
-                "【利弗莫尔｜日内规则违规】\n"
+                "【巴菲特｜实盘只读｜日内规则违规】\n"
                 f"{position.symbol} 在美东16:00后仍被登记为持仓。\n"
                 "如实际仍有仓位，使用支持盘后交易的限价单退出；"
                 "如已平仓，立即把监控状态登记为flat。"
@@ -415,7 +537,7 @@ def evaluate_position_time_exit(
             symbol=position.symbol,
             reason="day_trade_force_exit_time",
             message=(
-                "【利弗莫尔｜立即清仓】\n"
+                "【巴菲特｜实盘只读｜立即清仓】\n"
                 f"已到北京时间{config.force_exit_time_bjt.strftime('%H:%M')}，"
                 f"{position.symbol} 不论盈亏都必须清空剩余仓位。\n"
                 "先撤销未成交止盈单，再主动卖出剩余股数；"
@@ -466,7 +588,7 @@ def evaluate_position_time_exit(
                 symbol=position.symbol,
                 reason="midnight_strength_confirmed",
                 message=(
-                    "【利弗莫尔｜北京时间00:00强弱决策】\n"
+                    "【巴菲特｜实盘只读｜北京时间00:00强弱决策】\n"
                     f"{position.symbol} 仍高于成本与盘中VWAP，"
                     "最近3个完成分钟收盘均在VWAP上方。\n"
                     f"允许继续持有，但北京时间"
@@ -480,7 +602,7 @@ def evaluate_position_time_exit(
             symbol=position.symbol,
             reason="midnight_strength_not_confirmed",
             message=(
-                "【利弗莫尔｜北京时间00:00清仓】\n"
+                "【巴菲特｜实盘只读｜北京时间00:00清仓】\n"
                 f"{position.symbol} 未通过强势持有条件，立即清空剩余仓位。\n"
                 "条件要求：报价新鲜、价格高于成本与盘中VWAP，"
                 "且最近3个完成分钟收盘均在VWAP上方。"
@@ -523,6 +645,40 @@ def evaluate_position_stop(
     )
 
 
+def evaluate_position_target(
+    position: Position,
+    plan: SymbolPlan,
+    quote: Quote | None,
+    *,
+    now_utc: datetime,
+) -> Signal | None:
+    if quote is None:
+        return None
+    age = (now_utc - quote.observed_at_utc).total_seconds()
+    if age < 0 or age > 30:
+        return None
+    for event, target in (
+        ("take_profit_2", plan.take_profit_2),
+        ("take_profit_1", plan.take_profit_1),
+    ):
+        if target is None or quote.bid < target:
+            continue
+        return Signal(
+            event=event,
+            symbol=position.symbol,
+            reason=f"bid_at_or_above_{event}",
+            message=(
+                f"【巴菲特｜实盘只读｜{event}】\n"
+                f"{position.symbol} 买一价 {quote.bid:.2f} 已触及 {target:.2f}。\n"
+                f"持仓 {position.shares} 股；按预案执行分批止盈。"
+            ),
+            dedupe_key=(
+                f"{event}:{position.symbol}:{position.entry or 'unknown'}:{target}"
+            ),
+        )
+    return None
+
+
 def evaluate_symbol(
     plan: SymbolPlan,
     bars: pl.DataFrame,
@@ -562,7 +718,7 @@ def evaluate_symbol(
             dedupe_key=f"abandon:{plan.symbol}:opening_support",
         )
 
-    if regular.height >= 10:
+    if regular.height >= 10 and plan.premarket_vwap is not None:
         last_ten = regular.tail(10)
         if all(
             float(value) < plan.premarket_vwap
@@ -583,10 +739,20 @@ def evaluate_symbol(
     latest = regular.row(-1, named=True)
     latest_close = float(latest["close"])
     session_vwap = _session_vwap(regular)
+    entry_limit = (
+        plan.buy_limit
+        if plan.buy_limit is not None
+        else plan.premarket_high * (1 + plan.max_chase_ratio)
+    )
     if (
         session_vwap is None
         or latest_close <= session_vwap
         or not _volume_confirmed(regular)
+        or not _higher_highs_and_lows(
+            regular,
+            market_open_utc=market_open_utc,
+            now_utc=now_utc,
+        )
         or opening_dollar_volume < plan.minimum_opening_dollar_volume
     ):
         return None
@@ -598,10 +764,14 @@ def evaluate_symbol(
     pullback_ready = (
         pullback_seen
         and latest_close >= plan.reclaim_price
-        and latest_close <= plan.premarket_high * (1 + plan.max_chase_ratio)
+        and latest_close <= entry_limit
     )
 
-    trigger = max(plan.premarket_high, opening_high)
+    trigger = (
+        plan.buy_stop
+        if plan.buy_stop is not None
+        else max(plan.breakout_trigger or plan.premarket_high, opening_high)
+    )
     after_opening = regular.filter(pl.col("ts_utc") >= opening_end)
     breakout_rows = after_opening.filter(pl.col("high") > trigger)
     retest_ready = False
@@ -616,9 +786,11 @@ def evaluate_symbol(
         retest_ready = (
             not retests.is_empty()
             and latest_close >= trigger
-            and latest_close <= trigger * (1 + plan.max_chase_ratio)
+            and latest_close <= entry_limit
         )
 
+    if plan.scout_only:
+        retest_ready = False
     if not pullback_ready and not retest_ready:
         return None
 
@@ -662,25 +834,33 @@ def _send_vps(
     *,
     client: httpx.Client | None = None,
 ) -> str:
-    """Push as the Livermore robot and reject ambiguous sender identity."""
+    """Push as the Buffett robot and reject ambiguous sender identity."""
 
-    app_secret = os.getenv("VPS_LIVERMORE_APP_SECRET", "").strip()
+    body = _delivery_body(signal)
+    if "\ufffd" in body or "?" in body:
+        raise ValueError("Buffett push message contains replacement character")
+    try:
+        if body.encode("utf-8", "strict").decode("utf-8", "strict") != body:
+            raise UnicodeError("UTF-8 round trip changed message")
+    except UnicodeError as exc:
+        raise ValueError("Buffett push message failed UTF-8 validation") from exc
+    app_secret = os.getenv("VPS_BUFFETT_APP_SECRET", "").strip()
     if not app_secret:
-        raise RuntimeError("VPS_LIVERMORE_APP_SECRET is not configured")
-    app_id = os.getenv("VPS_LIVERMORE_APP_ID", LIVERMORE_APP_ID).strip()
+        raise RuntimeError("VPS_BUFFETT_APP_SECRET is not configured")
+    app_id = os.getenv("VPS_BUFFETT_APP_ID", BUFFETT_APP_ID).strip()
     if not app_id:
-        raise RuntimeError("VPS_LIVERMORE_APP_ID is not configured")
+        raise RuntimeError("VPS_BUFFETT_APP_ID is not configured")
 
     owns_client = client is None
     http_client = client or httpx.Client(timeout=20)
     try:
         request_body = json.dumps(
-            {"channel_id": channel_id, "body": signal.message},
+            {"channel_id": channel_id, "body": body},
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
         response = http_client.post(
-            LIVERMORE_PUSH_URL,
+            BUFFETT_PUSH_URL,
             headers={
                 "content-type": "application/json; charset=utf-8",
                 "x-vertu-bot-app-id": app_id,
@@ -695,16 +875,37 @@ def _send_vps(
             http_client.close()
 
     if not isinstance(payload, dict):
-        raise RuntimeError("Livermore push returned an invalid response")
+        raise RuntimeError("Buffett push returned an invalid response")
     message = payload.get("message")
     if not isinstance(message, dict):
-        raise RuntimeError("Livermore push did not return a message")
+        raise RuntimeError("Buffett push did not return a message")
     message_id = message.get("id")
     if not isinstance(message_id, str) or not message_id:
-        raise RuntimeError("Livermore push did not return a message id")
+        raise RuntimeError("Buffett push did not return a message id")
     if message.get("sender_type") != "bot":
-        raise RuntimeError("Livermore push sender identity was not a bot")
+        raise RuntimeError("Buffett push sender identity was not a bot")
     return message_id
+
+
+def _delivery_body(signal: Signal) -> str:
+    """Render outgoing Chinese independently of legacy terminal-encoded text."""
+
+    templates = {
+        "buy_ready": "\u4e70\u5165\u6761\u4ef6\u89e6\u53d1\u3002\u8bf7\u6309\u9884\u6848\u786e\u8ba4\u8d8b\u52bf\u3001\u4ef7\u683c\u3001\u4ed3\u4f4d\u548c\u6b62\u635f\u3002\u672c\u7cfb\u7edf\u4e0d\u4e0b\u5355\u3002",
+        "add_ready": "\u52a0\u4ed3\u6761\u4ef6\u89e6\u53d1\u3002\u8bf7\u786e\u8ba4\u5df2\u6d6e\u76c8\u3001\u91cf\u80fd\u3001\u9ad8\u4f4e\u70b9\u548c\u603b\u98ce\u9669\u540e\u518d\u51b3\u5b9a\u3002\u672c\u7cfb\u7edf\u4e0d\u4e0b\u5355\u3002",
+        "abandon": "\u4e70\u5165\u6761\u4ef6\u5931\u6548\u3002\u4eca\u65e5\u4e0d\u4e70\u3002",
+        "stop_loss": "\u89e6\u53d1\u6b62\u635f\u3002\u8bf7\u6309\u9884\u6848\u9000\u51fa\u3002",
+        "take_profit_1": "\u89e6\u53d1\u7b2c\u4e00\u6863\u6b62\u76c8\u3002\u8bf7\u6309\u9884\u6848\u51cf\u4ed3\u3002",
+        "take_profit_2": "\u89e6\u53d1\u7b2c\u4e8c\u6863\u6b62\u76c8\u3002\u8bf7\u6309\u9884\u6848\u51cf\u4ed3\u3002",
+        "force_exit": "\u5230\u65e5\u5185\u5f3a\u5236\u9000\u51fa\u65f6\u95f4\u3002\u8bf7\u6e05\u4ed3\u3002",
+        "exit_now": "\u6301\u4ed3\u5f3a\u5ea6\u4e0d\u8db3\u3002\u8bf7\u7acb\u5373\u6e05\u4ed3\u3002",
+        "overnight_violation": "\u65e5\u5185\u6301\u4ed3\u903e\u65f6\u3002\u8bf7\u7acb\u5373\u5904\u7406\u3002",
+        "hold_to_force_exit": "\u6301\u4ed3\u5f3a\u5ea6\u901a\u8fc7\u3002\u7ee7\u7eed\u6301\u6709\u81f3\u5f3a\u5236\u9000\u51fa\u65f6\u95f4\u3002",
+    }
+    prefix = "\u3010\u5df4\u83f2\u7279\u4e28\u5b9e\u76d8\u53ea\u8bfb\u3011"
+    if signal.event == "plan_summary":
+        return signal.message
+    return f"{prefix}{signal.symbol}\uff1a{templates.get(signal.event, '\u52a8\u4f5c\u4fe1\u53f7\u89e6\u53d1\u3002\u8bf7\u6309\u9884\u6848\u590d\u6838\u3002')}"
 
 
 def _fetch_market(
@@ -749,6 +950,7 @@ def run_once(
     log_path: Path,
     push: bool,
     now_utc: datetime | None = None,
+    feishu: FeishuBaseEventClient | None = None,
 ) -> tuple[Signal, ...]:
     observed_at = now_utc or datetime.now(UTC)
     state = _read_json(
@@ -763,7 +965,8 @@ def run_once(
     if not isinstance(notified, dict):
         raise ValueError("monitor state notified field must be an object")
 
-    position = load_position(position_path)
+    positions = load_positions(position_path)
+    plans_by_symbol = {plan.symbol: plan for plan in config.plans}
     market_error: str | None = None
     try:
         bars, quotes = _fetch_market(config, observed_at)
@@ -772,29 +975,38 @@ def run_once(
         quotes = {}
         market_error = f"{type(exc).__name__}: {exc}"
 
-    time_exit_signal = (
-        evaluate_position_time_exit(
-            position,
-            config,
-            bars,
-            quotes.get(position.symbol),
-            now_utc=observed_at,
-        )
-        if position is not None
-        else None
-    )
-
     signals: list[Signal] = []
-    if position is not None:
-        stop_signal = evaluate_position_stop(
-            position,
-            quotes.get(position.symbol),
-            now_utc=observed_at,
-        )
-        if stop_signal is not None:
-            signals.append(stop_signal)
-        elif time_exit_signal is not None:
-            signals.append(time_exit_signal)
+    if positions:
+        for position in positions:
+            time_exit_signal = evaluate_position_time_exit(
+                position,
+                config,
+                bars,
+                quotes.get(position.symbol),
+                now_utc=observed_at,
+            )
+            active_plan = plans_by_symbol.get(position.symbol)
+            stop_signal = evaluate_position_stop(
+                position,
+                quotes.get(position.symbol),
+                now_utc=observed_at,
+            )
+            target_signal = (
+                evaluate_position_target(
+                    position,
+                    active_plan,
+                    quotes.get(position.symbol),
+                    now_utc=observed_at,
+                )
+                if active_plan is not None
+                else None
+            )
+            if stop_signal is not None:
+                signals.append(stop_signal)
+            elif target_signal is not None:
+                signals.append(target_signal)
+            elif time_exit_signal is not None:
+                signals.append(time_exit_signal)
     elif _entry_window_expired(config, observed_at):
         signals.append(
             Signal(
@@ -830,6 +1042,15 @@ def run_once(
     for signal in signals:
         if signal.dedupe_key in notified:
             continue
+        if signal.event not in PUSHABLE_EVENTS:
+            notified[signal.dedupe_key] = {
+                "event": signal.event,
+                "symbol": signal.symbol,
+                "reason": signal.reason,
+                "message_id": "suppressed_non_action_event",
+                "pushed_at_utc": observed_at.isoformat(),
+            }
+            continue
         message_id = "dry-run"
         if push:
             message_id = _send_vps(config.channel_id, signal)
@@ -841,6 +1062,39 @@ def run_once(
             "pushed_at_utc": observed_at.isoformat(),
         }
         delivered.append(signal)
+        if feishu is not None:
+            quote = quotes.get(signal.symbol)
+            try:
+                record_monitor_trigger(
+                    feishu,
+                    event_id=(
+                        f"monitor:{config.trade_date.isoformat()}:{signal.symbol}:"
+                        f"{signal.dedupe_key}"
+                    ),
+                    symbol=signal.symbol,
+                    trade_date=config.trade_date,
+                    triggered_at_utc=observed_at,
+                    trigger_type=signal.event,
+                    operation=signal.reason,
+                    reason=signal.reason,
+                    message=signal.message,
+                    source="scripts.monitor_trade_plan",
+                    trigger_price=quote.bid if quote is not None else None,
+                    position_shares=(
+                        next(
+                            (position.shares for position in positions if position.symbol == signal.symbol),
+                            None,
+                        )
+                    ),
+                )
+            except FeishuBaseError as exc:
+                print(
+                    json.dumps(
+                        {"symbol": signal.symbol, "feishu_error": type(exc).__name__},
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
 
     state["last_poll_utc"] = observed_at.isoformat()
     if quotes:
@@ -859,7 +1113,7 @@ def run_once(
             "event": "poll",
             "observed_at_utc": observed_at,
             "symbols": [plan.symbol for plan in config.plans],
-            "position_active": position is not None,
+            "position_active": bool(positions),
             "market_error": market_error,
             "signals": [
                 {
@@ -888,10 +1142,11 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    load_dotenv(ROOT / ".env")
+    load_project_env(ROOT)
     args = _parser().parse_args()
     config = load_config(args.config)
     with ProcessLock(args.lock_path):
+        feishu = FeishuBaseEventClient.from_environment(os.environ)
         while True:
             started = time.monotonic()
             delivered = run_once(
@@ -900,6 +1155,7 @@ def main() -> int:
                 position_path=args.position_path,
                 log_path=args.log_path,
                 push=not args.no_push,
+                feishu=feishu,
             )
             for signal in delivered:
                 print(

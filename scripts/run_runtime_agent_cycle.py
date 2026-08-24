@@ -13,7 +13,7 @@ from pydantic import SecretStr
 from data_plane.providers.alpaca_direct import DirectAlpacaMarketDataClient
 from execution.alpaca_paper import DirectAlpacaPaperBroker
 from operations.autonomous_paper_config import load_autonomous_paper_config
-from operations.livermore_push import LivermorePushClient
+from operations.livermore_push import LivermorePushClient, configured_identity
 from operations.local_env import load_project_env
 from operations.runtime_agent_cycle import run_runtime_agent_cycle
 from operations.runtime_agent_safety import RuntimeAgentRole
@@ -71,12 +71,13 @@ def main() -> int:
         writes_enabled=False,
     )
     deepseek = DeepSeekClient.from_env()
+    app_id, channel_id = configured_identity(os.environ)
     push = LivermorePushClient(
-        app_id=os.getenv("VPS_LIVERMORE_APP_ID", "").strip(),
+        app_id=app_id,
         app_secret=SecretStr(
             os.getenv("VPS_LIVERMORE_APP_SECRET", "")
         ),
-        channel_id=os.getenv("VPS_LIVERMORE_CHANNEL_ID", "").strip(),
+        channel_id=channel_id,
     )
     completions = {
         RuntimeAgentRole.CATALYST: (

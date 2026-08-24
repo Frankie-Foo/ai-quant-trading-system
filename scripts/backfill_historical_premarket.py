@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import polars as pl
-from dotenv import load_dotenv
 
 from data_plane.calendar import build_xnys_schedule
 from data_plane.contracts import DataQualityCheck, DatasetSnapshot, QualitySeverity
@@ -16,6 +15,7 @@ from data_plane.quality import BAR_SCHEMA_VERSION
 from data_plane.storage import persist_snapshot
 from kernel.config import load_config
 from kernel.features.momentum import premarket_window_utc, rvol
+from operations.local_env import load_project_env
 from research.history import (
     HISTORICAL_SELECTION_PROFILE,
     premarket_data_cutoff_utc,
@@ -98,9 +98,17 @@ def _feature_cache(
         tuple[date, datetime, str, int, str],
         tuple[pl.DataFrame, DatasetSnapshot],
     ] = {}
+    required_columns = {
+        "premarket_close",
+        "premarket_price_confirmation",
+        "provider_delay_minutes",
+        "market_data_feed",
+    }
     for path in (data_root / "accepted").glob(f"{FEATURE_SOURCE}-*/data.parquet"):
         snapshot = _snapshot(path)
         frame = pl.read_parquet(path)
+        if not required_columns.issubset(frame.columns):
+            continue
         dates = frame.get_column("session_date").unique().to_list()
         decisions = frame.get_column("decision_asof_utc").unique().to_list()
         candidates = tuple(
@@ -155,14 +163,25 @@ def _check(name: str, passed: bool, observed: object, expected: str) -> DataQual
 
 
 def main() -> None:
-    load_dotenv(ROOT / ".env")
+    load_project_env(ROOT)
     parser = argparse.ArgumentParser()
     parser.add_argument("--end", type=_parse_date, required=True)
     parser.add_argument("--data-root", type=Path, default=ROOT / "data")
     parser.add_argument("--symbol-chunk-size", type=int, default=200)
+    parser.add_argument(
+        "--historical-delay-minutes",
+        type=int,
+        choices=(0, 15),
+        help="Override the current feed delay to replay a frozen historical policy.",
+    )
     parser.add_argument("--plan-only", action="store_true")
     args = parser.parse_args()
     policy = stock_data_policy_from_env()
+    delay_minutes = (
+        policy.delay_minutes
+        if args.historical_delay_minutes is None
+        else args.historical_delay_minutes
+    )
 
     index, index_snapshot = _latest_index(args.data_root, args.end)
     paths = _dataset_paths(args.data_root)
@@ -186,7 +205,7 @@ def main() -> None:
     raw_prefetch_cutoff_et = max(
         premarket_feature_cutoff_et(
             target,
-            provider_delay_minutes=policy.delay_minutes,
+            provider_delay_minutes=delay_minutes,
         )
         for target in targets
     )
@@ -204,7 +223,7 @@ def main() -> None:
         "max_symbols_per_session": max(map(len, plan.values()), default=0),
         "symbol_chunk_size": args.symbol_chunk_size,
         "market_data_feed": policy.feed,
-        "provider_delay_minutes": policy.delay_minutes,
+        "provider_delay_minutes": delay_minutes,
         "estimated_requests_before_pagination": sum(
             len(_chunks(value, args.symbol_chunk_size)) for value in plan.values()
         ),
@@ -292,18 +311,18 @@ def main() -> None:
             decision_asof = premarket_decision_asof_utc(target)
             data_cutoff_utc = premarket_data_cutoff_utc(
                 target,
-                provider_delay_minutes=policy.delay_minutes,
+                provider_delay_minutes=delay_minutes,
             )
             cutoff_et = premarket_feature_cutoff_et(
                 target,
-                provider_delay_minutes=policy.delay_minutes,
+                provider_delay_minutes=delay_minutes,
             )
             cached_feature = feature_cache.get(
                 (
                     target,
                     decision_asof,
                     candidate_snapshots[target].dataset_id,
-                    policy.delay_minutes,
+                    delay_minutes,
                     policy.feed,
                 )
             )
@@ -354,9 +373,9 @@ def main() -> None:
                     ),
                 ).with_columns(
                     pl.lit(decision_asof).cast(pl.Datetime("ms", "UTC")).alias("decision_asof_utc"),
-                    pl.lit(policy.delay_minutes).alias("provider_delay_minutes"),
+                    pl.lit(delay_minutes).alias("provider_delay_minutes"),
                     pl.lit(policy.feed).alias("market_data_feed"),
-                    pl.lit(policy.is_realtime).alias("market_data_is_realtime"),
+                    pl.lit(delay_minutes == 0).alias("market_data_is_realtime"),
                 )
                 output = candidate_frames[target].join(features, on="symbol", how="left")
                 checks = _feature_checks(

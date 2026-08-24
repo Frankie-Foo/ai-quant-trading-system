@@ -36,6 +36,47 @@ def _metric(value: float, observed_at: datetime) -> DecisionMetric:
     return DecisionMetric(value, observed_at, "test.metric.v1")
 
 
+def test_ledger_aggregates_plan_evaluations_without_storing_market_ticks(
+    tmp_path: Path,
+) -> None:
+    ledger = PaperSessionLedger(tmp_path / "paper.sqlite3")
+    plan = AutonomousPaperPlan(
+        plan_id="plan-test",
+        symbol="TEST",
+        trade_date=TRADE_DATE,
+        reference_price=Decimal("100"),
+        hard_stop=Decimal("98"),
+        max_notional_fraction=Decimal("0.1"),
+        full_risk_fraction=Decimal("0.001"),
+        source_snapshot_ids=("selection-test",),
+        provenance="test.plan.v1",
+    )
+
+    ledger.record_plan_evaluation(
+        plan,
+        action=SessionAction.DATA_BLOCKED,
+        reasons=("market_facts_unavailable",),
+        degraded_reasons=("market_facts_unavailable",),
+        submitted_order_ids=(),
+        at_utc=NOW,
+    )
+    ledger.record_plan_evaluation(
+        plan,
+        action=SessionAction.OBSERVE,
+        reasons=("waiting_for_trigger",),
+        degraded_reasons=(),
+        submitted_order_ids=(),
+        at_utc=NOW + timedelta(seconds=1),
+    )
+
+    summary = ledger.plan_evaluation_summaries(TRADE_DATE)[0]
+    assert summary.evaluation_count == 2
+    assert summary.data_blocked_count == 1
+    assert summary.observe_count == 1
+    assert summary.submitted_order_count == 0
+    assert summary.last_reasons == ("waiting_for_trigger",)
+
+
 def _policy_snapshot(
     *,
     has_position: bool = True,
@@ -1104,7 +1145,7 @@ def test_thirteen_hundred_force_exit_is_idempotent(
     replay = orchestrator.tick(_plan(), snapshot)
 
     assert first.decision is not None
-    assert first.decision.reasons == ("intraday_force_exit_1300",)
+    assert first.decision.reasons == ("intraday_force_exit_1200",)
     assert first.action is SessionAction.EXIT_SUBMITTED
     assert len(broker.close_requests) == 1
     assert broker.close_requests[0].qty == 21
