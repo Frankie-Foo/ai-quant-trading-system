@@ -1990,3 +1990,33 @@ Status: enabled as a Paper safety filter; more forward evidence required.
   H30, VWAP, volume, pullback, market and sector, and 2% risk gates as other
   confirmation candidates.
 - Evidence: Ruff passed; 24 focused tests passed.
+
+## M85 2026-08-24 enterprise Paper runtime hardening
+
+Status: implementation and offline acceptance complete; production remains frozen.
+
+- Created branch `codex/harden-ai-quant` in worktree `D:\cdoeX-work-harden` from
+  baseline `f1fc268`. No remote push or production task installation was performed.
+- Consolidated automated orders into one Modern H15 path on the pinned Alpaca Paper
+  host. Removed dated H30, one-symbol and alternate order-capable monitor entry points;
+  hard-retired retained ORB/autonomous CLIs and the desktop Alpaca autopilot.
+- Implemented receipt-validated 08:00/09:25/09:35 ET stages, immutable final pool and
+  authorization, dedicated Investment Base transitions and Livermore notification
+  receipts. Missing facts and missing external receipts fail closed.
+- Added atomic protected limit brackets, immediate SIP NBBO freshness/spread gates,
+  60%/40% attempts, 0.5% symbol / 0.75% sector / 1.5% portfolio risk, daily loss
+  insurance, 15:45 cancellation and 15:50 flattening.
+- Added SQLite intent/state/lease/Outbox recovery, unknown-state freeze and deduplicated
+  first/third/recovery alerts. Buffett monitoring is structurally read-only.
+- Offline acceptance receipt verified clock, kill switch, duplicate process, intent
+  recovery, Outbox ambiguity, unknown broker state, fault escalation and flatten rules;
+  broker calls and external writes were both zero.
+- External read-only health check passed: Alpaca Paper account ACTIVE on the Paper host,
+  four dedicated Investment Base tables readable, configured Livermore channel present;
+  zero orders, Base records or messages were created.
+- Verification evidence: Python 3.12.6 compileall passed; Python 3.13 full pytest passed
+  `720` tests; Ruff passed; strict Mypy passed across `404` source files. External checks
+  created zero orders, Base records or messages. The old Windows Premarket and Paper
+  tasks are disabled and the new funnel task is not installed. First activation still
+  requires owner unfreeze confirmation and `AI_QUANT_PAPER_SMOKE_MAX_NOTIONAL<=100` on
+  the next XNYS session.

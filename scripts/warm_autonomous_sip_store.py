@@ -17,9 +17,8 @@ from operations.autonomous_paper_config import (
     AutonomousPaperRuntimeConfig,
     load_autonomous_paper_config,
 )
-from operations.local_env import load_project_env
+from operations.local_env import alpaca_paper_credentials, load_project_env
 from schedule.runtime import ProcessLock
-from scripts.run_autonomous_paper_session import direct_paper_credentials
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -128,7 +127,7 @@ def main() -> int:
         incremental=bool(args.incremental),
     )
     market_symbols, plan_symbols = _symbols(config)
-    key_id, secret_key = direct_paper_credentials(os.environ)
+    key_id, secret_key = alpaca_paper_credentials(os.environ)
     client = DirectAlpacaMarketDataClient(
         key_id=key_id,
         secret_key=secret_key,

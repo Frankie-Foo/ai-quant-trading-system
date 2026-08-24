@@ -25,17 +25,15 @@ def test_systemd_service_is_non_root_hardened_and_idempotent() -> None:
     assert "Persistent=true" in timer
 
 
-def test_premarket_and_paper_units_preserve_fail_closed_defaults() -> None:
-    premarket = (ROOT / "deploy/systemd/trading-premarket.service").read_text(encoding="utf-8")
-    paper = (ROOT / "deploy/systemd/trading-paper.service").read_text(encoding="utf-8")
+def test_retired_linux_premarket_and_paper_units_are_absent() -> None:
     environment = (ROOT / "deploy/trading-system.env.example").read_text(encoding="utf-8")
-    assert "User=trading" in premarket and "User=trading" in paper
-    assert "NoNewPrivileges=true" in premarket and "NoNewPrivileges=true" in paper
-    assert "schedule.premarket" in premarket
-    assert "scripts.run_paper_session" in paper
-    assert "scripts.verify_alpaca_access" in paper
-    assert "--sip-lock-file /run/trading-system/alpaca-sip.lock" in paper
-    assert "scripts.refresh_maturity_evidence" in paper
+    for name in (
+        "trading-premarket.service",
+        "trading-premarket.timer",
+        "trading-paper.service",
+        "trading-paper.timer",
+    ):
+        assert not (ROOT / "deploy" / "systemd" / name).exists()
     assert "BROKER_WRITE_ENABLED=false" in environment
     assert "TRADING_KILL_SWITCH=true" in environment
     assert "CLOUD_PLATFORM_BASE_URL=https://cloud-strategy-platform.example.internal" in environment
@@ -107,7 +105,6 @@ def test_windows_observation_tasks_cover_all_daily_phases_without_order_flags() 
         encoding="utf-8"
     )
     premarket = (ROOT / "scripts/run_premarket_tick.ps1").read_text(encoding="utf-8")
-    paper = (ROOT / "scripts/run_paper_tick.ps1").read_text(encoding="utf-8")
     postmarket = (ROOT / "scripts/run_postmarket_tick.ps1").read_text(encoding="utf-8")
 
     assert 'TaskName "Trading System V2 - AI Quant Funnel"' in installer
@@ -122,10 +119,10 @@ def test_windows_observation_tasks_cover_all_daily_phases_without_order_flags() 
     assert "schedule.premarket" in premarket
     assert "prepare_autonomous_selection_handoff" not in premarket
     assert "start_autonomous_paper_day" not in premarket
-    assert "schedule.paper" in paper
+    assert not (ROOT / "scripts/run_paper_tick.ps1").exists()
     assert "schedule.postmarket" in postmarket
-    assert "BROKER_WRITE_ENABLED" not in installer + premarket + paper + postmarket
-    assert "TRADING_KILL_SWITCH" not in installer + premarket + paper + postmarket
+    assert "BROKER_WRITE_ENABLED" not in installer + premarket + postmarket
+    assert "TRADING_KILL_SWITCH" not in installer + premarket + postmarket
 
 
 def test_windows_supervisor_is_a_current_user_startup_fallback() -> None:

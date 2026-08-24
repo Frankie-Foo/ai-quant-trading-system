@@ -223,8 +223,8 @@ def main() -> None:
             QualitySeverity.INFO,
             False,
             f"feed={policy.feed}; realtime={policy.is_realtime}",
-            "live decisions must use scripts.run_paper_session and the SIP WebSocket",
-            "execution.live_session",
+            "historical ORB output is research-only; Modern H15 is the sole Paper runtime",
+            "scripts.monitor_modern_momentum_paper",
         ),
     )
     status = _snapshot_status(signals, query_end=query_end, market_close=market_close)

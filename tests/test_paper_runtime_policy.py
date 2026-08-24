@@ -2,7 +2,11 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from operations.paper_runtime_policy import ExecutionAuthorization, PaperRuntimePolicy
+from operations.paper_runtime_policy import (
+    ExecutionAuthorization,
+    PaperRuntimePolicy,
+    reject_retired_paper_runtime,
+)
 
 TRADE_DATE = date(2026, 8, 24)
 POLICY = PaperRuntimePolicy()
@@ -66,6 +70,11 @@ def test_arming_accepts_complete_paper_authorization() -> None:
         expected_candidate_pool=("AAPL",),
         expected_strategy_version="modern-h15-v1",
     )
+
+
+def test_retired_paper_runtime_is_unconditionally_blocked() -> None:
+    with pytest.raises(RuntimeError, match="retired"):
+        reject_retired_paper_runtime("legacy-orb")
 
 
 @pytest.mark.parametrize(

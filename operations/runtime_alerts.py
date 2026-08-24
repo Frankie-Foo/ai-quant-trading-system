@@ -7,9 +7,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol, TypeVar
-
-T = TypeVar("T")
+from typing import Protocol
 
 
 class PushPort(Protocol):
@@ -181,7 +179,7 @@ class RuntimeAlertManager:
             )
 
 
-def bounded_retry(
+def bounded_retry[T](
     action: Callable[[], T],
     *,
     sleep: Callable[[float], None] = time.sleep,

@@ -14,12 +14,11 @@ from data_plane.providers.alpaca_direct import DirectAlpacaMarketDataClient
 from execution.alpaca_paper import DirectAlpacaPaperBroker
 from operations.autonomous_paper_config import load_autonomous_paper_config
 from operations.livermore_push import LivermorePushClient, configured_identity
-from operations.local_env import load_project_env
+from operations.local_env import alpaca_paper_credentials, load_project_env
 from operations.runtime_agent_cycle import run_runtime_agent_cycle
 from operations.runtime_agent_safety import RuntimeAgentRole
 from research.providers.deepseek import DEEPSEEK_MODEL, DeepSeekClient
 from schedule.runtime import JsonEventLogger, ProcessLock
-from scripts.run_autonomous_paper_session import direct_paper_credentials
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -60,7 +59,7 @@ def main() -> int:
     if args.max_seconds is not None and args.max_seconds <= 0:
         raise ValueError("max-seconds must be positive")
     config = load_autonomous_paper_config(args.config)
-    key_id, secret_key = direct_paper_credentials(os.environ)
+    key_id, secret_key = alpaca_paper_credentials(os.environ)
     market = DirectAlpacaMarketDataClient(
         key_id=key_id,
         secret_key=secret_key,

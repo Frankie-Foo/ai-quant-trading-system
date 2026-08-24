@@ -109,11 +109,15 @@ def test_outbox_never_resends_sent_or_ambiguous_delivery(tmp_path: Path) -> None
 def test_process_lease_blocks_a_duplicate_monitor(tmp_path: Path) -> None:
     store = PaperStateStore(tmp_path / "paper.sqlite3")
     assert store.claim_run(TRADE_DATE, owner="process-1", observed_at_utc=NOW)
+    assert store.active_run_owner(TRADE_DATE, observed_at_utc=NOW) == "process-1"
     assert not store.claim_run(
         TRADE_DATE,
         owner="process-2",
         observed_at_utc=NOW + timedelta(seconds=1),
     )
+    assert store.active_run_owner(
+        TRADE_DATE, observed_at_utc=NOW + timedelta(seconds=31)
+    ) is None
     assert store.claim_run(
         TRADE_DATE,
         owner="process-2",

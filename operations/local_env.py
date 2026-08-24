@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 from dotenv import dotenv_values, load_dotenv
+from pydantic import SecretStr
 
 _SHARED_ENV_KEYS = frozenset(
     {
@@ -85,3 +87,32 @@ def project_data_root(project_root: str | Path) -> Path:
         return root / "data"
     value = Path(configured).expanduser()
     return value if value.is_absolute() else root / value
+
+
+def alpaca_paper_credentials(
+    environment: Mapping[str, str],
+) -> tuple[SecretStr, SecretStr]:
+    """Resolve Paper credentials from supported aliases without exposing values."""
+
+    def first(*names: str) -> str | None:
+        for name in names:
+            value = environment.get(name, "").strip()
+            if value:
+                return value
+        return None
+
+    key_id = first(
+        "ALPACA_PAPER_KEY_ID",
+        "APCA_API_KEY_ID",
+        "ALPACA_API_KEY_ID",
+        "ALPACA_API_KEY",
+    )
+    secret_key = first(
+        "ALPACA_PAPER_SECRET_KEY",
+        "APCA_API_SECRET_KEY",
+        "ALPACA_API_SECRET_KEY",
+        "ALPACA_SECRET_KEY",
+    )
+    if key_id is None or secret_key is None:
+        raise RuntimeError("Alpaca Paper credentials are incomplete")
+    return SecretStr(key_id), SecretStr(secret_key)

@@ -56,6 +56,19 @@ def test_production_supervisor_has_no_legacy_paper_lane() -> None:
     assert '"schedule.premarket"' not in source
 
 
+def test_legacy_paper_entrypoints_are_hard_retired() -> None:
+    for path in (
+        ROOT / "scripts" / "run_paper_session.py",
+        ROOT / "scripts" / "run_autonomous_paper_session.py",
+        ROOT / "operations" / "alpaca_paper_autopilot.py",
+    ):
+        assert "reject_retired_paper_runtime" in path.read_text(encoding="utf-8")
+    assert not (ROOT / "scripts" / "start_autonomous_paper_day.ps1").exists()
+    compose = (ROOT / "compose.autonomous-paper.yaml").read_text(encoding="utf-8")
+    assert "paper-executor:" not in compose
+    assert "scripts.run_autonomous_paper_session" not in compose
+
+
 def test_obsolete_single_symbol_monitors_are_removed() -> None:
     obsolete = (
         "monitor_alab.py",
@@ -69,6 +82,24 @@ def test_obsolete_single_symbol_monitors_are_removed() -> None:
         "monitor_intraday_attack.py",
     )
     assert not any((ROOT / "scripts" / name).exists() for name in obsolete)
+
+
+def test_enterprise_operating_documents_and_single_runtime_adr_exist() -> None:
+    required = (
+        "AGENTS.md",
+        "README.md",
+        "PROGRESS.md",
+        "CHANGELOG.md",
+        "docs/ARCHITECTURE.md",
+        "docs/DEPLOYMENT.md",
+        "docs/RUNBOOK.md",
+        "docs/ADR/0001-single-paper-runtime.md",
+    )
+    assert all((ROOT / path).is_file() for path in required)
+    runbook = (ROOT / "docs" / "RUNBOOK.md").read_text(encoding="utf-8")
+    assert "15:45" in runbook
+    assert "15:50" in runbook
+    assert "Alpaca Paper" in runbook
 
 
 def test_dataset_snapshot_requires_timezone_aware_asof() -> None:

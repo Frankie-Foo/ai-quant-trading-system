@@ -16,6 +16,7 @@ from pydantic import SecretStr
 from execution.alpaca_paper import CloudPaperBroker
 from execution.autonomous_paper_session import AutonomousPaperBroker
 from operations.ibkr_paper_autopilot import PaperAutopilot as _PaperAutopilot
+from operations.paper_runtime_policy import reject_retired_paper_runtime
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8765"
 
@@ -29,6 +30,10 @@ class AlpacaPaperAutopilot(_PaperAutopilot):
     AUDIT_LEDGER_NAME = "alpaca-paper-autopilot.sqlite3"
     THREAD_NAME = "alpaca-paper-autopilot"
     SAFETY_PROVENANCE_PREFIX = "operations.alpaca_paper_autopilot"
+
+    def start(self, *, confirmation: str) -> dict[str, object]:
+        del confirmation
+        reject_retired_paper_runtime("desktop-alpaca-autopilot")
 
     def _profile(self) -> tuple[str, int, str]:
         error = self._profile_error()

@@ -1,5 +1,24 @@
 # Architecture decisions
 
+## Current production runtime boundary (2026-08-24)
+
+The only automated order path is:
+
+```text
+XNYS calendar → modern_funnel → three immutable pools → confirmed plan
+              → Modern H15 monitor → protected Alpaca Paper bracket
+```
+
+The 08:00 and 09:25 ET stages cannot submit orders. The 09:35 stage may create an
+authorization only after the dedicated Investment Base and Livermore return durable
+receipts. The Paper monitor accepts only the Paper host, the same trade date, candidate
+pool, strategy version and plan hash. Entries begin no earlier than 09:56 ET, stop at
+15:00, unfilled buys are cancelled at 15:45, and all positions flatten by 15:50.
+
+`scripts.monitor_trade_plan` is the separate Buffett live-market advisory boundary. It
+has no execution import or broker method. Old date-specific and single-symbol monitors
+are removed. Agents, Feishu, Livermore and research code cannot create broker orders.
+
 This document maps the useful parts of *AI Quant Platform Layered Architecture
 Design* into the frozen Trading System v2 specification. The PDF is treated as a
 high-level design reference, not as evidence that any trading signal is profitable.

@@ -241,6 +241,20 @@ class FeishuBaseEventClient:
             self._verify_fields(normalized_id, readback, normalized_fields)
             return str(readback["record_id"])
 
+    def check_access(self) -> dict[str, str]:
+        """Read every allowlisted table without creating or updating a record."""
+
+        checked: dict[str, str] = {}
+        for table in InvestmentTable:
+            settings = self.settings.table(table)
+            self._exact_records(
+                table,
+                "__ai_quant_readonly_healthcheck__",
+                (settings.event_id_field,),
+            )
+            checked[table.value] = settings.table_id
+        return checked
+
     @contextmanager
     def _write_lock(self) -> Iterator[None]:
         path = self.settings.lock_db_path

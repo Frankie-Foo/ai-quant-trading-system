@@ -131,6 +131,25 @@ class PaperStateStore:
             connection.commit()
         return True
 
+    def active_run_owner(
+        self,
+        trade_date: date,
+        *,
+        observed_at_utc: datetime,
+    ) -> str | None:
+        """Return the current lease owner without changing lease state."""
+
+        _require_utc(observed_at_utc)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT owner, lease_until_utc FROM paper_run_lease WHERE trade_date=?",
+                (trade_date.isoformat(),),
+            ).fetchone()
+        if row is None:
+            return None
+        lease_until = datetime.fromisoformat(str(row[1]))
+        return str(row[0]) if lease_until > observed_at_utc else None
+
     def record_order_intent(
         self,
         *,

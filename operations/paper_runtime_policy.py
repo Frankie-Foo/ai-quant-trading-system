@@ -5,8 +5,18 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, time
+from typing import Never
 
 PAPER_BASE_URL = "https://paper-api.alpaca.markets"
+
+
+def reject_retired_paper_runtime(runtime_name: str) -> Never:
+    """Permanently block superseded broker-writing entrypoints."""
+
+    name = runtime_name.strip() or "unknown"
+    raise RuntimeError(
+        f"retired Paper runtime {name!r} is disabled; use Modern H15 only"
+    )
 
 
 @dataclass(frozen=True)

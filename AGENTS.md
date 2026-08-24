@@ -21,6 +21,16 @@
     attempted configurations before model comparison.
 14. Trading-plane order state transitions are explicit and idempotent; process
     recovery must never create a duplicate broker order.
+15. `scripts.monitor_modern_momentum_paper` is the only automated broker-writing
+    module. It may target only `https://paper-api.alpaca.markets`; real trading is
+    forbidden.
+16. `schedule.modern_funnel` is the only production selection/Paper scheduler. A
+    successful third stage requires immutable dedicated-Base and Livermore receipts.
+17. Never read or write a disconnected legacy Feishu Base. The Investment Base uses
+    four explicit, distinct table IDs and stores transitions, not polling ticks.
+18. Paper is frozen by default. Unfreeze requires owner confirmation and complete
+    reconciliation. This release enforces a notional cap no greater than $100; raising
+    it requires a separate reviewed release and owner approval.
 
 ## Intraday monitoring operating order
 

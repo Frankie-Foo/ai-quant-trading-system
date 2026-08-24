@@ -22,10 +22,14 @@ from data_plane.contracts import DataQualityCheck, DatasetSnapshot, QualitySever
 from data_plane.providers.alpaca import fetch_bars, fetch_quotes
 from data_plane.storage import persist_snapshot
 from operations.autonomous_notifications import AutonomousNotificationLedger
-from operations.autonomous_selection_handoff import create_open_confirmation
+from operations.autonomous_selection_handoff import (
+    create_open_confirmation,
+    load_open_confirmation,
+)
 from operations.feishu_base import FeishuBaseEventClient, InvestmentTable
 from operations.livermore_push import LivermorePushClient, configured_identity
 from operations.local_env import load_project_env, project_data_root
+from operations.paper_state import PaperStateStore
 from schedule.modern_funnel import FunnelStage
 from scripts.monitor_modern_momentum_forward import SOURCE, _latest_pool
 
@@ -122,6 +126,93 @@ def _reasons(row: dict[str, object]) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         raise ValueError("funnel reasons must be a sequence")
     return tuple(str(item) for item in value)
+
+
+def _candidate_reason(row: dict[str, object]) -> str:
+    reasons = _reasons(row)
+    if reasons:
+        return "、".join(reasons)
+    categories = row.get("catalyst_categories")
+    catalyst = (
+        "/".join(str(item) for item in categories)
+        if isinstance(categories, (list, tuple)) and categories
+        else "催化N/A"
+    )
+    return (
+        f"催化={catalyst}、RVOL={row.get('rvol', 'N/A')}、"
+        f"盘前涨幅={row.get('premarket_return', 'N/A')}、"
+        f"市值={row.get('forward_market_cap', 'N/A')}"
+    )
+
+
+def _open_plan_lines(candidates: list[dict[str, object]]) -> tuple[str, ...]:
+    lines: list[str] = []
+    for row in candidates:
+        symbol = str(row["symbol"])
+        lines.extend(
+            (
+                f"{symbol} 预案：09:56 ET后，完整5分钟K突破H15且位于上升VWAP上方，"
+                "MACD为正并增强、成交量确认后才允许入场；",
+                "参考入场：触发时最新SIP卖价，实际点差与滑点合计不得超过0.10%；",
+                "失效/止损：跌回H15、失守VWAP或更高低点；含滑点全包止损不超过2%；",
+                "止盈/退出：3R目标或趋势退出；15:00后禁止新仓，15:50前全部清仓；",
+                "仓位：按账户风险动态反算，单票0.5%、板块0.75%、组合1.5%，"
+                "首次/二次尝试60%/40%。",
+            )
+        )
+    return tuple(lines)
+
+
+def _execution_summary(stage: FunnelStage, row: dict[str, object]) -> str:
+    if stage is FunnelStage.OPEN_CONFIRMATION:
+        return "".join(_open_plan_lines([row]))
+    return f"阶段={stage.value}；只记录状态转换，不记录轮询行情"
+
+
+def _selection_event_fields(
+    *,
+    trade_date: date,
+    stage: FunnelStage,
+    row: dict[str, object],
+    kept: bool,
+    observed_at_utc: datetime,
+) -> dict[str, object]:
+    symbol = str(row["symbol"])
+    event_id = f"funnel:{trade_date.isoformat()}:{stage.value}:{symbol}"
+    if not kept:
+        next_action = "已剔除；纳入无成交复盘"
+        execution_summary = f"剔除理由={_candidate_reason(row)}"
+    else:
+        next_action = (
+            "等待下一层漏斗"
+            if stage is not FunnelStage.OPEN_CONFIRMATION
+            else "等待H15入场条件"
+        )
+        execution_summary = _execution_summary(stage, row)
+    return {
+        "运行ID": event_id,
+        "选股时间": observed_at_utc,
+        "股票名称": symbol,
+        "股票代码": symbol,
+        "市场": "美股",
+        "信号类型": "综合",
+        "模拟动作": "候选" if kept else "不操作",
+        "状态": "新信号" if kept else "已失效",
+        "触发理由": _candidate_reason(row),
+        "下一动作": next_action,
+        "执行摘要": execution_summary,
+        "策略版本": STRATEGY_VERSION,
+        "数据源状态": "alpaca.sip|production=false",
+    }
+
+
+def _stage_observed_at(trade_date: date, stage: FunnelStage) -> datetime:
+    stage_time = {
+        FunnelStage.FIRST_WAVE: time(8),
+        FunnelStage.SECOND_WAVE: time(9, 25),
+        FunnelStage.OPEN_CONFIRMATION: time(9, 35),
+    }[stage]
+    return datetime.combine(trade_date, stage_time, EASTERN).astimezone(UTC)
 
 
 def evaluate_second_wave(
@@ -296,43 +387,47 @@ def _publish_stage(
     base = FeishuBaseEventClient.from_environment(os.environ)
     if base is None:
         raise RuntimeError("dedicated investment Feishu Base is required")
-    now = datetime.now(UTC)
+    now = _stage_observed_at(trade_date, stage)
+    stage_rows = tuple((row, True) for row in candidates) + tuple(
+        (row, False) for row in rejected
+    )
     record_ids = tuple(
         base.record_event(
             InvestmentTable.SELECTION,
             f"funnel:{trade_date.isoformat()}:{stage.value}:{row['symbol']}",
-            {
-                "运行ID": f"funnel:{trade_date.isoformat()}:{stage.value}:{row['symbol']}",
-                "选股时间": now,
-                "股票名称": str(row["symbol"]),
-                "股票代码": str(row["symbol"]),
-                "市场": "美股",
-                "信号类型": "综合",
-                "模拟动作": "候选",
-                "状态": "新信号",
-                "触发理由": "；".join(_reasons(row)),
-                "下一动作": (
-                    "等待下一层漏斗"
-                    if stage is not FunnelStage.OPEN_CONFIRMATION
-                    else "等待H15入场条件"
-                ),
-                "执行摘要": f"阶段={stage.value}；只记录状态转换，不记录轮询行情",
-                "策略版本": STRATEGY_VERSION,
-                "数据源状态": "alpaca.sip|production=false",
-            },
+            _selection_event_fields(
+                trade_date=trade_date,
+                stage=stage,
+                row=row,
+                kept=kept,
+                observed_at_utc=now,
+            ),
         )
-        for row in candidates
+        for row, kept in stage_rows
     )
-    kept_text = "、".join(str(row["symbol"]) for row in candidates) or "无"
+    stage_title = {
+        FunnelStage.FIRST_WAVE: "第一波观察池",
+        FunnelStage.SECOND_WAVE: "第二波盘前复核",
+        FunnelStage.OPEN_CONFIRMATION: "第三波开盘确认",
+    }[stage]
+    kept_text = "；".join(
+        f"{row['symbol']}：{_candidate_reason(row)}" for row in candidates
+    ) or "无"
     rejected_text = "；".join(
         f"{row['symbol']}：{'、'.join(_reasons(row))}"
         for row in rejected
     ) or "无"
+    plan_text = (
+        "\n".join(_open_plan_lines(candidates)) + "\n"
+        if stage is FunnelStage.OPEN_CONFIRMATION
+        else ""
+    )
     body = (
-        f"【AI量化漏斗｜{stage.value}】\n"
+        f"【AI量化漏斗｜{stage_title}】\n"
         f"交易日：{trade_date.isoformat()}\n"
         f"保留：{kept_text}\n"
         f"剔除：{rejected_text}\n"
+        f"{plan_text}"
         "仅Alpaca Paper模拟盘；本消息不代表已经成交。"
     )
     ledger = AutonomousNotificationLedger(
@@ -353,18 +448,25 @@ def _publish_stage(
 
 
 def _first_wave(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
-    _run_module("schedule.premarket", args.trade_date, args.data_root)
-    _run_module("scripts.prepare_modern_momentum_forward", args.trade_date, args.data_root)
-    pool = _latest_pool(args.data_root, args.trade_date)
-    rows = pool.to_dicts()
-    payload: dict[str, object] = {
-        "schema_version": "modern_funnel.first_wave.v1",
-        "trade_date": args.trade_date.isoformat(),
-        "generated_at_utc": datetime.now(UTC),
-        "candidates": rows,
-    }
     path = day_root / "first_wave_pool.json"
-    _write_json(path, payload)
+    if path.exists():
+        existing = _read_json(path)
+        raw_rows = existing.get("candidates")
+        if not isinstance(raw_rows, list):
+            raise ValueError("first-wave retry artifact is invalid")
+        rows = raw_rows
+    else:
+        _run_module("schedule.premarket", args.trade_date, args.data_root)
+        _run_module("scripts.prepare_modern_momentum_forward", args.trade_date, args.data_root)
+        pool = _latest_pool(args.data_root, args.trade_date)
+        rows = pool.to_dicts()
+        payload: dict[str, object] = {
+            "schema_version": "modern_funnel.first_wave.v1",
+            "trade_date": args.trade_date.isoformat(),
+            "generated_at_utc": datetime.now(UTC),
+            "candidates": rows,
+        }
+        _write_json(path, payload)
     record_ids, message_id = _publish_stage(
         trade_date=args.trade_date,
         stage=FunnelStage.FIRST_WAVE,
@@ -387,23 +489,30 @@ def _second_wave(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
     candidates = source.get("candidates")
     if not isinstance(candidates, list) or not candidates:
         raise ValueError("first-wave candidates are missing")
-    symbols = _symbols(source)
-    session = _session(args)
-    open_utc = session["market_open_utc"]
-    now = datetime.now(UTC)
-    premarket_start = datetime.combine(args.trade_date, time(4), EASTERN).astimezone(UTC)
-    bars = fetch_bars(symbols, premarket_start, min(now, open_utc), feed="sip")
-    quotes = fetch_quotes(symbols, now - timedelta(seconds=15), now, feed="sip")
-    kept, rejected = evaluate_second_wave(candidates, bars, quotes)
-    payload: dict[str, object] = {
-        "schema_version": "modern_funnel.second_wave.v1",
-        "trade_date": args.trade_date.isoformat(),
-        "generated_at_utc": now,
-        "candidates": kept,
-        "rejected": rejected,
-    }
     path = day_root / "second_wave_pool.json"
-    _write_json(path, payload)
+    if path.exists():
+        existing = _read_json(path)
+        kept = existing.get("candidates")
+        rejected = existing.get("rejected")
+        if not isinstance(kept, list) or not isinstance(rejected, list):
+            raise ValueError("second-wave retry artifact is invalid")
+    else:
+        symbols = _symbols(source)
+        session = _session(args)
+        open_utc = session["market_open_utc"]
+        now = datetime.now(UTC)
+        premarket_start = datetime.combine(args.trade_date, time(4), EASTERN).astimezone(UTC)
+        bars = fetch_bars(symbols, premarket_start, min(now, open_utc), feed="sip")
+        quotes = fetch_quotes(symbols, now - timedelta(seconds=15), now, feed="sip")
+        kept, rejected = evaluate_second_wave(candidates, bars, quotes)
+        payload: dict[str, object] = {
+            "schema_version": "modern_funnel.second_wave.v1",
+            "trade_date": args.trade_date.isoformat(),
+            "generated_at_utc": now,
+            "candidates": kept,
+            "rejected": rejected,
+        }
+        _write_json(path, payload)
     record_ids, message_id = _publish_stage(
         trade_date=args.trade_date,
         stage=FunnelStage.SECOND_WAVE,
@@ -484,6 +593,13 @@ def _launch_paper_if_confirmed(trade_date: date, confirmation_path: Path) -> int
         raise RuntimeError("confirmed Paper startup requires a smoke cap no greater than $100")
     run_dir = ROOT / "runs" / "modern-momentum" / trade_date.isoformat()
     run_dir.mkdir(parents=True, exist_ok=True)
+    store = PaperStateStore(run_dir / "paper-state.sqlite3")
+    active_owner = store.active_run_owner(trade_date, observed_at_utc=datetime.now(UTC))
+    if active_owner is not None:
+        prefix = "pid-"
+        if not active_owner.startswith(prefix) or not active_owner.removeprefix(prefix).isdigit():
+            raise RuntimeError("active Paper monitor lease has an invalid owner")
+        return int(active_owner.removeprefix(prefix))
     command = [
         sys.executable,
         "-m",
@@ -515,6 +631,29 @@ def _launch_paper_if_confirmed(trade_date: date, confirmation_path: Path) -> int
 
 
 def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
+    confirmation_path = day_root / "open_confirmation.json"
+    if confirmation_path.exists():
+        confirmation = load_open_confirmation(confirmation_path)
+        authorization = confirmation.authorization
+        if (
+            authorization.trade_date != args.trade_date
+            or authorization.strategy_version != STRATEGY_VERSION
+        ):
+            raise RuntimeError("existing open confirmation does not match this stage")
+        paper_pid = _launch_paper_if_confirmed(args.trade_date, confirmation_path)
+        record_ids = tuple(authorization.feishu_record_id.split(","))
+        return {
+            **_receipt(
+                confirmation_path,
+                record_ids,
+                authorization.livermore_message_id,
+            ),
+            "authorization_id": authorization.open_confirmation_id,
+            "symbols": ",".join(authorization.candidate_pool),
+            "paper_started": str(paper_pid is not None).lower(),
+            "paper_pid": str(paper_pid or ""),
+        }
+
     source = _read_json(day_root / "second_wave_pool.json")
     candidates = source.get("candidates")
     if not isinstance(candidates, list):
@@ -540,11 +679,29 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
             },
         )
         return _receipt(path, record_ids, message_id)
-    symbols = _symbols(source)
-    session = _session(args)
-    open_utc = session["market_open_utc"]
-    bars = fetch_bars(symbols, open_utc, open_utc + timedelta(minutes=5), feed="sip")
-    kept, rejected = evaluate_open_confirmation(candidates, bars)
+    decision_path = day_root / "open_decision.json"
+    if decision_path.exists():
+        decision = _read_json(decision_path)
+        kept = decision.get("candidates")
+        rejected = decision.get("rejected")
+        if not isinstance(kept, list) or not isinstance(rejected, list):
+            raise ValueError("open-decision retry artifact is invalid")
+    else:
+        symbols = _symbols(source)
+        session = _session(args)
+        open_utc = session["market_open_utc"]
+        bars = fetch_bars(symbols, open_utc, open_utc + timedelta(minutes=5), feed="sip")
+        kept, rejected = evaluate_open_confirmation(candidates, bars)
+        _write_json(
+            decision_path,
+            {
+                "schema_version": "modern_funnel.open_decision.v1",
+                "trade_date": args.trade_date.isoformat(),
+                "generated_at_utc": datetime.now(UTC),
+                "candidates": kept,
+                "rejected": rejected,
+            },
+        )
     record_ids, message_id = _publish_stage(
         trade_date=args.trade_date,
         stage=FunnelStage.OPEN_CONFIRMATION,
@@ -569,7 +726,7 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
     plan_path = day_root / "modern_h15_paper_plan.json"
     _write_json(plan_path, _plan_payload(args.trade_date, kept))
     authorization = create_open_confirmation(
-        confirmation_path=day_root / "open_confirmation.json",
+        confirmation_path=confirmation_path,
         config_path=plan_path,
         trade_date=args.trade_date,
         selection_snapshot_id=snapshot.dataset_id,
@@ -581,10 +738,10 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
     )
     paper_pid = _launch_paper_if_confirmed(
         args.trade_date,
-        day_root / "open_confirmation.json",
+        confirmation_path,
     )
     return {
-        **_receipt(day_root / "open_confirmation.json", record_ids, message_id),
+        **_receipt(confirmation_path, record_ids, message_id),
         "authorization_id": authorization.open_confirmation_id,
         "symbols": ",".join(final_symbols),
         "paper_started": str(paper_pid is not None).lower(),

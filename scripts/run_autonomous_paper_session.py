@@ -43,7 +43,8 @@ from operations.autonomous_paper_runtime import AutonomousPaperRuntime
 from operations.autonomous_policy_adapter import load_runtime_safety_envelope
 from operations.feishu_base import FeishuBaseEventClient
 from operations.livermore_push import LivermorePushClient, configured_identity
-from operations.local_env import load_project_env
+from operations.local_env import alpaca_paper_credentials, load_project_env
+from operations.paper_runtime_policy import reject_retired_paper_runtime
 from schedule.runtime import JsonEventLogger, ProcessLock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -114,34 +115,9 @@ def resolve_paper_authorization(
 def direct_paper_credentials(
     environment: Mapping[str, str],
 ) -> tuple[SecretStr, SecretStr]:
-    key_id = _first_present(
-        environment,
-        "ALPACA_PAPER_KEY_ID",
-        "APCA_API_KEY_ID",
-        "ALPACA_API_KEY_ID",
-        "ALPACA_API_KEY",
-    )
-    secret_key = _first_present(
-        environment,
-        "ALPACA_PAPER_SECRET_KEY",
-        "APCA_API_SECRET_KEY",
-        "ALPACA_API_SECRET_KEY",
-        "ALPACA_SECRET_KEY",
-    )
-    if key_id is None or secret_key is None:
-        raise RuntimeError("Alpaca Paper credentials are incomplete")
-    return SecretStr(key_id), SecretStr(secret_key)
+    """Compatibility wrapper for retired tests; active code imports local_env."""
 
-
-def _first_present(
-    environment: Mapping[str, str],
-    *names: str,
-) -> str | None:
-    for name in names:
-        value = environment.get(name, "").strip()
-        if value:
-            return value
-    return None
+    return alpaca_paper_credentials(environment)
 
 
 def _boolean_environment(name: str, *, default: bool) -> bool:
@@ -251,6 +227,7 @@ def _market_adapter(
 
 
 def main() -> int:
+    reject_retired_paper_runtime("legacy-autonomous-paper")
     load_project_env(ROOT)
     args = _parser().parse_args()
     if args.max_seconds is not None and args.max_seconds <= 0:

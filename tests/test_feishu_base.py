@@ -87,6 +87,20 @@ def test_event_write_is_create_then_exact_readback_and_replay_safe(tmp_path: Pat
     assert all(command[-2:] == ("--format", "json") for command in runner.commands)
 
 
+def test_readonly_access_check_never_upserts(tmp_path: Path) -> None:
+    runner = FakeLark()
+    checked = FeishuBaseEventClient(_settings(tmp_path), runner=runner).check_access()
+
+    assert checked == {
+        "selection": "tbl-selection",
+        "monitor": "tbl-monitor",
+        "trade": "tbl-trade",
+        "review": "tbl-review",
+    }
+    assert len(runner.commands) == 4
+    assert all("+record-list" in command for command in runner.commands)
+
+
 def test_event_write_rejects_duplicate_business_key(tmp_path: Path) -> None:
     class DuplicateRunner:
         def __call__(self, command: Sequence[str]) -> Mapping[str, object]:
