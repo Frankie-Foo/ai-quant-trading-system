@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -39,6 +40,15 @@ MAX_SPREAD = 0.001
 MIN_PREMARKET_DOLLAR_VOLUME = 1_000_000.0
 MIN_OPEN_DOLLAR_VOLUME = 1_000_000.0
 STRATEGY_VERSION = "modern-h15.v1"
+CATALYST_LABELS = {
+    "earnings": "财报",
+    "contract_partnership": "合同",
+    "financing_dilution": "融资",
+    "other_material": "重大事项",
+    "management_change": "管理层变动",
+    "general_news": "行业消息",
+}
+CRYPTO_NEWS_SYMBOLS = {"COIN", "MSTR"}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -143,6 +153,39 @@ def _candidate_reason(row: dict[str, object]) -> str:
         f"盘前涨幅={row.get('premarket_return', 'N/A')}、"
         f"市值={row.get('forward_market_cap', 'N/A')}"
     )
+
+
+def _first_wave_catalyst(row: dict[str, object]) -> str:
+    categories = row.get("catalyst_categories")
+    if not isinstance(categories, (list, tuple)) or not categories:
+        raise ValueError("first-wave catalyst category is required")
+    if str(row.get("symbol", "")) in CRYPTO_NEWS_SYMBOLS and "general_news" in categories:
+        return "加密行业消息"
+    labels = tuple(dict.fromkeys(CATALYST_LABELS.get(str(item), "重大事项") for item in categories))
+    return "/".join(labels)
+
+
+def _first_wave_number(row: dict[str, object], field: str) -> float:
+    try:
+        value = float(str(row[field]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"first-wave {field} is required") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"first-wave {field} must be finite")
+    return value
+
+
+def _first_wave_message(candidates: list[dict[str, object]]) -> str:
+    lines = ["第一波观察池：", ""]
+    for index, row in enumerate(candidates, start=1):
+        symbol = str(row["symbol"])
+        rvol = _first_wave_number(row, "rvol")
+        premarket_return = _first_wave_number(row, "premarket_return")
+        lines.append(
+            f"{index}. {symbol}：{_first_wave_catalyst(row)}，"
+            f"RVOL {rvol:.2f}，盘前 {premarket_return:+.2%}"
+        )
+    return "\n".join(lines)
 
 
 def _open_plan_lines(candidates: list[dict[str, object]]) -> tuple[str, ...]:
@@ -423,12 +466,16 @@ def _publish_stage(
         else ""
     )
     body = (
-        f"【AI量化漏斗｜{stage_title}】\n"
-        f"交易日：{trade_date.isoformat()}\n"
-        f"保留：{kept_text}\n"
-        f"剔除：{rejected_text}\n"
-        f"{plan_text}"
-        "仅Alpaca Paper模拟盘；本消息不代表已经成交。"
+        _first_wave_message(candidates)
+        if stage is FunnelStage.FIRST_WAVE
+        else (
+            f"【AI量化漏斗｜{stage_title}】\n"
+            f"交易日：{trade_date.isoformat()}\n"
+            f"保留：{kept_text}\n"
+            f"剔除：{rejected_text}\n"
+            f"{plan_text}"
+            "仅Alpaca Paper模拟盘；本消息不代表已经成交。"
+        )
     )
     ledger = AutonomousNotificationLedger(
         state_root / trade_date.isoformat() / "funnel-notifications.sqlite3"

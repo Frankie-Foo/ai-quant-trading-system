@@ -2020,3 +2020,25 @@ Status: implementation and offline acceptance complete; production remains froze
   tasks are disabled and the new funnel task is not installed. First activation still
   requires owner unfreeze confirmation and `AI_QUANT_PAPER_SMOKE_MAX_NOTIONAL<=100` on
   the next XNYS session.
+
+## M86 2026-08-26 durable local funnel activation
+
+Status: installed for Alpaca Paper only; real trading remains forbidden.
+
+- Root cause of the 2026-08-25 missed second/open stages was operational: the
+  one-minute Windows funnel task was absent. The hardening worktree also had no local
+  virtual environment or environment file, so the old runner could not be installed
+  safely as written.
+- Windows runners now receive explicit approved paths for Python, the machine-owned
+  environment file and the shared immutable data root. Secrets are not copied into the
+  worktree or embedded in Task Scheduler arguments.
+- Installed `Trading System V2 - AI Quant Funnel` at one-minute cadence with ET/XNYS
+  stage gates, `StartWhenAvailable`, wake-to-run and `IgnoreNew`. Paper arming remains
+  receipt-gated and capped at $100; the duplicate Codex heartbeat was deleted.
+- Read-only external verification confirmed the Alpaca Paper host and ACTIVE account,
+  all four dedicated Investment Base tables and the Livermore channel. It submitted
+  zero orders, wrote zero Base records and sent zero messages. A second broker check
+  found zero open orders and zero positions.
+- Verification: full pytest passed `723` tests; Ruff passed; strict Mypy passed across
+  `430` source files; compileall passed. Two actual Task Scheduler ticks returned
+  `not_due` with exit code 0 outside the ET windows.

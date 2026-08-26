@@ -18,10 +18,14 @@ dedicated worktree and branch; no worktree is itself a deployment target.
 
 ## Windows installation
 
-Run `scripts/install_local_observation_tasks.ps1` only after review. It installs the
-one-minute `Trading System V2 - AI Quant Funnel` task and postmarket review, and disables
-the old premarket and Paper tasks. `schedule.modern_funnel` computes ET/DST and XNYS
-sessions; Windows local time does not define trading windows.
+Run `scripts/install_local_observation_tasks.ps1` only after review, passing explicit
+paths for the approved Python interpreter, machine-owned environment file and shared
+data root. Add `-ArmPaper -PaperSmokeMaxNotional 100` only after owner unfreeze. The
+installer creates the one-minute `Trading System V2 - AI Quant Funnel` task and
+postmarket review, and disables the old premarket and Paper tasks.
+`schedule.modern_funnel` computes ET/DST and XNYS sessions; Windows local time does not
+define trading windows. Secrets remain in the machine-owned environment file and are
+not copied into a worktree or Task Scheduler arguments.
 
 The installation does not authorize Paper writes. Arming still requires all of:
 

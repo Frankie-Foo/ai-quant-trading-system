@@ -13,6 +13,7 @@ from schedule.modern_funnel import FunnelStage
 from scripts import run_modern_funnel_stage as stage_runner
 from scripts.run_modern_funnel_stage import (
     _execution_summary,
+    _first_wave_message,
     _open_plan_lines,
     _selection_event_fields,
     _stage_observed_at,
@@ -29,6 +30,39 @@ def _candidate(symbol: str) -> dict[str, object]:
         "forward_market_cap": 2_000_000_000,
         "premarket_return": 0.05,
     }
+
+
+def test_first_wave_message_is_short_chinese_and_human_readable() -> None:
+    candidates = [
+        {
+            "symbol": "ZM",
+            "catalyst_categories": ["earnings"],
+            "rvol": 4.3930717568,
+            "premarket_return": 0.0160093918,
+        },
+        {
+            "symbol": "COIN",
+            "catalyst_categories": ["general_news"],
+            "rvol": 3.1712339874,
+            "premarket_return": 0.0111224545,
+        },
+        {
+            "symbol": "AAOI",
+            "catalyst_categories": [
+                "contract_partnership",
+                "financing_dilution",
+            ],
+            "rvol": 1.7501167031,
+            "premarket_return": -0.0040455581,
+        },
+    ]
+
+    assert _first_wave_message(candidates) == (
+        "第一波观察池：\n\n"
+        "1. ZM：财报，RVOL 4.39，盘前 +1.60%\n"
+        "2. COIN：加密行业消息，RVOL 3.17，盘前 +1.11%\n"
+        "3. AAOI：合同/融资，RVOL 1.75，盘前 -0.40%"
+    )
 
 
 def test_second_wave_keeps_only_liquid_tight_names_above_vwap() -> None:

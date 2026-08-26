@@ -125,6 +125,24 @@ def test_windows_observation_tasks_cover_all_daily_phases_without_order_flags() 
     assert "TRADING_KILL_SWITCH" not in installer + premarket + postmarket
 
 
+def test_windows_funnel_runner_uses_explicit_machine_runtime_dependencies() -> None:
+    installer = (ROOT / "scripts/install_local_observation_tasks.ps1").read_text(
+        encoding="utf-8"
+    )
+    funnel = (ROOT / "scripts/run_modern_funnel_tick.ps1").read_text(encoding="utf-8")
+    postmarket = (ROOT / "scripts/run_postmarket_tick.ps1").read_text(encoding="utf-8")
+
+    for parameter in ("PythonPath", "EnvironmentFile", "DataRoot"):
+        assert parameter in installer
+        assert parameter in funnel
+        assert parameter in postmarket
+    assert "AI_QUANT_RUNTIME_ENV_FILE" in funnel + postmarket
+    assert "AI_QUANT_DATA_ROOT" in funnel + postmarket
+    assert "ArmPaper" in installer + funnel
+    assert "AI_QUANT_PAPER_RUNTIME_CONFIRMED" in funnel
+    assert "AI_QUANT_PAPER_SMOKE_MAX_NOTIONAL" in funnel
+
+
 def test_windows_supervisor_is_a_current_user_startup_fallback() -> None:
     installer = (ROOT / "scripts/install_local_observation_supervisor.ps1").read_text(
         encoding="utf-8"

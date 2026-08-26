@@ -1,4 +1,15 @@
+param(
+    [Parameter(Mandatory = $true)][string]$PythonPath,
+    [Parameter(Mandatory = $true)][string]$EnvironmentFile,
+    [Parameter(Mandatory = $true)][string]$DataRoot,
+    [switch]$ArmPaper,
+    [ValidateRange(0.01, 100.0)][decimal]$PaperSmokeMaxNotional = 100.0
+)
+
 $ErrorActionPreference = "Stop"
+$PythonPath = (Resolve-Path -LiteralPath $PythonPath).Path
+$EnvironmentFile = (Resolve-Path -LiteralPath $EnvironmentFile).Path
+$DataRoot = (Resolve-Path -LiteralPath $DataRoot).Path
 
 function Register-ObservationTask {
     param(
@@ -6,13 +17,14 @@ function Register-ObservationTask {
         [Parameter(Mandatory = $true)][string]$Runner,
         [Parameter(Mandatory = $true)][int]$IntervalMinutes,
         [Parameter(Mandatory = $true)][int]$ExecutionHours,
+        [Parameter(Mandatory = $true)][string]$RunnerArguments,
         [string]$DailyAt,
         [Parameter(Mandatory = $true)][string]$Description
     )
 
     $action = New-ScheduledTaskAction `
         -Execute "powershell.exe" `
-        -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Runner`""
+        -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Runner`" $RunnerArguments"
     $trigger = if ($DailyAt) {
         New-ScheduledTaskTrigger -Daily -At $DailyAt
     } else {
@@ -49,11 +61,21 @@ foreach ($taskName in $legacyTasks) {
     }
 }
 
+$commonArguments = "-PythonPath `"$PythonPath`" -EnvironmentFile `"$EnvironmentFile`" -DataRoot `"$DataRoot`""
+$funnelArguments = $commonArguments
+if ($ArmPaper) {
+    $smokeCap = $PaperSmokeMaxNotional.ToString(
+        [Globalization.CultureInfo]::InvariantCulture
+    )
+    $funnelArguments += " -ArmPaper -PaperSmokeMaxNotional $smokeCap"
+}
+
 Register-ObservationTask `
     -TaskName "Trading System V2 - AI Quant Funnel" `
     -Runner (Join-Path $PSScriptRoot "run_modern_funnel_tick.ps1") `
     -IntervalMinutes 1 `
     -ExecutionHours 1 `
+    -RunnerArguments $funnelArguments `
     -Description "Durable ET/XNYS three-stage funnel; order execution remains fail-closed."
 
 Register-ObservationTask `
@@ -61,4 +83,5 @@ Register-ObservationTask `
     -Runner (Join-Path $PSScriptRoot "run_postmarket_tick.ps1") `
     -IntervalMinutes 30 `
     -ExecutionHours 2 `
+    -RunnerArguments $commonArguments `
     -Description "Idempotent postmarket replay, episode build, and governed review."

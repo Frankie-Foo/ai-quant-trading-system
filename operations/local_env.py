@@ -44,6 +44,12 @@ def load_project_env(project_root: str | Path) -> None:
 
     root = Path(project_root).resolve()
     load_dotenv(root / ".env", override=False)
+    runtime_env_path = os.getenv("AI_QUANT_RUNTIME_ENV_FILE", "").strip()
+    if runtime_env_path:
+        runtime_env = Path(runtime_env_path).expanduser()
+        if not runtime_env.is_file():
+            raise FileNotFoundError(f"runtime environment file is missing: {runtime_env}")
+        load_dotenv(runtime_env, override=False)
     shared_env_path = os.getenv("TRADING_SHARED_ENV_FILE", "").strip()
     if shared_env_path:
         for name, value in dotenv_values(Path(shared_env_path).expanduser()).items():

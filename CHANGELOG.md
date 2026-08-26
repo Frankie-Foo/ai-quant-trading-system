@@ -13,3 +13,6 @@
 - Hard-retired the legacy ORB/autonomous CLIs and desktop Alpaca autopilot; removed the
   old Compose executor and PowerShell launcher.
 - Made full pytest, Ruff and strict Mypy checks green on the hardening branch.
+- Made Windows funnel installation work across Git worktrees by explicitly pinning the
+  Python interpreter, machine environment file and shared data root; installed the
+  one-minute Paper-only funnel and retired the duplicate Codex heartbeat.

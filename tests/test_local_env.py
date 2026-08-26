@@ -49,3 +49,25 @@ def test_load_project_env_promotes_alpaca_aliases_and_scopes_shared_env(
     assert os.environ["MASSIVE_API_KEY"] == "massive-key"
     assert "POSTGRES_DSN" not in os.environ
     assert project_data_root(project) == project / "runtime" / "data"
+
+
+def test_load_project_env_accepts_an_explicit_machine_runtime_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "worktree"
+    project.mkdir()
+    runtime_env = tmp_path / "machine.env"
+    runtime_env.write_text(
+        "FEISHU_INVESTMENT_BASE_TOKEN=dedicated-base\n"
+        "AI_QUANT_DATA_ROOT=D:/shared/ai-quant/data\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AI_QUANT_RUNTIME_ENV_FILE", str(runtime_env))
+    monkeypatch.delenv("FEISHU_INVESTMENT_BASE_TOKEN", raising=False)
+    monkeypatch.delenv("AI_QUANT_DATA_ROOT", raising=False)
+
+    load_project_env(project)
+
+    assert os.environ["FEISHU_INVESTMENT_BASE_TOKEN"] == "dedicated-base"
+    assert project_data_root(project) == Path("D:/shared/ai-quant/data")
