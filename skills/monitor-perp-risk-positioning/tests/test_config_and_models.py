@@ -75,6 +75,6 @@ def test_snapshot_cannot_authorize_execution() -> None:
             provider_status=(),
             targets=(),
             production_eligible=False,
-            execution_eligible=True,
+            execution_eligible=True,  # type: ignore[arg-type]
             orders_submitted=0,
         )
