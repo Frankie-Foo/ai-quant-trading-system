@@ -61,3 +61,18 @@ def test_interrupted_session_can_restart_then_record_failure(tmp_path: Path) -> 
     )
     assert ledger.records()[0].error_type == "ConnectionError"
 
+
+def test_session_schema_is_versioned(tmp_path: Path) -> None:
+    ledger = PaperSessionLedger(tmp_path / "orders.sqlite3")
+
+    with ledger._connect() as connection:
+        row = connection.execute(
+            """
+            SELECT owner, version, name
+            FROM schema_migrations
+            WHERE owner = 'execution.paper_session_ledger'
+            """
+        ).fetchone()
+
+    assert row == ("execution.paper_session_ledger", 1, "paper_sessions")
+

@@ -81,3 +81,23 @@ def test_client_rejects_insecure_nonlocal_http() -> None:
             base_url="http://example.com",
             token=SecretStr("secret-token"),
         )
+
+
+def test_cloud_feature_cache_schema_is_versioned(tmp_path: Path) -> None:
+    cache = CloudFeatureCache(tmp_path / "features.sqlite3")
+
+    with cache._connect() as connection:
+        row = connection.execute(
+            """
+            SELECT owner, version, name
+            FROM schema_migrations
+            WHERE owner = 'data_plane.cloud_feature_cache'
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert tuple(row) == (
+        "data_plane.cloud_feature_cache",
+        1,
+        "cloud_feature_vectors",
+    )

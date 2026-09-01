@@ -1,0 +1,12 @@
+certifi==2026.7.22
+httpx==0.28.1
+ibapi==9.81.1.post1
+numpy==2.5.1
+pandas==3.0.2
+pandas-market-calendars==5.4.0
+polars==1.42.1
+pydantic==2.11.7
+python-dotenv==1.1.0
+PyYAML==6.0.2
+pyinstaller==6.16.0
+websockets==16.0

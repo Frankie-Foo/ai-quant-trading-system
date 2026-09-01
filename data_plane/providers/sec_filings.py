@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import time
 from collections.abc import Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime
@@ -92,40 +91,45 @@ def fetch_candidate_filings(
         return empty_catalyst_frame()
 
     by_cik: dict[str, dict[str, dict[str, object]]] = {}
-    previous_request_started = 0.0
-    for cik in sorted({_normalize_cik(row["cik"]) for row in matched}):
-        elapsed = time.monotonic() - previous_request_started
-        if previous_request_started and elapsed < pace_seconds:
-            time.sleep(pace_seconds - elapsed)
-        previous_request_started = time.monotonic()
+    ciks = sorted({_normalize_cik(row["cik"]) for row in matched})
+
+    def fetch_recent(cik: str) -> tuple[str, dict[str, dict[str, object]]]:
         payload = get_json(
             f"https://data.sec.gov/submissions/CIK{cik}.json", headers=_sec_headers()
         )
         recent = payload.get("filings", {}).get("recent", {})
         if not isinstance(recent, dict):
             raise DownloadError(f"SEC submissions response for CIK{cik} has no recent filings")
-        by_cik[cik] = _recent_by_accession(recent)
+        return cik, _recent_by_accession(recent)
+
+    # Keep the same four-request ceiling as the live path while avoiding a
+    # multi-minute serial scan for a broad candidate universe.
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(fetch_recent, cik): cik for cik in ciks}
+        for future in as_completed(futures):
+            cik, recent = future.result()
+            by_cik[cik] = recent
 
     retrieved = datetime.now(UTC)
     rows: list[dict[str, object]] = []
     for indexed in matched:
         cik = _normalize_cik(indexed["cik"])
         accession = _accession_from_filename(indexed["filename"])
-        recent = by_cik[cik].get(accession)
-        if recent is None:
+        filing = by_cik[cik].get(accession)
+        if filing is None:
             raise DownloadError(
                 f"SEC filing {accession} is absent from current submissions for CIK{cik}"
             )
-        accepted = recent.get("acceptanceDateTime")
+        accepted = filing.get("acceptanceDateTime")
         if not accepted:
             raise DownloadError(f"SEC filing {accession} has no acceptanceDateTime")
         accepted_at = _parse_sec_timestamp(str(accepted))
         if accepted_at < start_utc or accepted_at >= end_utc:
             continue
-        primary_document = str(recent.get("primaryDocument") or "")
-        description = str(recent.get("primaryDocDescription") or "").strip()
-        form = str(recent.get("form") or indexed["form"])
-        items = _split_items(recent.get("items"))
+        primary_document = str(filing.get("primaryDocument") or "")
+        description = str(filing.get("primaryDocDescription") or "").strip()
+        form = str(filing.get("form") or indexed["form"])
+        items = _split_items(filing.get("items"))
         symbols = list(normalized_map[cik])
         rows.append(
             {

@@ -60,8 +60,6 @@ def reconcile_broker_order(
         raise ReconciliationError("local order disappeared during reconciliation")
     if current.state in {OrderState.CREATED, OrderState.PENDING_RISK}:
         raise ReconciliationError("broker order exists before local risk approval")
-    if current.state in {OrderState.CANCELLED, OrderState.REJECTED, OrderState.FILLED}:
-        return current
     if current.state is OrderState.APPROVED:
         current = ledger.transition(
             current.client_order_id,
@@ -86,6 +84,10 @@ def reconcile_broker_order(
     else:
         raise ReconciliationError(f"unsupported broker order status: {status}")
 
+    if current.state in {OrderState.CANCELLED, OrderState.REJECTED, OrderState.FILLED}:
+        if target is current.state and filled == current.filled_shares:
+            return current
+        raise ReconciliationError("broker status conflicts with local terminal state")
     if target is current.state and filled == current.filled_shares:
         return current
     if target is OrderState.SUBMITTED:

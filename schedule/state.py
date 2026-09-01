@@ -10,6 +10,8 @@ from enum import StrEnum
 from pathlib import Path
 from uuid import uuid4
 
+from db.migrations.sqlite import SQLiteMigration, apply_sqlite_migrations
+
 
 class JobStatus(StrEnum):
     RUNNING = "running"
@@ -39,35 +41,62 @@ class JobLease:
     attempt: int
 
 
+def _create_job_runs(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS job_runs (
+            job_name TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            job_version TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempts INTEGER NOT NULL,
+            started_at_utc TEXT NOT NULL,
+            finished_at_utc TEXT,
+            error_code TEXT,
+            artifact_ids_json TEXT NOT NULL,
+            run_token TEXT,
+            PRIMARY KEY (job_name, trade_date, job_version)
+        )
+        """
+    )
+
+
+def _add_job_run_token(connection: sqlite3.Connection) -> None:
+    columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(job_runs)").fetchall()
+    }
+    if "run_token" not in columns:
+        connection.execute("ALTER TABLE job_runs ADD COLUMN run_token TEXT")
+
+
+JOB_LEDGER_MIGRATIONS = (
+    SQLiteMigration(
+        version=1,
+        name="job_runs",
+        signature="job_runs.v1",
+        apply=_create_job_runs,
+    ),
+    SQLiteMigration(
+        version=2,
+        name="job_runs_run_token",
+        signature="job_runs.run_token.v1",
+        apply=_add_job_run_token,
+    ),
+)
+
+
 class JobLedger:
     def __init__(self, path: Path, *, stale_after: timedelta = timedelta(hours=6)):
         self.path = path
         self.stale_after = stale_after
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS job_runs (
-                    job_name TEXT NOT NULL,
-                    trade_date TEXT NOT NULL,
-                    job_version TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    attempts INTEGER NOT NULL,
-                    started_at_utc TEXT NOT NULL,
-                    finished_at_utc TEXT,
-                    error_code TEXT,
-                    artifact_ids_json TEXT NOT NULL,
-                    run_token TEXT,
-                    PRIMARY KEY (job_name, trade_date, job_version)
-                )
-                """
+            apply_sqlite_migrations(
+                connection,
+                owner="schedule.job_ledger",
+                migrations=JOB_LEDGER_MIGRATIONS,
             )
-            columns = {
-                str(row[1])
-                for row in connection.execute("PRAGMA table_info(job_runs)").fetchall()
-            }
-            if "run_token" not in columns:
-                connection.execute("ALTER TABLE job_runs ADD COLUMN run_token TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)

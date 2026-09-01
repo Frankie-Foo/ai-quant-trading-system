@@ -1,6 +1,21 @@
 # Progress
 
-## Adaptive desktop decision client — 2026-07-28
+## Feishu investment flywheel repair - 2026-08-07
+
+Status: implemented and verified on the enterprise branch.
+
+- Premarket selection now validates that an accepted `selection_gates.v2`
+  snapshot exists before marking the job successful; `rvol_pending` cannot
+  masquerade as a completed selection.
+- Completed selection stages project accepted candidates to the dedicated
+  four-table investment Base idempotently. No poll data is projected.
+- Paper and autonomous monitor paths project real order/action state
+  transitions to the monitor table, then simulated orders to the trade table.
+  `OBSERVE` ticks remain local-only.
+- Evidence: 33 focused tests passed; Ruff clean; strict mypy clean across the
+  four changed source files.
+
+## Adaptive desktop decision client - 2026-07-28
 
 Status: implemented for local read-only operation; automatic orders remain disabled.
 
@@ -843,3 +858,479 @@ orders.
   files, Skill validator success, clean-venv package install and `pip check` success,
   Docker non-root `doctor` success, and live public smoke with Hyperliquid 4/4 plus
   Aevo 2/2 observations healthy. No notification was sent and no order path exists.
+
+## M29 evidence-backed desktop operating console - 2026-07-31
+
+Status: implemented and locally verified as a read-only research console. Paper writes
+remain unapproved and no live order route exists.
+
+- Added `trading_desk_evidence.v1`, a white-listed projection over immutable selection
+  and post-close review snapshots, the durable scheduler ledger, validated runtime
+  Agent assessments, and maturity evidence. API output cannot expose scheduler tokens,
+  credentials, `.env` values, or order authorization.
+- Replaced misleading static/transport health with evidence health. The client now
+  distinguishes current, waiting, blocked, missing, and stale selection states; a
+  prior-session candidate list is visibly historical and cannot masquerade as today's
+  executable selection.
+- The six Chinese pages now show the deterministic gate ranking, RVOL/gap/earnings
+  evidence, dynamic-plan availability, accepted missed-mover attribution, actual
+  Agent availability, maturity gates, and recent failed/successful jobs. Paper/live
+  eligibility and manual client ordering remain explicitly false.
+- Real local QA on 2026-07-31 displayed the failed current catalyst lock and the
+  2026-07-30 twelve-symbol snapshot as stale evidence, eight accepted review rows,
+  three unavailable runtime roles, and twelve durable job rows. Browser interaction
+  produced no console errors, page errors, or failed requests.
+- Repository acceptance: 451 tests passed in 23.08 seconds, Ruff clean, strict mypy
+  success across 178 source files, Vite production build success, Electron main-process
+  syntax validation success, and multi-page headless Chrome visual verification.
+
+## M30 distributable macOS research client - 2026-07-31
+
+Status: implemented on `feature/macos-research-client` as a separately packaged,
+read-only client. It preserves the existing local client while removing Paper and
+order capabilities from the macOS distribution boundary.
+
+- Added a dedicated Electron main/preload pair and an explicit packaging allow-list.
+  The built ASAR contains the analyst renderer, model/data services, encrypted settings,
+  and the reserved IBKR interface; it excludes the existing desktop main process,
+  tests, Python services, `.env` files, and execution modules.
+- Added a two-step first-run flow for a remote read-only evidence service and the
+  user's own OpenRouter Key. Four model roles are independently configurable:
+  evidence Q&A, catalyst analyst, red team, and supervisor. Model calls occur only in
+  the Electron main process and are bounded by a compact white-listed evidence payload.
+- Secrets are encrypted with Electron `safeStorage`, backed by macOS Keychain, and
+  settings fail closed when OS encryption is unavailable. Remote data requires HTTPS
+  outside loopback, supports an optional bearer token, and accepts only
+  `trading_desk_evidence.v1` with `stage=research_only` and
+  `orders_authorized=false`.
+- The IBKR Paper seam reports reserved/unconfigured status. Both connection and order
+  methods throw, and no renderer IPC channel exposes order submission.
+- Added Intel and Apple Silicon DMG/ZIP configuration plus a macOS GitHub Actions
+  build. Artifacts remain unsigned until an Apple Developer ID and notarization
+  credentials are supplied; this is intentionally not reported as a signed release.
+- Acceptance: 452 Python tests passed, nine Electron service tests passed, Ruff clean,
+  strict mypy success across 272 source files, Vite production build success, seven
+  CommonJS entry/service syntax checks passed, and a Windows directory packaging
+  contract check confirmed required ASAR files were present with forbidden execution
+  paths absent. Configured renderer QA showed 12 evidence candidates, eight review
+  rows, three research Agent cards, zero order controls, and no console/page/request
+  errors.
+
+## M31 self-contained macOS local research runtime - 2026-07-31
+
+Status: the macOS edition now copies the main system's local research execution model.
+The earlier remote desk transport was removed from this distribution. Market data is
+an explicit empty Adapter and remains fail-closed.
+
+- Added a deep `LocalResearchRuntime` module over the existing deterministic
+  `data_plane`, `kernel`, `research`, `schedule`, and snapshot-backed desktop evidence.
+  Its small interface exposes status, one honest desk snapshot, and an idempotent
+  due-task tick; every result fixes `orders_authorized=false` and
+  `orders_submitted=0`.
+- Added a real market-data seam with two Adapters. The default unconfigured Adapter
+  blocks before download or selection. The environment compatibility Adapter detects
+  the existing Massive/cloud-market/SEC requirements but returns only missing variable
+  names, never values. The release does not yet expose a way to enable it.
+- Added an authenticated loopback sidecar. Electron generates a fresh 256-bit token
+  each launch, starts the runtime inside the user's Application Support directory,
+  and retains local accepted snapshots and job ledgers across restarts. No data-service
+  URL, remote access token, Broker, Paper process, or order route remains in the Mac UI.
+- Added a frozen `python -m` dispatcher so the existing premarket and postmarket DAGs
+  can spawn their current child modules inside a PyInstaller executable. The native
+  sidecar includes the deterministic research modules and configuration, while the
+  Electron ASAR remains allow-listed to the analyst UI and local launcher.
+- Replaced the macOS CI build with native ARM64 and Intel jobs. Each runner builds its
+  own PyInstaller sidecar before Electron Builder packages the matching DMG/ZIP.
+  Artifacts remain unsigned pending Apple Developer signing and notarization.
+- Real local smoke verification started Electron plus its managed Python sidecar,
+  reported `local_execution=true`, `provider_id=unconfigured`,
+  `selection_status=blocked`, `market_data_provider_unconfigured`, and
+  `orders_authorized=false`; stderr was empty. Visual QA confirmed the first screen
+  asks only for OpenRouter and explicitly shows local execution plus the empty market
+  Adapter.
+- Repository acceptance: 456 Python tests passed in 22.22 seconds, ten Electron
+  service tests passed, Ruff clean, strict mypy success across 277 source files, Vite
+  production build success, and all analyst CommonJS files passed syntax validation.
+
+## M32 fixed Alpaca proxy SIP for macOS - 2026-07-31
+
+Status: the supplied Alpaca-compatible proxy was validated and integrated as the
+macOS client's fixed realtime market-data endpoint without committing credentials.
+
+- Added a protocol-level SIP probe for
+  `wss://alpaca-trade-api.vertu.cn/v2/sip`. It authenticates and verifies AAPL
+  quote, trade, and minute-bar subscriptions while returning only sanitized health,
+  host, reason, and capability fields.
+- Added a typed continuous `AlpacaProxySipStream.events()` interface that converts
+  proxy frames into the system's existing `SipQuote`, `SipTrade`, and `SipBar`
+  contracts for downstream SIP storage and intraday monitoring.
+- Added `AlpacaProxyMarketDataAdapter`. It distinguishes realtime readiness from
+  complete research-input readiness, so a healthy SIP stream does not incorrectly
+  unlock selection without historical, news, and financial evidence.
+- Extended macOS first-run settings with the proxy Key/Secret. Electron safeStorage
+  encrypts all three secrets with macOS Keychain and passes market credentials only
+  through the managed sidecar environment; they never appear in process arguments,
+  renderer state, source, build config, or Git.
+- Live verification using the owner-provided local credential file reported
+  `configured=true`, `healthy=true`, `realtime_ready=true`, all three SIP
+  capabilities, and the honest blocker `historical_research_inputs_missing`.
+- Repository acceptance: 461 Python tests passed in 26.04 seconds, Ruff clean,
+  strict mypy success across 253 source files, ten Electron tests passed, Vite
+  production build succeeded, and tracked-file scans found zero supplied-key or
+  supplied-secret matches.
+
+## M33 guarded IBKR live execution and Windows 0.2.0 package - 2026-08-03
+
+Status: implemented as an isolated, human-authorized live execution desk on the
+cross-platform research-client branch. Research, Agents, monitoring, and scheduled
+workflows still have no order authority.
+
+- Added an official `ibapi` adapter and a deep `ExecutionDesk` boundary restricted to
+  IBKR live port 4001, `STK/SMART/USD`, long-only `DAY LMT` orders, and a securely
+  bound single managed account. IBKR login, password, and MFA remain entirely inside
+  TWS / IB Gateway.
+- Added a fail-closed human workflow: live master switch, first-use masked account
+  binding, five-minute write arming, fresh position/open-order checks, broker What-If,
+  warning-bound dynamic confirmation, one-order-one-arm, persistent SQLite idempotency,
+  and explicit recovery for uncertain submissions. Disabling the local switch does
+  not cancel orders already held by IBKR.
+- A real read-only handshake to the configured Gateway on port 4001 succeeded. A real
+  AAPL one-share, one-dollar limit What-If request was accepted after normalizing the
+  current IB API order fields; write authority was never armed and no live order was
+  submitted.
+- IBKR information code 2107 is treated as a non-fatal historical-data-farm standby
+  notice. It means the broker channel reconnects when a historical request is made;
+  it is separate from the client's bundled Massive history and incremental sync.
+- Built the self-contained Windows 0.2.0 installer with a verified 1,771-dataset
+  bootstrap archive. The packaged runtime and bootstrap hashes match their build
+  outputs, and packaged-resource scans found no `.env`, imported profile, deprecated
+  paper module, username, or password file.
+- Repository acceptance: 512 Python tests passed, Ruff clean, strict mypy success
+  across 261 source files, 27 Electron tests passed, 11 UI tests passed, and the Vite
+  production build and Windows installer build succeeded.
+- Honest remaining production gaps: unique `conId` / primary-exchange contract
+  resolution, in-client cancel/modify commands, and continuous broker fill/order
+  reconciliation. Those gaps prevent calling this execution module fully mature.
+
+## M34 IBKR Paper automatic-execution audit boundary - 2026-08-03
+
+Status: the Paper-only automatic execution path now records every executable
+boundary before it can reach IBKR. It remains off until a current frozen plan,
+current safety envelope, and broker-account risk baseline are all available.
+
+- Added an append-only SQLite audit chain to the existing Paper session ledger.
+  Each record has UTC time, canonical payload, previous hash, and event hash;
+  credentials are rejected from audit payloads.
+- Paper start records its frozen plan, policy evidence, source snapshot IDs and
+  SHA-256 hashes. Every tick records broker account/positions/orders reads,
+  exact SIP fact reads or failures, policy result, and every broker command
+  request before the broker call plus its result or failure.
+- Any audit-write failure blocks a new broker command. Existing durable command
+  state remains the recovery source, so restart cannot issue a duplicate order.
+- Account-summary compatibility now accepts either official prior-day-equity tag,
+  while still failing closed if neither is returned. Security-definition-farm
+  status 2157 no longer incorrectly rejects an otherwise established API socket.
+- Acceptance: 51 targeted Paper/IBKR tests passed, Ruff clean, and strict mypy
+  passed for all changed execution, autopilot, and test modules. A live read-only
+  Paper probe remains blocked by IBKR status 2110 (TWS-to-server connection
+  interrupted); no Paper order was submitted.
+
+## M35 current-selection Paper plan preparation - 2026-08-03
+
+Status: the local client can now prepare one bounded, immutable Paper plan from
+today's accepted selection without giving an LLM authority over price or orders.
+
+- Added a deterministic plan compiler. It accepts only the current usable
+  `selection_gates.v2` snapshot, uses rank one only, rechecks RVOL, directional
+  volume, premarket-VWAP confirmation, finite price facts, and timestamps, then
+  atomically writes exactly one secret-free Paper config. Missing or stale facts
+  produce no plan.
+- The compiler sets a mechanical 2% hard stop, 10% maximum notional, 0.35%
+  account-risk ceiling, 2.5R first target, and 3.0R weighted floor. These are
+  conservative Paper defaults, recorded in plan provenance; the deterministic
+  intraday policy still requires current technical facts, fresh safety envelope,
+  live agent health, push health, and broker checks before any entry.
+- Added an explicit client action, “从今日选股生成计划”. It only creates the
+  frozen plan and adds a hash-chained audit record; it cannot connect IBKR,
+  arm writes, or start execution. A separate Paper connection, safety validation,
+  and typed start confirmation remain mandatory.
+- Intraday monitoring now also subscribes to SPY and preloads recent SIP minute
+  bars for the leading twelve candidates plus SPY. The warmup is append-only and
+  idempotent; a retrieval or quality failure stops monitoring rather than
+  manufacturing technical history.
+- Acceptance: 14 focused Python tests passed, 31 Electron tests passed, 12 UI
+  tests passed, Ruff clean, strict mypy passed for touched modules, and Vite
+  production build succeeded. IBKR Paper status 2110 remains an upstream gateway
+  blocker; no automated or manual Paper order was sent in this milestone.
+
+## M36 desktop dynamic Paper safety loop - 2026-08-03
+
+Status: Paper-only 4002 automation now refreshes its safety envelope from current
+evidence before each deterministic decision. A missing dependency blocks new entry;
+the automation never falls back to live 4001.
+
+- Added a pinned OpenRouter JSON client for Catalyst and Red-Team safety outputs.
+  The agent result must be one schema-valid JSON object and report the exact configured
+  model; malformed, partial, timeout, or route-mismatch responses are unsafe.
+- The local runtime now combines ticker-filtered Massive news, append-only SIP quotes,
+  a read-only IBKR Paper account check, deterministic supervisor checks, and verified
+  Livermore-channel health. Assessment files, final schema-valid model JSON with
+  prompt hashes and provider usage, safety envelope, event inputs, broker reads,
+  refresh outcomes, and hash-chain audit events are retained under the local research
+  runs directory.
+- The desktop encrypts the two configured runtime models and optional Livermore App
+  ID/Secret/channel ID in OS secure storage. Secrets are passed only as child-process
+  environment values, never command arguments, renderer state, Git, bootstrap data,
+  or audit rows. Paper requires all three push values before safety refresh is enabled.
+- Paper workflow is now: create today’s rank-one frozen plan, connect Paper 4002,
+  refresh safety, validate current envelope, then type the dynamic confirmation to
+  start. Each 15-second cycle refreshes safety before reading facts. Failure writes an
+  immediately unsafe envelope, so the deterministic executor fails closed.
+- News-agent classifications are cached only when the bounded fact package is unchanged;
+  an observed new/removed source changes the prompt hash and triggers both agents again.
+  This preserves fresh safety evidence without paying for duplicate model calls.
+- Acceptance: 536 Python tests passed in 30.94 seconds; Ruff and strict mypy passed
+  across 186 source files; 32 Electron tests, 12 UI tests, and Vite production build
+  passed. No Paper or live order was submitted by this milestone’s verification.
+- Windows packaging uses the project virtual environment explicitly, not a caller’s
+  system Python. A local unsigned 0.2.1 installer is built after this milestone;
+  its bundled runtime hash is checked against the source runtime before handoff.
+
+## M37 desktop exchange-clock routing and runtime recovery - 2026-08-03
+
+Status: the desktop now separates selection from review by the XNYS clock and
+keeps an old review from being mistaken for current selection evidence.
+
+- Selection is the only runnable workflow from Beijing 20:00 (US Eastern 08:00)
+  through the current XNYS close. Post-close review opens 20 minutes after close.
+  Other times are waiting states; the client disables the wrong button and states
+  the next allowed workflow.
+- Scheduler dispatches exactly one due stage. It no longer starts both the
+  premarket and postmarket DAGs on each 15-second tick. A review receives the
+  completed session date, never the next selection date.
+- Read-only desktop status calls recover a stopped local runtime once, with one
+  shared restart. Order, execution, and automatic-trading commands are never retried.
+  A child-process exit clears its stale handle so the next start spawns a fresh runtime.
+- Acceptance: 539 Python tests passed in 39.29 seconds; Ruff clean; strict mypy
+  passed across 193 production source files; 33 Electron tests, 12 UI tests, and
+  Vite production build passed. No Paper or live order was submitted.
+
+## M38 three-symbol read-only monitor - 2026-08-04
+
+Status: added independent MRVL, ON, and ALAB monitor entry points using the
+existing 8765 Alpaca market-data API and UTF-8 VPS push client. Each polls every
+10 seconds, pushes a first/changed buy, abandon, stop, or target event at most
+once per event per 10 minutes, and sends a price/volume/VWAP summary every 15
+minutes. No broker order endpoint is called.
+
+- Entry points: `scripts/monitor_mrvl.py`, `scripts/monitor_on.py`, and
+  `scripts/monitor_alab.py`; shared logic is in `scripts/monitor_target.py`.
+- Buy-point state now persists the trigger count and writes the recommended next
+  tranche size/notional; summaries include the recorded position from
+  `runs/target-monitors/positions.json`. Stop/target alerts require a recorded
+  positive position, and `--once --no-push` smoke runs do not write production state.
+- The active runtime is now explicit `exit_only`: entry/abandon signals are
+  disabled, ON is stopped, and only MRVL/ALAB exit alerts remain active.
+- Secrets are read from `VPS_BUFFETT_APP_SECRET`; no secret is stored in source.
+- Acceptance: full test suite 543 passed in 36.98 seconds; targeted monitor tests,
+  Ruff, and formatting clean. Real read-only smoke reached 8765 and returned
+  MRVL/ON/ALAB prices; two formal exit-monitor processes are running, and no
+  order was submitted.
+
+## M39 NVDA/DIS/LLY $30k watchlist plan - 2026-08-06
+
+Status: added three watchlist entry points with a $10,000 per-symbol cap,
+five staged tranches (15%/20%/25%/20%/20%), two consecutive 10-second entry
+confirmations, and no broker order calls.
+
+- Entry points: `scripts/monitor_nvda.py`, `scripts/monitor_dis.py`, and
+  `scripts/monitor_lly.py`; shared logic remains in `scripts/monitor_target.py`.
+- The plan uses the user-provided trigger, stop, and target levels. LLY has no
+  invented fixed stop or target; its cost stop and 0.97 holding-ratio veto remain
+  dependent on actual fills/manual confirmation.
+- Acceptance: full test suite 568 passed in 34.55 seconds; Ruff, formatting, and
+  strict mypy clean for all seven monitor modules. A real SIP smoke reached all
+  three symbols; three formal watchlist processes are running and no order was
+  submitted.
+
+## M40 investment flywheel selection projection - 2026-08-06
+
+Status: connected the accepted selection snapshot to the user's own Feishu
+investment Base. The projection uses the Base's writable `运行ID` key and its
+actual four-table field names; it records selection reasons, market-cap
+availability, premarket evidence, next action, and paper-only plan state.
+
+- Selection events are idempotent and read-back verified. Feishu datetime
+  readback is normalized as UTC; Windows uses `lark-cli.cmd` with UTF-8 output.
+- Only state transitions are projected. Per-second polling remains local and
+  is not written to Feishu.
+- Acceptance: 9 targeted Feishu/selection tests passed; Ruff clean on all
+  changed Python files. The approved Base now contains 31 selection records for
+  2026-08-06: MGNI, AEVA, SOUN, CLOV, CCI, RVMD, VSEC, CAI, EZPW, BBBY, SATL,
+  TPC, TBLA, TTMI, EBAY, SBLK, MTDR, GTM, EXPE, RDW, MCK, PR, VECO, NUCL,
+  GPN, DHT, ORA, EDIT, VVV, RIG, and KLIC. No broker order was submitted.
+
+## M41 Alpaca direct market-data priority - 2026-08-07
+
+Status: routed the public bars, quotes, trades, and monitoring-coverage seams to
+direct Alpaca SIP REST by default. The broken local market proxy is no longer on
+the default path; `MARKET_DATA_PROVIDER=cloud_proxy` is required to opt into it.
+Direct credentials accept the canonical `ALPACA_API_*` names and the existing
+Paper key aliases, remain in environment variables, and are never logged.
+
+- Direct rows retain UTC timestamps, SIP feed, split adjustment, and Alpaca
+  provenance. Empty or incomplete upstream coverage fails closed; no filling or
+  interpolation was added.
+- Health checks now validate credentials for the selected provider. The
+  production deployment example explicitly selects the cloud proxy because that
+  deployment owns its credentials; local `.env.example` defaults to direct Alpaca.
+- Acceptance: full test suite 570 passed in 34.70 seconds; 51 targeted provider,
+  health, deployment, and notification tests passed; Ruff and strict mypy clean
+  on the changed production modules. No broker order was submitted.
+
+## M42 enterprise repository foundation - 2026-08-07
+
+Status: established the first enterprise governance layer in the dedicated
+`codex/enterprise-foundation` worktree. `main` remains untouched. The repository
+now documents task-isolated worktrees, reviewed-commit deployment, rollback,
+security handling, operational recovery, and the modular-monolith decision.
+
+- Added `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`, `cliff.toml`,
+  `.github/pull_request_template.md`, and the pending-owner `.github/CODEOWNERS`
+  placeholder. Added `docs/DEPLOYMENT.md`, `docs/RUNBOOK.md`, and ADR-0001.
+- Added PR/main CI for Python tests, Ruff, strict mypy, dependency consistency,
+  Electron tests, UI tests, Vite build, and pip-audit. No broker-write flag is
+  present in CI.
+- Added the database ownership inventory and migration contract without moving,
+  dropping, or fabricating any existing table.
+- Added an executable SQLite migration runner and connected the scheduler job
+  ledger and execution order ledger. Legacy `run_token` schemas upgrade in place;
+  failed migrations roll back both schema and version record.
+- Acceptance: governance tests 3 passed, dependency-boundary tests 7 passed, and
+  migration/ledger tests 13 passed; full Python tests 578 passed in 39.27
+  seconds; Ruff clean; strict mypy clean across 290 source files; Electron tests
+  33 passed; UI tests 12 passed; Vite production build passed. `pip-audit` was
+  installed but its PyPI advisory lookup failed with a local TLS EOF, so the
+  security audit remains a CI follow-up rather than a passing local result.
+
+## M43 execution-boundary hardening - 2026-08-07
+
+Status: extended the migration contract to the Paper session ledger and the
+Alpaca SIP event store. Existing SQLite files remain readable and receive an
+immutable owner/version/checksum record on first startup; migration callbacks
+use separate statements inside the runner's transaction rather than
+`executescript`, preserving rollback behavior.
+
+- Added a shell-free, timeout-bounded child-process seam for the premarket,
+  postmarket, research, Paper, and monthly schedulers. The seam returns a
+  stable result object and never logs child stdout/stderr contents.
+- Scheduler wrappers retain their existing event names and test seams while
+  sharing command execution, timeout validation, and elapsed-time measurement.
+- Acceptance: 11 migration/session/SIP tests passed; scheduler and deployment
+  regression tests 30 passed; Ruff clean; strict mypy clean across 7 changed
+  scheduler/test modules. No broker order was submitted.
+
+## M44 order-protection ledger governance - 2026-08-07
+
+Status: connected the time-exit and synthetic-stop SQLite ledgers to the same
+versioned migration runner. These ledgers are part of the trading plane's
+idempotency and outbox recovery path; their schemas now have explicit owners,
+immutable checksums, and transactional first-startup initialization.
+
+- Existing files remain compatible because migrations use `CREATE TABLE IF NOT
+  EXISTS`; no order or stop records are moved or deleted.
+- Acceptance: time-exit, synthetic-stop, and Alpaca Paper broker tests 24
+  passed; Ruff clean; strict mypy clean across 4 changed production/test
+  modules. No broker order was submitted.
+
+## M45 safety and notification ledger governance - 2026-08-07
+
+Status: migrated the account-exclusivity guardian, global emergency stop, and
+autonomous notification outbox to the shared SQLite migration contract.
+
+- The notification ledger preserves the legacy three-column schema through a
+  two-step additive migration, so existing claimed/sent records remain
+  readable while delivery fields are introduced transactionally.
+- Safety stores now have explicit migration owners and immutable checksums;
+  the emergency-stop singleton is initialized as part of its migration.
+- Acceptance: account guardian, emergency stop, adaptive API, HTTP auth, and
+  notification tests 30 passed; Ruff clean; strict mypy clean across the
+  changed production/test modules. No broker order was submitted.
+
+## M46 adaptive and broker ledger governance - 2026-08-07
+
+Status: connected the adaptive-plan event store, autonomous Paper session
+ledger, IBKR Paper idempotency ledger, and IBKR execution ledger to the
+versioned SQLite migration runner. The largest trading-plane outbox schema no
+longer relies on `executescript` during process startup.
+
+- Existing tables remain additive and compatible; no plans, audit events, or
+  broker receipts are deleted or rewritten.
+- Acceptance: adaptive-plan/API, autonomous Paper, and IBKR tests 87 passed;
+  Ruff clean; strict mypy clean across the changed production/test modules.
+  No broker order was submitted.
+
+## M47 cache, Feishu lock, and agent-fact governance - 2026-08-07
+
+Status: migrated the cloud-feature cache, Feishu local write lock, and SQLite
+agent fact store to the shared migration runner. The Feishu change only
+governs the local mutex database; it does not access or alter any remote Base.
+
+- The agent fact store keeps its existing allowlisted tables, constraints, and
+  indexes while applying each DDL statement inside the migration transaction.
+- The cloud cache retains point-in-time rows and the Feishu lock retains its
+  singleton mutual-exclusion semantics.
+- Acceptance: agent gateway, cloud-feature, Feishu Base client, and related
+  tests 30 passed; Ruff clean; strict mypy clean across 6 changed modules.
+  No remote Feishu Base was read or written; no broker order was submitted.
+
+## M48 enterprise validation and CI parity - 2026-08-07
+
+Status: expanded CI and contributor instructions to type-check every Python
+production boundary, including `db`, `operations`, and `plugins`, then ran the
+same checks locally from the dedicated enterprise worktree.
+
+- Python: 592 tests passed in 32.06 seconds; Ruff clean; strict mypy clean
+  across 327 source files.
+- Client: Electron tests 33 passed; renderer tests 12 passed; Vite production
+  build passed.
+- Dependency advisory lookup remains a CI follow-up because this machine's
+  `pip-audit` request to PyPI previously failed with a TLS EOF; no dependency
+  audit pass is claimed locally.
+- No broker order was submitted and no remote Feishu Base was accessed.
+
+## M49 readiness migration gate - 2026-08-07
+
+Status: made scheduler readiness verify the expected `schedule.job_ledger`
+migration versions for an existing state database. A healthy but unversioned
+legacy SQLite file is now not ready; a first-run database remains allowed to
+bootstrap through the scheduler's idempotent migration path.
+
+- The check is read-only and does not mutate state or expose credentials.
+- Acceptance: schedule health, premarket, and research-cycle tests 12 passed;
+  Ruff clean; strict mypy clean across 2 changed modules.
+
+## M50 migration concurrency fix - 2026-08-07
+
+Status: closed a startup race in the SQLite migration runner. Version lookup
+now occurs after the runner acquires `BEGIN IMMEDIATE`, so concurrent service
+starts cannot both observe an unapplied version and execute it twice.
+
+- Checksum validation, rollback, and idempotent re-entry behavior are
+  unchanged; the lock is held only for the current owner/version operation.
+- Acceptance: migration regression tests 5 passed, including concurrent
+  startup serialization; no broker order was submitted and no remote Feishu
+  Base was accessed.
+
+## M51 release-candidate verification - 2026-08-07
+
+Status: final local release-candidate verification completed on
+`codex/enterprise-foundation`.
+
+- Python: 594 tests passed in 32.70 seconds; Ruff clean; strict mypy clean
+  across 327 source files.
+- Client evidence remains green: Electron 33 tests, renderer 12 tests, and
+  Vite production build passed.
+- The worktree is clean, `main` remains untouched, and no remote is configured.
+  `pip-audit` remains a CI follow-up because the local PyPI request failed with
+  TLS EOF; no local security-audit pass is claimed.

@@ -26,9 +26,11 @@ engineering path but are not admissible strategy-performance evidence.
 Copy `.env.example` to `.env` and populate values locally. Never send keys in chat or
 commit `.env`.
 
-- `CLOUD_PLATFORM_BASE_URL` and `CLOUD_MARKET_DATA_API_TOKEN`: scoped access to the
-  independent cloud service. Alpaca provider credentials exist only in that service.
-  The API returns SIP, split-adjusted rows with provenance.
+- `MARKET_DATA_PROVIDER=alpaca_direct` is the default. Set `ALPACA_API_KEY_ID` and
+  `ALPACA_API_SECRET_KEY` for direct Alpaca SIP REST bars, quotes, and trades.
+- `MARKET_DATA_PROVIDER=cloud_proxy` is an explicit fallback for environments that
+  intentionally use `CLOUD_PLATFORM_BASE_URL` and `CLOUD_MARKET_DATA_API_TOKEN`.
+  It must not be relied on implicitly when the proxy is unavailable.
 - `MASSIVE_API_KEY`: Massive Basic or a paid Stocks plan. The API adapter requests
   one-minute aggregates adjusted for splits, matching the frozen specification.
 - `SEC_USER_AGENT`: a descriptive SEC user agent containing a monitored email address,
@@ -40,7 +42,7 @@ Check only whether the values are present, without printing secrets:
 .\.venv\Scripts\python -m data_plane.cli credentials
 ```
 
-Download direct-source samples:
+Download direct Alpaca samples:
 
 ```powershell
 .\.venv\Scripts\python -m data_plane.cli alpaca `

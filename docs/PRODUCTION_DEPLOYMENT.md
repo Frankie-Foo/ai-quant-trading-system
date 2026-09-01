@@ -209,6 +209,8 @@ CLOUD_PLATFORM_BASE_URL=https://cloud-strategy-platform.example.internal
 CLOUD_MARKET_DATA_API_TOKEN=<secret-manager-reference>
 CLOUD_PAPER_API_TOKEN=<secret-manager-reference>
 CLOUD_FEATURE_API_TOKEN=<secret-manager-reference>
+# This deployment uses the separately operated cloud proxy explicitly.
+MARKET_DATA_PROVIDER=cloud_proxy
 CLOUD_MARKET_DATA_FEED=sip
 BROKER_WRITE_ENABLED=false
 TRADING_KILL_SWITCH=true

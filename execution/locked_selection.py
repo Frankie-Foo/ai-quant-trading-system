@@ -24,6 +24,17 @@ class LockedCandidate(BaseModel):
     adv_usd: float = Field(gt=0)
     atr_pct: float = Field(gt=0)
     tier: str = Field(pattern=r"^(mega|large|mid|small)$")
+    event_count: int = Field(default=0, ge=0)
+    catalyst_categories: tuple[str, ...] = ()
+    market_cap: float | None = Field(default=None, gt=0)
+    premarket_close: float | None = Field(default=None, gt=0)
+    premarket_vwap: float | None = Field(default=None, gt=0)
+    premarket_return: float | None = None
+    premarket_gap_return: float | None = None
+    premarket_above_vwap: bool | None = None
+    current_halt: bool = False
+    recent_luld_count: int = Field(default=0, ge=0)
+    luld_risk: bool = False
 
     @field_validator("symbol")
     @classmethod
@@ -75,19 +86,38 @@ def load_locked_selection(
         raise ValueError(
             "locked selection uses an obsolete schema without directional volume"
         )
+    required_columns = [
+        "symbol",
+        "session_date",
+        "selection_rank",
+        "pass_gate",
+        "rvol",
+        "directional_volume_confirmed",
+        "price",
+        "adv_usd",
+        "atr_pct",
+        "tier",
+    ]
+    optional_columns = [
+        "event_count",
+        "catalyst_categories",
+        "market_cap",
+        "premarket_close",
+        "premarket_vwap",
+        "premarket_return",
+        "premarket_gap_return",
+        "premarket_above_vwap",
+        "current_halt",
+        "recent_luld_count",
+        "luld_risk",
+    ]
+    available_columns = pl.read_parquet(path, n_rows=0).columns
     frame = pl.read_parquet(
         path,
         columns=[
-            "symbol",
-            "session_date",
-            "selection_rank",
-            "pass_gate",
-            "rvol",
-            "directional_volume_confirmed",
-            "price",
-            "adv_usd",
-            "atr_pct",
-            "tier",
+            column
+            for column in (*required_columns, *optional_columns)
+            if column in available_columns
         ],
     )
     survivors = frame.filter(pl.col("pass_gate")).sort("selection_rank", "symbol")
@@ -112,6 +142,11 @@ def load_locked_selection(
                 "adv_usd": row["adv_usd"],
                 "atr_pct": row["atr_pct"],
                 "tier": row["tier"],
+                **{
+                    column: row[column]
+                    for column in optional_columns
+                    if column in row
+                },
             }
         )
         for row in survivors.iter_rows(named=True)

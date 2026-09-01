@@ -48,6 +48,16 @@ def persist_snapshot(
     )
     disposition = "accepted" if snapshot.usable else "quarantine"
     dataset_dir = root / disposition / dataset_id
+    # A retry can finish in the same UTC second with identical content.  Keep
+    # the content-addressed prefix for traceability, but add entropy instead
+    # of turning an otherwise valid workflow into FileExistsError/exit code 1.
+    while dataset_dir.exists():
+        dataset_id = (
+            f"{source}-{now:%Y%m%dT%H%M%SZ}-{content_hash[:12]}-"
+            f"{uuid4().hex[:8]}"
+        )
+        snapshot = snapshot.model_copy(update={"dataset_id": dataset_id})
+        dataset_dir = root / disposition / dataset_id
     dataset_dir.mkdir(parents=True, exist_ok=False)
     final_path = dataset_dir / "data.parquet"
     temp_path.replace(final_path)

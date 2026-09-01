@@ -199,3 +199,23 @@ def test_premarket_unknown_state_cancels_orders_but_never_queues_market_exit(
     )
     assert broker.flattened == []
     assert guardian.ledger.status(TRADE_DATE) is None
+
+
+def test_account_guardian_schema_is_versioned(tmp_path: Path) -> None:
+    ledger = AccountGuardianLedger(tmp_path / "guardian.sqlite3")
+
+    with ledger._connect() as connection:
+        row = connection.execute(
+            """
+            SELECT owner, version, name
+            FROM schema_migrations
+            WHERE owner = 'execution.account_guardian'
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert tuple(row) == (
+        "execution.account_guardian",
+        1,
+        "account_guardian_days",
+    )

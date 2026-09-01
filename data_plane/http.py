@@ -26,9 +26,12 @@ def get_response(
     params: Mapping[str, QueryValue] | None = None,
     headers: Mapping[str, str] | None = None,
     attempts: int = 4,
+    timeout_seconds: float = 60.0,
 ) -> httpx.Response:
     last_error: Exception | None = None
-    with httpx.Client(timeout=60, follow_redirects=True) as client:
+    if attempts < 1 or timeout_seconds <= 0:
+        raise ValueError("attempts and timeout_seconds must be positive")
+    with httpx.Client(timeout=timeout_seconds, follow_redirects=True) as client:
         for attempt in range(attempts):
             try:
                 response = client.get(url, params=params, headers=headers)
@@ -59,8 +62,16 @@ def get_json(
     *,
     params: Mapping[str, QueryValue] | None = None,
     headers: Mapping[str, str] | None = None,
+    attempts: int = 4,
+    timeout_seconds: float = 60.0,
 ) -> dict[str, Any]:
-    payload = get_response(url, params=params, headers=headers).json()
+    payload = get_response(
+        url,
+        params=params,
+        headers=headers,
+        attempts=attempts,
+        timeout_seconds=timeout_seconds,
+    ).json()
     if not isinstance(payload, dict):
         raise DownloadError(f"expected JSON object from {url}")
     return payload

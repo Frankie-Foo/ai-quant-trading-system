@@ -1,0 +1,30 @@
+appId: cn.frank.ai-quant-research-desk
+productName: AI Quant Research Desk
+asar: true
+files:
+  - dist/**/*
+  - electron/analyst-main.cjs
+  - electron/analyst-preload.cjs
+  - electron/analyst/**/*
+  - package.json
+extraMetadata:
+  main: electron/analyst-main.cjs
+extraResources:
+  - from: build/runtime/windows-research-runtime.exe
+    to: runtime/windows-research-runtime.exe
+  - from: build/bootstrap/research-bootstrap.zip
+    to: bootstrap/research-bootstrap.zip
+directories:
+  output: release-windows-analyst
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: "AIQuantResearch-${version}-${arch}.${ext}"
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: AI Quant Research Desk

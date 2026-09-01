@@ -4,6 +4,8 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from execution.alpaca_paper import (
     BrokerOrder,
     PaperAccount,
@@ -218,6 +220,41 @@ class FakeAutonomousBroker:
         )
         self.entry_orders[request.client_order_id] = order
         return order
+
+
+def test_paper_session_ledger_keeps_a_hash_chained_audit_trail_without_secrets(
+    tmp_path: Path,
+) -> None:
+    ledger = PaperSessionLedger(tmp_path / "autonomous-paper.sqlite3")
+
+    first = ledger.record_audit_event(
+        run_id="paper-run-20260729-1",
+        event_type="tick_open",
+        at_utc=NOW,
+        payload={"symbol": "AAPL", "source_snapshot_ids": ["selection-20260729"]},
+    )
+    second = ledger.record_audit_event(
+        run_id="paper-run-20260729-1",
+        event_type="tick_result",
+        at_utc=NOW + timedelta(seconds=1),
+        payload={"action": "observe", "order_ids": []},
+    )
+
+    events = ledger.audit_events(run_id="paper-run-20260729-1")
+
+    assert [event["sequence"] for event in events] == [first["sequence"], second["sequence"]]
+    assert events[0]["payload"] == {
+        "source_snapshot_ids": ["selection-20260729"],
+        "symbol": "AAPL",
+    }
+    assert events[1]["previous_hash"] == events[0]["event_hash"]
+    with pytest.raises(ValueError, match="secret"):
+        ledger.record_audit_event(
+            run_id="paper-run-20260729-1",
+            event_type="unsafe",
+            at_utc=NOW,
+            payload={"api_key": "must-not-persist"},
+        )
 
 
 def _orchestrator(
@@ -1232,3 +1269,23 @@ def test_runtime_failure_flat_account_cancels_pending_entry_before_returning(
     assert result.cancelled_order_ids == ("pending-entry-1",)
     assert broker.cancelled == ["pending-entry-1"]
     assert broker.close_requests == []
+
+
+def test_autonomous_paper_schema_is_versioned(tmp_path: Path) -> None:
+    ledger = PaperSessionLedger(tmp_path / "autonomous-paper.sqlite3")
+
+    with ledger._connect() as connection:
+        row = connection.execute(
+            """
+            SELECT owner, version, name
+            FROM schema_migrations
+            WHERE owner = 'execution.autonomous_paper_session'
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert tuple(row) == (
+        "execution.autonomous_paper_session",
+        1,
+        "autonomous_paper_schema",
+    )

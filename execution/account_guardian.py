@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
+from db.migrations.sqlite import SQLiteMigration, apply_sqlite_migrations
 from execution.alpaca_paper import (
     BrokerOrder,
     PaperCloseRequest,
@@ -49,20 +50,38 @@ class ExclusivePaperBroker(Protocol):
     ) -> BrokerOrder: ...
 
 
+def _create_account_guardian_days(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS account_guardian_days (
+            trade_date TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            reason TEXT,
+            updated_at_utc TEXT NOT NULL
+        )
+        """
+    )
+
+
+ACCOUNT_GUARDIAN_MIGRATIONS = (
+    SQLiteMigration(
+        version=1,
+        name="account_guardian_days",
+        signature="account_guardian_days.v1",
+        apply=_create_account_guardian_days,
+    ),
+)
+
+
 class AccountGuardianLedger:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS account_guardian_days (
-                    trade_date TEXT PRIMARY KEY,
-                    status TEXT NOT NULL,
-                    reason TEXT,
-                    updated_at_utc TEXT NOT NULL
-                )
-                """
+            apply_sqlite_migrations(
+                connection,
+                owner="execution.account_guardian",
+                migrations=ACCOUNT_GUARDIAN_MIGRATIONS,
             )
 
     def _connect(self) -> sqlite3.Connection:

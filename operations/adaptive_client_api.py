@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import secrets
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -46,9 +49,11 @@ class AdaptiveClientApplication:
         *,
         store: AdaptivePlanStore,
         emergency_stop: EmergencyStopStore | None = None,
+        desk_provider: Callable[[], dict[str, object]] | None = None,
     ):
         self.store = store
         self.emergency_stop = emergency_stop
+        self.desk_provider = desk_provider
 
     def handle(
         self,
@@ -101,12 +106,27 @@ class AdaptiveClientApplication:
                 body={
                     "schema_version": "adaptive_client_health.v1",
                     "status": "ready",
+                    "stage": "research_only",
                     "orders_authorized": False,
                     "emergency_stop_active": stop_active,
-                    "execution_mode": "alpaca_paper",
+                    "execution_mode": "read_only",
+                    "paper_runtime_authorized": False,
                     "live_trading_authorized": False,
                     "ui_order_entry_enabled": False,
                 },
+            )
+        if path == "/v1/desk":
+            if self.desk_provider is None:
+                return ClientApiResponse(
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
+                    body={
+                        "error": "trading-desk evidence unavailable",
+                        "orders_authorized": False,
+                    },
+                )
+            return ClientApiResponse(
+                status=HTTPStatus.OK,
+                body=self.desk_provider(),
             )
         if path == "/v1/dashboard":
             return ClientApiResponse(
@@ -177,17 +197,38 @@ def build_client_http_server(
     host: str,
     port: int,
     static_root: Path,
+    bearer_token: str | None = None,
 ) -> ThreadingHTTPServer:
     """Build a localhost-oriented server with dashboard JSON and SSE decisions."""
 
     if not static_root.is_dir():
         raise FileNotFoundError(f"client static root does not exist: {static_root}")
+    if bearer_token is not None and (
+        len(bearer_token) < 16 or "\r" in bearer_token or "\n" in bearer_token
+    ):
+        raise ValueError("client bearer token must be at least 16 safe characters")
+
+    browser_session_token = (
+        secrets.token_urlsafe(32) if bearer_token is not None else None
+    )
+    browser_session_cookie = "adaptive_client_session"
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "AdaptiveTradingClient/1"
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
+            if parsed.path.startswith("/v1/") and not self._authorized():
+                self._send_json(
+                    ClientApiResponse(
+                        status=HTTPStatus.UNAUTHORIZED,
+                        body={
+                            "error": "read-only client authentication required",
+                            "orders_authorized": False,
+                        },
+                    )
+                )
+                return
             if parsed.path == "/v1/events/stream":
                 self._serve_event_stream(parse_qs(parsed.query))
                 return
@@ -212,12 +253,50 @@ def build_client_http_server(
                 "Cache-Control",
                 "no-cache" if target.name == "index.html" else "public, max-age=3600",
             )
+            if browser_session_token is not None and target.name == "index.html":
+                self.send_header(
+                    "Set-Cookie",
+                    f"{browser_session_cookie}={browser_session_token}; "
+                    "Path=/; HttpOnly; SameSite=Strict",
+                )
             self.send_header("Content-Length", str(len(content)))
             self.end_headers()
             self.wfile.write(content)
 
         def do_POST(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
+            if parsed.path.startswith("/v1/") and not self._authorized():
+                self._send_json(
+                    ClientApiResponse(
+                        status=HTTPStatus.UNAUTHORIZED,
+                        body={
+                            "error": "read-only client authentication required",
+                            "orders_authorized": False,
+                        },
+                    )
+                )
+                return
+            if (
+                parsed.path == "/v1/emergency-stop"
+                and self.headers.get("X-Adaptive-Client-Action", "")
+                != "emergency-stop-v1"
+            ):
+                stop_active = (
+                    application.emergency_stop.read().active
+                    if application.emergency_stop is not None
+                    else False
+                )
+                self._send_json(
+                    ClientApiResponse(
+                        status=HTTPStatus.FORBIDDEN,
+                        body={
+                            "error": "trusted client action header required",
+                            "emergency_stop_active": stop_active,
+                            "orders_authorized": False,
+                        },
+                    )
+                )
+                return
             response = application.handle(
                 "POST",
                 parsed.path,
@@ -289,6 +368,30 @@ def build_client_http_server(
                 "default-src 'self'; connect-src 'self'; "
                 "img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
                 "script-src 'self'",
+            )
+
+        def _authorized(self) -> bool:
+            if bearer_token is None:
+                return True
+            header = self.headers.get("Authorization", "")
+            prefix = "Bearer "
+            if header.startswith(prefix) and secrets.compare_digest(
+                header[len(prefix) :], bearer_token
+            ):
+                return True
+            cookie = SimpleCookie()
+            try:
+                cookie.load(self.headers.get("Cookie", ""))
+            except CookieError:
+                return False
+            session = cookie.get(browser_session_cookie)
+            return bool(
+                session
+                and browser_session_token
+                and secrets.compare_digest(
+                    session.value,
+                    browser_session_token,
+                )
             )
 
         def log_message(self, format: str, *args: Any) -> None:

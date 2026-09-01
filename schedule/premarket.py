@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
-import subprocess
 import sys
-import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from dotenv import load_dotenv
+
 from data_plane.calendar import build_xnys_schedule
+from execution.locked_selection import load_locked_selection
 from kernel.config import load_config
+from operations.feishu_base import FeishuBaseError, FeishuBaseEventClient
+from operations.feishu_investment_events import record_locked_selection
+from schedule.child_process import run_child
 from schedule.runtime import JsonEventLogger, LockUnavailableError, ProcessLock
 from schedule.state import JobLedger, JobStatus
 
@@ -25,6 +30,10 @@ SELECTION_JOB = "premarket_final_selection"
 SELECTION_VERSION = "premarket_final_selection.v4"
 SHADOW_JOB = "premarket_multisignal_shadow"
 SHADOW_VERSION = "premarket_multisignal_shadow.v1"
+
+
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _parse_date(value: str) -> date:
@@ -73,30 +82,25 @@ def _extract_artifacts(stdout: str) -> tuple[str, ...]:
 def _run(
     arguments: list[str], *, logger: JsonEventLogger, timeout: int = 3600
 ) -> tuple[str, ...]:
-    started = time.monotonic()
     logger.emit("child_started", command=arguments[:3])
-    completed = subprocess.run(
+    result = run_child(
         [sys.executable, *arguments],
         cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
+        timeout_seconds=timeout,
     )
-    elapsed_ms = round((time.monotonic() - started) * 1000)
-    if completed.returncode != 0:
+    if result.return_code != 0:
         logger.emit(
             "child_failed",
             level="error",
             command=arguments[:3],
-            return_code=completed.returncode,
-            stdout_lines=len(completed.stdout.splitlines()),
-            stderr_lines=len(completed.stderr.splitlines()),
-            elapsed_ms=elapsed_ms,
+            return_code=result.return_code,
+            stdout_lines=len(result.stdout.splitlines()),
+            stderr_lines=len(result.stderr.splitlines()),
+            elapsed_ms=result.elapsed_ms,
         )
-        raise RuntimeError(f"child failed with exit code {completed.returncode}")
-    logger.emit("child_completed", command=arguments[:3], elapsed_ms=elapsed_ms)
-    return _extract_artifacts(completed.stdout)
+        raise RuntimeError(f"child failed with exit code {result.return_code}")
+    logger.emit("child_completed", command=arguments[:3], elapsed_ms=result.elapsed_ms)
+    return _extract_artifacts(result.stdout)
 
 
 def _previous_session(trade_date: date) -> date:
@@ -186,6 +190,11 @@ def _selection_stage(
                 logger=logger,
             )
         )
+    load_locked_selection(
+        data_root,
+        trade_date,
+        min_rvol=load_config(ROOT / "config.yaml").universe.min_rvol,
+    )
     return tuple(dict.fromkeys(artifacts))
 
 
@@ -205,6 +214,31 @@ def _shadow_stage(
     )
 
 
+def _project_selection_event(
+    client: FeishuBaseEventClient,
+    *,
+    trade_date: date,
+    data_root: Path,
+    observed_at_utc: datetime,
+    min_rvol: float | None = None,
+) -> tuple[str, ...]:
+    effective_min_rvol = (
+        load_config(ROOT / "config.yaml").universe.min_rvol
+        if min_rvol is None
+        else min_rvol
+    )
+    selection = load_locked_selection(
+        data_root,
+        trade_date,
+        min_rvol=effective_min_rvol,
+    )
+    return record_locked_selection(
+        client,
+        selection,
+        observed_at_utc=observed_at_utc,
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trade-date", type=_parse_date)
@@ -215,6 +249,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def run(argv: list[str] | None = None, *, now_utc: datetime | None = None) -> int:
+    load_dotenv(ROOT / ".env")
     args = _parser().parse_args(argv)
     logger = JsonEventLogger(service="premarket")
     try:
@@ -316,6 +351,41 @@ def _run_locked(
                 attempts=record.attempts if record is not None else 0,
             )
             return 1 if exhausted else 0
+    try:
+        feishu = FeishuBaseEventClient.from_environment(os.environ)
+    except RuntimeError as exc:
+        logger.emit(
+            "feishu_selection_configuration_invalid",
+            level="error",
+            error_type=type(exc).__name__,
+            trade_date=trade_date.isoformat(),
+        )
+        if _truthy(os.environ.get("FEISHU_INVESTMENT_AUDIT_REQUIRED")):
+            return 1
+        feishu = None
+    if feishu is not None:
+        try:
+            record_ids = _project_selection_event(
+                feishu,
+                trade_date=trade_date,
+                data_root=args.data_root,
+                observed_at_utc=now_utc,
+                min_rvol=cfg.universe.min_rvol,
+            )
+            logger.emit(
+                "feishu_selection_projected",
+                trade_date=trade_date.isoformat(),
+                record_count=len(record_ids),
+            )
+        except (FeishuBaseError, RuntimeError, ValueError) as exc:
+            logger.emit(
+                "feishu_selection_write_failed",
+                level="error",
+                error_type=type(exc).__name__,
+                trade_date=trade_date.isoformat(),
+            )
+            if _truthy(os.environ.get("FEISHU_INVESTMENT_AUDIT_REQUIRED")):
+                return 1
     shadow_status = "disabled"
     if cfg.scheduler.multisignal_shadow_enabled:
         shadow_status = "pending"

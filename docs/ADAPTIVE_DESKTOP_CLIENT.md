@@ -9,6 +9,11 @@
 当前版本默认只读，`orders_authorized=false`。它不会自动下单，也没有隐藏的下单接口。
 这是有意的生产边界：先用真实 SIP 行情和真实 Broker 持仓跑稳，再单独验收执行层。
 
+客户端首页现在先读取不可变的 `kernel.universe.selection_gates`，而不是把“已经注册动态预案”
+误当成“今天完成选股”。如果今日锁池失败，它会明确显示失败任务、错误类型、目标交易日，
+并把最近一次名单标成历史快照；历史名单不能生成今天的入场许可。复盘页、Agent 页和系统页
+同样只展示已持久化的真实证据，不再用静态说明冒充在线状态。
+
 ## 运行结构
 
 ```mermaid
@@ -97,6 +102,19 @@ npm install
 Set-Location ..
 ```
 
+只查看真实选股、任务账本、复盘和 Agent 健康，不启动行情采集或 Paper 监控：
+
+```powershell
+Set-Location client
+npm.cmd run desktop
+```
+
+这一路径会构建 React 页面、启动仅绑定 `127.0.0.1` 的 Python 只读服务并打开 Electron。
+即使 `runs/adaptive-plans.sqlite3` 还没有动态预案，首页仍会显示最近的不可变选股证据及其
+是否过期。关闭 Electron 后，它只会停止自己创建的本地只读服务。
+
+需要启动完整的 15 秒行情监控闭环时，再创建当天的不可变预案配置：
+
 从示例创建当天配置：
 
 ```powershell
@@ -131,7 +149,10 @@ Copy-Item config\adaptive_plans.example.json config\adaptive_plans.local.json
 ## 数据和密钥边界
 
 - 客户端包不包含 Alpaca Key、云端 token 或 `.env`；
-- 浏览器侧只能访问 `/v1/health`、`/v1/dashboard`、`/v1/events` 和只读 SSE；
+- 浏览器侧只能读取 `/v1/health`、`/v1/desk`、`/v1/dashboard`、`/v1/events`
+  和只读 SSE；
+- `/v1/desk` 只返回白名单化字段：不可变选股、盘后复盘、任务状态、Agent 健康和成熟度
+  证据，不返回任务 token、密钥或 `.env`；
 - 所有 POST 请求返回 405；
 - 本地服务只绑定 loopback；
 - VPS 部署必须在认证 HTTPS 网关后，不能把本地只读端口裸露到公网；

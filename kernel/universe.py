@@ -319,7 +319,10 @@ def apply_selection_gates(
         )
         output.append(row)
 
-    result = pl.DataFrame(output).sort("symbol")
+    # Gate inputs can legitimately mix integer and fractional ratios across rows.
+    # Infer from the complete output so one early integer does not reject later
+    # valid float observations.
+    result = pl.DataFrame(output, infer_schema_length=None).sort("symbol")
     survivors = (
         result.filter(pl.col("pass_gate"))
         .sort("rvol", "symbol", descending=[True, False])

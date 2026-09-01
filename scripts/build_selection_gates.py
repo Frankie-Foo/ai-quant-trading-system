@@ -12,7 +12,11 @@ from dotenv import load_dotenv
 
 from data_plane.calendar import build_xnys_schedule
 from data_plane.contracts import DataQualityCheck, DatasetSnapshot, QualitySeverity
-from data_plane.providers.massive import fetch_free_float, fetch_ticker_details
+from data_plane.providers.massive import (
+    empty_ticker_details_frame,
+    fetch_free_float,
+    fetch_ticker_details,
+)
 from data_plane.providers.nasdaq_events import (
     fetch_earnings_calendar,
     fetch_trade_halts,
@@ -278,31 +282,6 @@ def main() -> None:
     else:
         halts, halt_snapshot = halts_cached
 
-    market_cached = _latest_source(
-        args.data_root,
-        source="massive.ticker_details",
-        predicate=lambda frame: set(frame.get_column("symbol").to_list()) == symbol_set
-        and frame.get_column("asof_date").unique().to_list() == [previous_session],
-    )
-    if market_cached is None:
-        market = fetch_ticker_details(
-            symbols,
-            previous_session,
-            pace_seconds=args.massive_pace_seconds,
-        )
-        market_snapshot = _store_reference(
-            market,
-            data_root=args.data_root,
-            source="massive.ticker_details",
-            schema_version="ticker_details.v1",
-            symbols=symbols,
-            target_date=previous_session,
-            date_column="asof_date",
-            parent_ids=(locked_snapshot.dataset_id,),
-        )
-    else:
-        market, market_snapshot = market_cached
-
     # This endpoint returns only matched records, so a prior subset cannot prove that
     # it was requested for the same locked pool. It is a paginated table query rather
     # than one request per symbol; refresh it for every final gate build.
@@ -326,7 +305,7 @@ def main() -> None:
             "earnings_rows": earnings.height,
             "locked_earnings_symbols": len(symbol_set.intersection(earnings["symbol"])),
             "halt_rows": halts.height,
-            "locked_market_caps": market.filter(pl.col("market_cap").is_not_null()).height,
+            "locked_market_caps": 0,
             "locked_free_float": floats.height,
             "selection_snapshot": None,
         }
@@ -336,6 +315,69 @@ def main() -> None:
     rvol_frame, rvol_snapshot = rvol_loaded
     cfg = load_config(ROOT / "config.yaml")
     gate_asof_utc = datetime.now(UTC)
+    # Market-cap details are the rate-limited endpoint. Probe all other hard gates
+    # with a positive placeholder cap, then query Massive only for possible passes.
+    probe_market = pl.DataFrame(
+        {"symbol": symbols, "market_cap": [1.0] * len(symbols)}
+    )
+    probe = apply_selection_gates(
+        daily,
+        candidates,
+        rvol_frame,
+        probe_market,
+        earnings,
+        halts,
+        floats,
+        trade_date=args.trade_date,
+        asof_utc=gate_asof_utc,
+        recent_session_dates=prior_dates,
+        cfg=cfg,
+        low_float_shares=cfg.universe.luld_low_float_shares,
+    )
+    market_symbols = tuple(
+        probe.filter(pl.col("pass_gate")).get_column("symbol").sort().to_list()
+    )
+    market_cached = _latest_source(
+        args.data_root,
+        source="massive.ticker_details",
+        predicate=lambda frame: set(frame.get_column("symbol").to_list())
+        == set(market_symbols)
+        and frame.get_column("asof_date").unique().to_list() == [previous_session]
+        and frame.get_column("market_cap").is_not_null().all(),
+    )
+    if market_cached is None:
+        market = (
+            fetch_ticker_details(
+                market_symbols,
+                previous_session,
+                pace_seconds=args.massive_pace_seconds,
+                on_symbol=lambda index, total: print(
+                    json.dumps(
+                        {
+                            "progress": f"{index}/{total}",
+                            "stage": "ticker_details",
+                        }
+                    ),
+                    flush=True,
+                ),
+            )
+            if market_symbols
+            else empty_ticker_details_frame()
+        )
+        market_snapshot = _store_reference(
+            market,
+            data_root=args.data_root,
+            source="massive.ticker_details",
+            schema_version="ticker_details.v1",
+            symbols=market_symbols,
+            target_date=previous_session,
+            date_column="asof_date",
+            parent_ids=(locked_snapshot.dataset_id,),
+            allow_empty=True,
+        )
+    else:
+        market, market_snapshot = market_cached
+
     output = apply_selection_gates(
         daily,
         candidates,

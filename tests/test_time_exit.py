@@ -136,3 +136,19 @@ def test_time_exit_is_dry_run_without_readiness_authorization(tmp_path: Path) ->
     assert result[0].dry_run is True
     assert broker.cancelled == []
     assert broker.close_requests == []
+
+
+def test_time_exit_schema_is_versioned(tmp_path: Path) -> None:
+    ledger = TimeExitLedger(tmp_path / "exits.sqlite3")
+
+    with ledger._connect() as connection:
+        row = connection.execute(
+            """
+            SELECT owner, version, name
+            FROM schema_migrations
+            WHERE owner = 'execution.time_exit_ledger'
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert tuple(row) == ("execution.time_exit_ledger", 1, "time_exit_actions")

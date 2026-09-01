@@ -4,24 +4,31 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
+import os
 import sys
-import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
 import polars as pl
+from dotenv import load_dotenv
 
 from data_plane.calendar import build_xnys_schedule
 from data_plane.contracts import DatasetSnapshot
 from kernel.config import load_config
+from operations.feishu_base import FeishuBaseError, FeishuBaseEventClient
+from operations.feishu_investment_events import record_postmarket_review
+from schedule.child_process import run_child
 from schedule.runtime import JsonEventLogger, LockUnavailableError, ProcessLock
 from schedule.state import JobLedger
 
 ROOT = Path(__file__).resolve().parents[1]
 JOB_NAME = "postmarket_review"
 JOB_VERSION = "postmarket_review.v7"
+
+
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _parse_date(value: str) -> date:
@@ -129,36 +136,31 @@ def _run_module(
         str(data_root),
         *extra_args,
     ]
-    started = time.monotonic()
     logger.emit("child_started", module=module, trade_date=trade_date.isoformat())
-    completed = subprocess.run(
+    result = run_child(
         command,
         cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=900,
-        check=False,
+        timeout_seconds=900,
     )
-    elapsed_ms = round((time.monotonic() - started) * 1000)
-    if completed.returncode != 0:
+    if result.return_code != 0:
         logger.emit(
             "child_failed",
             level="error",
             module=module,
             trade_date=trade_date.isoformat(),
-            return_code=completed.returncode,
-            elapsed_ms=elapsed_ms,
-            stdout_lines=len(completed.stdout.splitlines()),
-            stderr_lines=len(completed.stderr.splitlines()),
+            return_code=result.return_code,
+            elapsed_ms=result.elapsed_ms,
+            stdout_lines=len(result.stdout.splitlines()),
+            stderr_lines=len(result.stderr.splitlines()),
         )
-        raise RuntimeError(f"{module} failed with exit code {completed.returncode}")
+        raise RuntimeError(f"{module} failed with exit code {result.return_code}")
     logger.emit(
         "child_completed",
         module=module,
         trade_date=trade_date.isoformat(),
-        elapsed_ms=elapsed_ms,
+        elapsed_ms=result.elapsed_ms,
     )
-    return completed.stdout
+    return result.stdout
 
 
 def _run_one(
@@ -278,6 +280,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def run(argv: list[str] | None = None) -> int:
+    load_dotenv(ROOT / ".env")
     args = _parser().parse_args(argv)
     logger = JsonEventLogger(service="postmarket")
     try:
@@ -307,6 +310,7 @@ def _run_locked(args: argparse.Namespace, logger: JsonEventLogger) -> int:
     # ProcessLock excludes a healthy peer, so an inherited RUNNING lease means
     # the prior process terminated abruptly and can be recovered immediately.
     ledger = JobLedger(args.state_db, stale_after=timedelta(0))
+    feishu = FeishuBaseEventClient.from_environment(os.environ)
     failures = 0
     logger.emit(
         "tick_started",
@@ -346,6 +350,27 @@ def _run_locked(args: argparse.Namespace, logger: JsonEventLogger) -> int:
                 llm_mode=args.llm_mode,
                 logger=logger,
             )
+            if feishu is not None:
+                if len(artifacts) < 4:
+                    raise RuntimeError("postmarket review evidence is incomplete")
+                try:
+                    record_postmarket_review(
+                        feishu,
+                        trade_date=trade_date,
+                        program_review_id=artifacts[2],
+                        selection_review_id=artifacts[3],
+                        evidence_ids=artifacts,
+                        observed_at_utc=now_utc,
+                    )
+                except FeishuBaseError as exc:
+                    logger.emit(
+                        "feishu_review_write_failed",
+                        level="error",
+                        error_type=type(exc).__name__,
+                        trade_date=trade_date.isoformat(),
+                    )
+                    if _truthy(os.environ.get("FEISHU_INVESTMENT_AUDIT_REQUIRED")):
+                        raise
             ledger.complete(lease, artifact_ids=artifacts)
             logger.emit(
                 "job_completed",

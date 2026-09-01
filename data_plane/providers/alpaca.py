@@ -7,12 +7,18 @@ from typing import Any, Literal
 
 import httpx
 import polars as pl
+from pydantic import SecretStr
 
 from data_plane.http import DownloadError
+from data_plane.providers.alpaca_direct import (
+    DirectAlpacaMarketDataClient,
+    DirectMarketDataError,
+)
 from data_plane.quality import canonicalize_bars, nullable_float
 
 PLATFORM_API_VERSION = "v1"
 AlpacaStockFeed = Literal["sip", "delayed_sip"]
+MarketDataProvider = Literal["alpaca_direct", "cloud_proxy"]
 
 
 @dataclass(frozen=True)
@@ -40,6 +46,197 @@ def stock_data_policy_from_env() -> AlpacaStockDataPolicy:
         "CLOUD_MARKET_DATA_FEED must be 'sip' or 'delayed_sip'; "
         "IEX is not accepted for full-market decisions"
     )
+
+
+def market_data_provider_from_env() -> MarketDataProvider:
+    """Use direct Alpaca SIP unless the cloud proxy is explicitly selected."""
+
+    raw = os.getenv("MARKET_DATA_PROVIDER", "alpaca_direct").strip().lower()
+    if raw == "alpaca_direct":
+        return "alpaca_direct"
+    if raw == "cloud_proxy":
+        return "cloud_proxy"
+    raise RuntimeError(
+        "MARKET_DATA_PROVIDER must be 'alpaca_direct' or 'cloud_proxy'"
+    )
+
+
+def _direct_credentials() -> tuple[SecretStr, SecretStr]:
+    key_id = _first_present("ALPACA_API_KEY_ID", "ALPACA_PAPER_KEY_ID")
+    secret_key = _first_present("ALPACA_API_SECRET_KEY", "ALPACA_PAPER_SECRET_KEY")
+    if key_id is None or secret_key is None:
+        raise DownloadError(
+            "direct Alpaca market-data credentials are required"
+        )
+    return SecretStr(key_id), SecretStr(secret_key)
+
+
+def _first_present(*names: str) -> str | None:
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return None
+
+
+def _direct_client(feed: AlpacaStockFeed) -> DirectAlpacaMarketDataClient:
+    if feed != "sip":
+        raise RuntimeError(
+            "direct Alpaca market data requires CLOUD_MARKET_DATA_FEED=sip"
+        )
+    key_id, secret_key = _direct_credentials()
+    return DirectAlpacaMarketDataClient(key_id=key_id, secret_key=secret_key)
+
+
+def _use_direct_provider(client: httpx.Client | None) -> bool:
+    return client is None and market_data_provider_from_env() == "alpaca_direct"
+
+
+def _direct_bars(
+    symbols: tuple[str, ...],
+    start_utc: datetime,
+    end_utc: datetime,
+    *,
+    feed: AlpacaStockFeed,
+) -> pl.DataFrame:
+    client = _direct_client(feed)
+    try:
+        events = client.fetch_bars(
+            symbols,
+            start_utc=start_utc,
+            end_utc=end_utc,
+        )
+    except (DirectMarketDataError, ValueError) as exc:
+        raise DownloadError("direct Alpaca market-data request failed") from exc
+    finally:
+        client.close()
+    rows: list[dict[str, object]] = [
+        {
+            "symbol": event.symbol,
+            "ts_utc": event.ts_utc,
+            "open": event.open,
+            "high": event.high,
+            "low": event.low,
+            "close": event.close,
+            "volume": event.volume,
+            "trade_count": event.trade_count,
+            "vwap": event.vwap,
+            "source": "alpaca.sip.rest.bars",
+            "feed": event.feed,
+            "adjustment": "split_adjusted",
+        }
+        for event in events
+    ]
+    frame = pl.DataFrame(rows) if rows else _empty_frame()
+    return canonicalize_bars(frame).filter(
+        (pl.col("ts_utc") >= start_utc) & (pl.col("ts_utc") < end_utc)
+    )
+
+
+def _direct_quotes(
+    symbols: tuple[str, ...],
+    start_utc: datetime,
+    end_utc: datetime,
+    *,
+    feed: AlpacaStockFeed,
+) -> pl.DataFrame:
+    client = _direct_client(feed)
+    try:
+        events = client.fetch_quotes(
+            symbols,
+            start_utc=start_utc,
+            end_utc=end_utc,
+        )
+    except (DirectMarketDataError, ValueError) as exc:
+        raise DownloadError("direct Alpaca market-data request failed") from exc
+    finally:
+        client.close()
+    rows: list[dict[str, object]] = [
+        {
+            "symbol": event.symbol,
+            "ts_utc": event.ts_utc,
+            "bid_price": event.bid_price,
+            "ask_price": event.ask_price,
+            "bid_size": event.bid_size,
+            "ask_size": event.ask_size,
+            "bid_exchange": None,
+            "ask_exchange": None,
+            "conditions": [],
+            "tape": None,
+            "source": "alpaca.sip.rest.quotes",
+            "feed": event.feed,
+        }
+        for event in events
+    ]
+    frame = pl.DataFrame(rows) if rows else _empty_quotes()
+    return _canonicalize_quotes(frame).filter(
+        (pl.col("ts_utc") >= start_utc) & (pl.col("ts_utc") < end_utc)
+    )
+
+
+def _direct_trades(
+    symbols: tuple[str, ...],
+    start_utc: datetime,
+    end_utc: datetime,
+    *,
+    feed: AlpacaStockFeed,
+) -> pl.DataFrame:
+    client = _direct_client(feed)
+    try:
+        events = client.fetch_trades(
+            symbols,
+            start_utc=start_utc,
+            end_utc=end_utc,
+        )
+    except (DirectMarketDataError, ValueError) as exc:
+        raise DownloadError("direct Alpaca market-data request failed") from exc
+    finally:
+        client.close()
+    rows = [
+        {
+            "symbol": event.symbol,
+            "ts_utc": event.ts_utc,
+            "trade_id": event.trade_id,
+            "exchange": event.exchange,
+            "price": event.price,
+            "size": event.size,
+            "conditions": list(event.conditions),
+            "tape": event.tape,
+            "source": "alpaca.sip.rest.trades",
+            "feed": event.feed,
+        }
+        for event in events
+    ]
+    frame = pl.DataFrame(rows) if rows else _empty_trades()
+    return _canonicalize_trades(frame).filter(
+        (pl.col("ts_utc") >= start_utc) & (pl.col("ts_utc") < end_utc)
+    )
+
+
+def _direct_coverage(
+    symbols: tuple[str, ...],
+    frame: pl.DataFrame,
+) -> dict[str, Any]:
+    returned = set(frame.get_column("symbol").unique().to_list())
+    symbol_coverage = [
+        {
+            "symbol": symbol,
+            "status": "observed" if symbol in returned else "empty",
+            "reason_codes": (
+                ["direct_alpaca_sip"]
+                if symbol in returned
+                else ["no_observed_bars"]
+            ),
+        }
+        for symbol in sorted(set(symbols))
+    ]
+    complete_symbols = len(returned) == len(set(symbols))
+    return {
+        "status": "observed" if complete_symbols else "gaps_detected",
+        "fallback_recommended": not complete_symbols,
+        "symbols": symbol_coverage,
+        "provenance": "alpaca.sip.rest.bars",
+    }
 
 
 def platform_access_from_env() -> tuple[str, str]:
@@ -144,6 +341,8 @@ def fetch_bars(
     selected_feed = feed or stock_data_policy_from_env().feed
     if not symbols:
         raise ValueError("at least one symbol is required")
+    if _use_direct_provider(client):
+        return _direct_bars(symbols, start_utc, end_utc, feed=selected_feed)
     rows = _remote_rows(
         "bars",
         symbols=symbols,
@@ -181,6 +380,11 @@ def fetch_sparse_bars_for_monitoring(
     selected_feed = feed or stock_data_policy_from_env().feed
     if not symbols:
         raise ValueError("at least one symbol is required")
+    if _use_direct_provider(client):
+        frame = _direct_bars(symbols, start_utc, end_utc, feed=selected_feed)
+        if frame.is_empty():
+            raise DownloadError("direct Alpaca market-data API returned no observed bars")
+        return frame, _direct_coverage(symbols, frame)
     rows, coverage = _remote_payload(
         "bars",
         symbols=symbols,
@@ -218,6 +422,8 @@ def fetch_quotes(
         raise ValueError("at least one symbol is required")
     if start_utc.tzinfo is None or end_utc.tzinfo is None or end_utc <= start_utc:
         raise ValueError("a valid timezone-aware quote interval is required")
+    if _use_direct_provider(client):
+        return _direct_quotes(symbols, start_utc, end_utc, feed=selected_feed)
     rows = _remote_rows(
         "quotes",
         symbols=symbols,
@@ -252,6 +458,8 @@ def fetch_trades(
         raise ValueError("at least one symbol is required")
     if start_utc.tzinfo is None or end_utc.tzinfo is None or end_utc <= start_utc:
         raise ValueError("a valid timezone-aware trade interval is required")
+    if _use_direct_provider(client):
+        return _direct_trades(symbols, start_utc, end_utc, feed=selected_feed)
     rows = _remote_rows(
         "trades",
         symbols=symbols,
