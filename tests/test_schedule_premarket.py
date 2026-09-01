@@ -9,6 +9,7 @@ import pytest
 from operations.feishu_base import FeishuBaseEventClient
 from schedule import premarket
 from schedule.premarket import phase_times, recovery_due, target_for_tick
+from schedule.runtime import JsonEventLogger
 from schedule.state import JobLedger, JobStatus
 
 

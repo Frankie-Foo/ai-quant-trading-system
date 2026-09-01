@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path

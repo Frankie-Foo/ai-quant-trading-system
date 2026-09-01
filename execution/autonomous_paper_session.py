@@ -257,6 +257,37 @@ class PaperPlanEvaluationSummary:
     last_reasons: tuple[str, ...]
 
 
+def _verify_autonomous_paper_schema(connection: sqlite3.Connection) -> None:
+    required = {
+        "paper_session_days",
+        "paper_session_commands",
+        "paper_premarket_entries",
+        "paper_position_lifecycle",
+        "paper_tail_runtime",
+        "paper_autopilot_audit_events",
+        "paper_plan_evaluation_summary",
+    }
+    present = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    missing = required - present
+    if missing:
+        raise RuntimeError(f"autonomous Paper schema is incomplete: {sorted(missing)}")
+
+
+AUTONOMOUS_PAPER_MIGRATIONS = (
+    SQLiteMigration(
+        version=1,
+        name="autonomous_paper_schema",
+        signature="autonomous_paper_schema.v1",
+        apply=_verify_autonomous_paper_schema,
+    ),
+)
+
+
 class PaperSessionLedger:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -327,6 +358,11 @@ class PaperSessionLedger:
                 CREATE INDEX IF NOT EXISTS idx_paper_plan_evaluation_trade_date
                     ON paper_plan_evaluation_summary (trade_date, symbol);
                 """
+            )
+            apply_sqlite_migrations(
+                connection,
+                owner="execution.autonomous_paper_session",
+                migrations=AUTONOMOUS_PAPER_MIGRATIONS,
             )
 
     def _connect(self) -> sqlite3.Connection:

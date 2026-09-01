@@ -1,16 +1,17 @@
 # Deployment
 
-Production is always an explicit Git commit from `main`. Development happens in a
+Production is always a reviewed commit merged into `main`. Development happens in a
 dedicated worktree and branch; no worktree is itself a deployment target.
 
 ## Release gates
 
 1. Review `AGENTS.md`, the diff and migration impact.
 2. Run full pytest, Ruff, Mypy and the offline Paper acceptance drills.
-3. Verify Python 3.12 compilation and record the exact commit and config hash.
+3. Verify Python 3.12 compilation and record the exact commit, config hash and
+   migration version.
 4. Verify Alpaca market data and Paper account read-only, the dedicated Investment
    Base configuration and Livermore bot identity. Never query a disconnected old Base.
-5. Merge the reviewed commit to `main`; create a rollback tag or record the prior SHA.
+5. Merge the reviewed commit to `main`; record the rollback commit or image digest.
 6. Keep the Windows funnel disabled until the owner gives the one-time unfreeze
    confirmation.
 7. On the next XNYS session, set a maximum Paper notional of $100 for the smoke run.

@@ -34,8 +34,8 @@ from schedule.runtime import ProcessLock
 
 ROOT = Path(__file__).resolve().parents[1]
 EASTERN = ZoneInfo("America/New_York")
-DEFAULT_CHANNEL_ID = "4edcd570-603f-4c5f-a070-db88c48a5c9b"
-DEFAULT_APP_ID = "vbot_pATI_VCgdkiJn1Sw"
+DEFAULT_CHANNEL_ID = ""
+DEFAULT_APP_ID = ""
 DEFAULT_POSITIONS_PATH = ROOT / "runs" / "target-monitors" / "positions.json"
 BATCH_COUNT = 4
 EVENT_COOLDOWN = timedelta(minutes=10)

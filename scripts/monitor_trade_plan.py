@@ -42,7 +42,7 @@ DEFAULT_STATE = ROOT / "runs" / "trade-plan-monitor-state.json"
 DEFAULT_POSITION = ROOT / "runs" / "trade-plan-position.json"
 DEFAULT_LOG = ROOT / "runs" / "trade-plan-monitor.jsonl"
 DEFAULT_LOCK = ROOT / "runs" / "trade-plan-monitor.lock"
-BUFFETT_APP_ID = "vbot_pATI_VCgdkiJn1Sw"
+BUFFETT_APP_ID = ""
 BUFFETT_PUSH_URL = "https://vps-service.vertu.cn/v1/im/user-robots/push"
 PUSHABLE_EVENTS = frozenset(
     {

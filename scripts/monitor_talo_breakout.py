@@ -35,7 +35,7 @@ from schedule.runtime import ProcessLock
 
 ROOT = Path(__file__).resolve().parents[1]
 EASTERN = ZoneInfo("America/New_York")
-DEFAULT_CHANNEL_ID = "4edcd570-603f-4c5f-a070-db88c48a5c9b"
+DEFAULT_CHANNEL_ID = ""
 DEFAULT_STATE = ROOT / "runs" / "talo-breakout-monitor-state.json"
 DEFAULT_LOG = ROOT / "runs" / "talo-breakout-monitor.jsonl"
 DEFAULT_LOCK = ROOT / "runs" / "talo-breakout-monitor.lock"
@@ -357,7 +357,7 @@ def _push_client(config: TaloConfig) -> LivermorePushClient:
     secret = os.getenv("VPS_LIVERMORE_APP_SECRET", "").strip()
     if not secret:
         raise RuntimeError("VPS_LIVERMORE_APP_SECRET is not configured")
-    app_id = os.getenv("VPS_LIVERMORE_APP_ID", "vbot_ROHePX5GpUs1cr9I").strip()
+    app_id = os.getenv("VPS_LIVERMORE_APP_ID", "").strip()
     return LivermorePushClient(
         app_id=app_id,
         app_secret=SecretStr(secret),

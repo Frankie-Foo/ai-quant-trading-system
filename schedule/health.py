@@ -12,6 +12,7 @@ from typing import Any
 
 from data_plane.providers.alpaca import market_data_provider_from_env
 from operations.local_env import load_project_env, project_data_root
+from schedule.state import JOB_LEDGER_MIGRATIONS
 
 ROOT = Path(__file__).resolve().parents[1]
 CLOUD_PROVIDER_ENV = (

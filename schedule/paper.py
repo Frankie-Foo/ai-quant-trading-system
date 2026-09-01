@@ -16,6 +16,7 @@ from kernel.config import load_config
 from operations.feishu_base import FeishuBaseError, FeishuBaseEventClient
 from operations.feishu_investment_events import record_locked_selection
 from operations.local_env import load_project_env, project_data_root
+from schedule.child_process import run_child
 from schedule.runtime import JsonEventLogger
 
 ROOT = Path(__file__).resolve().parents[1]

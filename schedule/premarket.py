@@ -16,7 +16,10 @@ import polars as pl
 from data_plane.calendar import build_xnys_schedule
 from execution.locked_selection import load_locked_selection
 from kernel.config import load_config
+from operations.feishu_base import FeishuBaseError, FeishuBaseEventClient
+from operations.feishu_investment_events import record_locked_selection
 from operations.local_env import load_project_env, project_data_root
+from schedule.child_process import run_child
 from schedule.runtime import JsonEventLogger, LockUnavailableError, ProcessLock
 from schedule.state import JobLedger, JobStatus
 
@@ -258,6 +261,31 @@ def _recovery_stage(
             str(data_root),
         ],
         logger=logger,
+    )
+
+
+def _project_selection_event(
+    client: FeishuBaseEventClient,
+    *,
+    trade_date: date,
+    data_root: Path,
+    observed_at_utc: datetime,
+    min_rvol: float | None = None,
+) -> tuple[str, ...]:
+    effective_min_rvol = (
+        load_config(ROOT / "config.yaml").universe.min_rvol
+        if min_rvol is None
+        else min_rvol
+    )
+    selection = load_locked_selection(
+        data_root,
+        trade_date,
+        min_rvol=effective_min_rvol,
+    )
+    return record_locked_selection(
+        client,
+        selection,
+        observed_at_utc=observed_at_utc,
     )
 
 

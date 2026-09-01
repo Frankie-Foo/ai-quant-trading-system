@@ -253,6 +253,7 @@ def test_scout_plan_rejects_breakout_retest() -> None:
 
 
 def test_vps_push_requires_bot_sender(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VPS_BUFFETT_APP_ID", "vbot_test_sender")
     monkeypatch.setenv("VPS_BUFFETT_APP_SECRET", "test-secret")
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -276,6 +277,7 @@ def test_vps_push_requires_bot_sender(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_vps_push_rejects_user_sender(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VPS_BUFFETT_APP_ID", "vbot_test_sender")
     monkeypatch.setenv("VPS_BUFFETT_APP_SECRET", "test-secret")
     signal = Signal("stop_loss", "KKR", "test", "止损 -0.58%", "test:2")
     transport = httpx.MockTransport(

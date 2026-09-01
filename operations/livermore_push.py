@@ -9,8 +9,8 @@ from typing import Any, cast
 import httpx
 from pydantic import SecretStr
 
-DEFAULT_APP_ID = "vbot_ROHePX5GpUs1cr9I"
-DEFAULT_CHANNEL_ID = "4edcd570-603f-4c5f-a070-db88c48a5c9b"
+DEFAULT_APP_ID = ""
+DEFAULT_CHANNEL_ID = ""
 
 
 class LivermorePushError(RuntimeError):
@@ -18,7 +18,7 @@ class LivermorePushError(RuntimeError):
 
 
 def configured_identity(environment: Mapping[str, str]) -> tuple[str, str]:
-    """Use the existing Livermore channel unless local config overrides it."""
+    """Read the collaborator-owned Livermore identity from local configuration."""
 
     app_id = str(environment.get("VPS_LIVERMORE_APP_ID", "")).strip() or DEFAULT_APP_ID
     channel_id = str(environment.get("VPS_LIVERMORE_CHANNEL_ID", "")).strip() or DEFAULT_CHANNEL_ID
