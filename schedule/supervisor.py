@@ -49,7 +49,9 @@ def default_lanes(root: Path = ROOT) -> tuple[Lane, ...]:
 
 def launch_lane(lane: Lane) -> ChildProcess:
     lane.stdout_path.parent.mkdir(parents=True, exist_ok=True)
-    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    creationflags = (
+        int(getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0
+    )
     with (
         lane.stdout_path.open("ab") as stdout,
         lane.stderr_path.open("ab") as stderr,
