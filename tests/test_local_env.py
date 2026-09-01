@@ -59,9 +59,10 @@ def test_load_project_env_accepts_an_explicit_machine_runtime_file(
     project = tmp_path / "worktree"
     project.mkdir()
     runtime_env = tmp_path / "machine.env"
+    shared_data_root = tmp_path / "shared" / "ai-quant" / "data"
     runtime_env.write_text(
         "FEISHU_INVESTMENT_BASE_TOKEN=dedicated-base\n"
-        "AI_QUANT_DATA_ROOT=D:/shared/ai-quant/data\n",
+        f"AI_QUANT_DATA_ROOT={shared_data_root}\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("AI_QUANT_RUNTIME_ENV_FILE", str(runtime_env))
@@ -71,7 +72,7 @@ def test_load_project_env_accepts_an_explicit_machine_runtime_file(
     load_project_env(project)
 
     assert os.environ["FEISHU_INVESTMENT_BASE_TOKEN"] == "dedicated-base"
-    assert project_data_root(project) == Path("D:/shared/ai-quant/data")
+    assert project_data_root(project) == shared_data_root
 
 
 def test_market_data_credentials_are_loaded_only_after_2100_beijing(
