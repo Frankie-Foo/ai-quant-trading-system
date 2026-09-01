@@ -352,6 +352,15 @@ def test_stage_event_time_is_deterministic_and_dst_aware() -> None:
     ) == datetime(2026, 8, 24, 13, 35, tzinfo=UTC)
 
 
+def test_paper_plan_uses_the_execution_strategy_version() -> None:
+    plan = stage_runner._plan_payload(
+        date(2026, 8, 24),
+        [_candidate("PASS")],
+    )
+
+    assert plan["strategy_version"] == stage_runner.STRATEGY_VERSION
+
+
 def test_first_wave_retry_reuses_frozen_artifact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

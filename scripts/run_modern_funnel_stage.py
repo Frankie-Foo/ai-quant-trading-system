@@ -901,7 +901,7 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
     plan_path = day_root / "modern_h15_paper_plan.json"
     _write_json(
         plan_path,
-        _plan_payload(args.trade_date, kept, strategy_version=strategy_version),
+        _plan_payload(args.trade_date, kept),
     )
     authorization = create_open_confirmation(
         confirmation_path=confirmation_path,
@@ -911,7 +911,7 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
         candidate_pool=final_symbols,
         feishu_record_ids=record_ids,
         livermore_message_id=message_id,
-        strategy_version=strategy_version,
+        strategy_version=STRATEGY_VERSION,
         generated_at_utc=datetime.now(UTC),
     )
     paper_pid = _launch_paper_if_confirmed(

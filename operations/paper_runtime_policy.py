@@ -80,7 +80,11 @@ class PaperRuntimePolicy:
             raise RuntimeError("automated trading requires the Alpaca Paper host")
         if authorization.trade_date != trade_date or not authorization.is_complete():
             raise RuntimeError("complete same-day third-stage authorization is required")
-        if authorization.candidate_pool != expected_candidate_pool:
+        expected_symbols = set(expected_candidate_pool)
+        if (
+            len(expected_symbols) != len(expected_candidate_pool)
+            or set(authorization.candidate_pool) != expected_symbols
+        ):
             raise RuntimeError("third-stage candidate pool does not match Paper plans")
         if authorization.strategy_version != expected_strategy_version:
             raise RuntimeError("third-stage strategy version does not match Paper runtime")

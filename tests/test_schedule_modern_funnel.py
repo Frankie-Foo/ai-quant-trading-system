@@ -150,3 +150,19 @@ def test_production_executor_rejects_empty_or_failed_stage_receipt(tmp_path: Pat
     executor = ProductionFunnelExecutor(root=tmp_path, runner=runner)
     with pytest.raises(RuntimeError, match="did not produce a success receipt"):
         executor.execute(FunnelStage.SECOND_WAVE, TRADE_DATE)
+
+
+def test_production_executor_preserves_the_sanitized_failure_reason(tmp_path: Path) -> None:
+    def runner(command: list[str], **_: object) -> CompletedStageProcess:
+        del command
+
+        class Completed:
+            returncode = 1
+            stdout = ""
+            stderr = "Traceback omitted\nRuntimeError: Paper startup failed\n"
+
+        return Completed()
+
+    executor = ProductionFunnelExecutor(root=tmp_path, runner=runner)
+    with pytest.raises(RuntimeError, match="Paper startup failed"):
+        executor.execute(FunnelStage.OPEN_CONFIRMATION, TRADE_DATE)

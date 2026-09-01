@@ -83,8 +83,10 @@ class ProductionFunnelExecutor:
             check=False,
         )
         if completed.returncode != 0:
+            stderr_lines = [line.strip() for line in completed.stderr.splitlines() if line.strip()]
+            detail = f": {stderr_lines[-1][:500]}" if stderr_lines else ""
             raise RuntimeError(
-                f"{stage.value} process failed with exit code {completed.returncode}"
+                f"{stage.value} process failed with exit code {completed.returncode}{detail}"
             )
         receipt = _last_json_object(completed.stdout)
         if receipt.get("ok") is not True or not str(receipt.get("receipt_id", "")).strip():
