@@ -11,25 +11,25 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from dotenv import load_dotenv
+import polars as pl
 
 from data_plane.calendar import build_xnys_schedule
 from execution.locked_selection import load_locked_selection
 from kernel.config import load_config
-from operations.feishu_base import FeishuBaseError, FeishuBaseEventClient
-from operations.feishu_investment_events import record_locked_selection
-from schedule.child_process import run_child
+from operations.local_env import load_project_env, project_data_root
 from schedule.runtime import JsonEventLogger, LockUnavailableError, ProcessLock
 from schedule.state import JobLedger, JobStatus
 
 ROOT = Path(__file__).resolve().parents[1]
 BEIJING = ZoneInfo("Asia/Shanghai")
 LOCK_JOB = "premarket_catalyst_lock"
-LOCK_VERSION = "premarket_catalyst_lock.v4"
+LOCK_VERSION = "premarket_catalyst_lock.v5"
 SELECTION_JOB = "premarket_final_selection"
 SELECTION_VERSION = "premarket_final_selection.v4"
 SHADOW_JOB = "premarket_multisignal_shadow"
 SHADOW_VERSION = "premarket_multisignal_shadow.v1"
+RECOVERY_JOB = "selection_recovery_shadow"
+RECOVERY_VERSION = "selection_recovery_shadow.v1"
 
 
 def _truthy(value: str | None) -> bool:
@@ -114,6 +114,21 @@ def _previous_session(trade_date: date) -> date:
     return value
 
 
+def _has_reference_snapshot(data_root: Path, asof_date: date) -> bool:
+    """Avoid re-downloading an immutable point-in-time reference snapshot."""
+
+    for path in (data_root / "accepted").glob(
+        "massive.reference_tickers.cs-*/data.parquet"
+    ):
+        try:
+            value = pl.read_parquet(path, columns=["asof_date"])["asof_date"].max()
+        except (OSError, pl.exceptions.PolarsError):
+            continue
+        if value == asof_date:
+            return True
+    return False
+
+
 def _lock_stage(trade_date: date, data_root: Path, logger: JsonEventLogger) -> tuple[str, ...]:
     previous = _previous_session(trade_date)
     artifacts: list[str] = []
@@ -133,20 +148,26 @@ def _lock_stage(trade_date: date, data_root: Path, logger: JsonEventLogger) -> t
             logger=logger,
         )
     )
-    artifacts.extend(
-        _run(
-            [
-                "-m",
-                "data_plane.cli",
-                "--data-root",
-                str(data_root),
-                "massive-reference",
-                "--date",
-                previous.isoformat(),
-            ],
-            logger=logger,
+    if not _has_reference_snapshot(data_root, previous):
+        artifacts.extend(
+            _run(
+                [
+                    "-m",
+                    "data_plane.cli",
+                    "--data-root",
+                    str(data_root),
+                    "massive-reference",
+                    "--date",
+                    previous.isoformat(),
+                ],
+                logger=logger,
+            )
         )
-    )
+    else:
+        logger.emit(
+            "reference_snapshot_reused",
+            asof_date=previous.isoformat(),
+        )
     for module in (
         "scripts.build_daily_universe",
         "scripts.build_catalyst_snapshot",
@@ -214,42 +235,43 @@ def _shadow_stage(
     )
 
 
-def _project_selection_event(
-    client: FeishuBaseEventClient,
-    *,
-    trade_date: date,
-    data_root: Path,
-    observed_at_utc: datetime,
-    min_rvol: float | None = None,
+def recovery_due(trade_date: date) -> datetime:
+    schedule = build_xnys_schedule(trade_date, trade_date)
+    if schedule.height != 1:
+        raise ValueError("trade date is not an XNYS session")
+    market_open = schedule.row(0, named=True)["market_open_utc"]
+    if not isinstance(market_open, datetime):
+        raise ValueError("market open is invalid")
+    return market_open + timedelta(minutes=35)
+
+
+def _recovery_stage(
+    trade_date: date, data_root: Path, logger: JsonEventLogger
 ) -> tuple[str, ...]:
-    effective_min_rvol = (
-        load_config(ROOT / "config.yaml").universe.min_rvol
-        if min_rvol is None
-        else min_rvol
-    )
-    selection = load_locked_selection(
-        data_root,
-        trade_date,
-        min_rvol=effective_min_rvol,
-    )
-    return record_locked_selection(
-        client,
-        selection,
-        observed_at_utc=observed_at_utc,
+    return _run(
+        [
+            "-m",
+            "scripts.run_selection_recovery_shadow",
+            "--trade-date",
+            trade_date.isoformat(),
+            "--data-root",
+            str(data_root),
+        ],
+        logger=logger,
     )
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trade-date", type=_parse_date)
-    parser.add_argument("--data-root", type=Path, default=ROOT / "data")
+    parser.add_argument("--data-root", type=Path, default=project_data_root(ROOT))
     parser.add_argument("--state-db", type=Path, default=ROOT / "runs/jobs.sqlite3")
     parser.add_argument("--lock-file", type=Path, default=ROOT / "runs/premarket.lock")
     return parser
 
 
 def run(argv: list[str] | None = None, *, now_utc: datetime | None = None) -> int:
-    load_dotenv(ROOT / ".env")
+    load_project_env(ROOT)
     args = _parser().parse_args(argv)
     logger = JsonEventLogger(service="premarket")
     try:
@@ -434,10 +456,52 @@ def _run_locked(
                     primary_selection_affected=False,
                     orders_submitted=0,
                 )
+    recovery_status = "not_due"
+    if now_utc >= recovery_due(trade_date):
+        recovery_status = "pending"
+        recovery_lease = ledger.acquire(
+            RECOVERY_JOB,
+            trade_date,
+            RECOVERY_VERSION,
+            max_attempts=cfg.scheduler.premarket_max_attempts,
+            retry_after=timedelta(minutes=cfg.scheduler.premarket_retry_minutes),
+        )
+        if recovery_lease is not None:
+            try:
+                recovery_artifacts = _recovery_stage(
+                    trade_date, args.data_root, logger
+                )
+                ledger.complete(recovery_lease, artifact_ids=recovery_artifacts)
+                recovery_status = "complete"
+            except Exception as exc:
+                ledger.fail(recovery_lease, error_code=type(exc).__name__)
+                recovery_status = "failed_retryable"
+                logger.emit(
+                    "selection_recovery_shadow_failed",
+                    level="warning",
+                    error_code=type(exc).__name__,
+                    primary_selection_affected=False,
+                    orders_submitted=0,
+                )
+        else:
+            recovery_record = ledger.get(
+                RECOVERY_JOB, trade_date, RECOVERY_VERSION
+            )
+            if (
+                recovery_record is not None
+                and recovery_record.status is JobStatus.SUCCEEDED
+            ):
+                recovery_status = "complete"
+            elif (
+                recovery_record is not None
+                and recovery_record.attempts >= cfg.scheduler.premarket_max_attempts
+            ):
+                recovery_status = "exhausted"
     logger.emit(
         "tick_completed",
         orders_submitted=0,
         multisignal_shadow_status=shadow_status,
+        selection_recovery_shadow_status=recovery_status,
     )
     return 0
 

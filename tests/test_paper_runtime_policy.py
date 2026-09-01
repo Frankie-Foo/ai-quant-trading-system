@@ -1,0 +1,182 @@
+from datetime import UTC, date, datetime
+
+import pytest
+
+from operations.paper_runtime_policy import (
+    ExecutionAuthorization,
+    PaperRuntimePolicy,
+    reject_retired_paper_runtime,
+)
+
+TRADE_DATE = date(2026, 8, 24)
+POLICY = PaperRuntimePolicy()
+
+
+def _authorization(**overrides: object) -> ExecutionAuthorization:
+    values: dict[str, object] = {
+        "trade_date": TRADE_DATE,
+        "selection_snapshot_id": "selection-1",
+        "open_confirmation_id": "confirmation-1",
+        "feishu_record_id": "record-1",
+        "livermore_message_id": "message-1",
+        "strategy_version": "modern-h15-v1",
+        "candidate_pool": ("AAPL",),
+        "config_sha256": "a" * 64,
+    }
+    values.update(overrides)
+    return ExecutionAuthorization(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("writes_enabled", "kill_switch", "base_url", "authorization"),
+    [
+        (False, False, "https://paper-api.alpaca.markets", _authorization()),
+        (True, True, "https://paper-api.alpaca.markets", _authorization()),
+        (True, False, "https://api.alpaca.markets", _authorization()),
+        (True, False, "https://paper-api.alpaca.markets", _authorization(feishu_record_id="")),
+        (
+            True,
+            False,
+            "https://paper-api.alpaca.markets",
+            _authorization(livermore_message_id=""),
+        ),
+    ],
+)
+def test_arming_fails_closed_without_every_gate(
+    writes_enabled: bool,
+    kill_switch: bool,
+    base_url: str,
+    authorization: ExecutionAuthorization,
+) -> None:
+    with pytest.raises(RuntimeError):
+        POLICY.validate_arming(
+            trade_date=TRADE_DATE,
+            broker_write_enabled=writes_enabled,
+            trading_kill_switch=kill_switch,
+            broker_base_url=base_url,
+            authorization=authorization,
+            expected_candidate_pool=("AAPL",),
+            expected_strategy_version="modern-h15-v1",
+        )
+
+
+def test_arming_accepts_complete_paper_authorization() -> None:
+    POLICY.validate_arming(
+        trade_date=TRADE_DATE,
+        broker_write_enabled=True,
+        trading_kill_switch=False,
+        broker_base_url="https://paper-api.alpaca.markets",
+        authorization=_authorization(),
+        expected_candidate_pool=("AAPL",),
+        expected_strategy_version="modern-h15-v1",
+    )
+
+
+def test_retired_paper_runtime_is_unconditionally_blocked() -> None:
+    with pytest.raises(RuntimeError, match="retired"):
+        reject_retired_paper_runtime("legacy-orb")
+
+
+@pytest.mark.parametrize(
+    ("candidate_pool", "strategy_version"),
+    [
+        (("MSFT",), "modern-h15-v1"),
+        (("AAPL",), "modern-h15-v2"),
+    ],
+)
+def test_arming_rejects_confirmation_for_another_pool_or_strategy(
+    candidate_pool: tuple[str, ...],
+    strategy_version: str,
+) -> None:
+    with pytest.raises(RuntimeError, match="does not match"):
+        POLICY.validate_arming(
+            trade_date=TRADE_DATE,
+            broker_write_enabled=True,
+            trading_kill_switch=False,
+            broker_base_url="https://paper-api.alpaca.markets",
+            authorization=_authorization(),
+            expected_candidate_pool=candidate_pool,
+            expected_strategy_version=strategy_version,
+        )
+
+
+@pytest.mark.parametrize(
+    ("hour", "minute", "entry_allowed", "cancel_entries", "flatten"),
+    [
+        (9, 55, False, False, False),
+        (9, 56, True, False, False),
+        (14, 59, True, False, False),
+        (15, 0, False, False, False),
+        (15, 45, False, True, False),
+        (15, 50, False, True, True),
+    ],
+)
+def test_market_clock_enforces_entry_and_liquidation_windows(
+    hour: int,
+    minute: int,
+    entry_allowed: bool,
+    cancel_entries: bool,
+    flatten: bool,
+) -> None:
+    now_et = datetime(2026, 8, 24, hour, minute, tzinfo=UTC)
+    assert POLICY.entry_allowed_at(now_et) is entry_allowed
+    assert POLICY.must_cancel_entries_at(now_et) is cancel_entries
+    assert POLICY.must_flatten_at(now_et) is flatten
+
+
+def test_risk_limits_are_stop_loss_budgets_not_notional_caps() -> None:
+    assert POLICY.max_symbol_loss(100_000) == 500
+    assert POLICY.max_sector_loss(100_000) == 750
+    assert POLICY.max_portfolio_loss(100_000) == 1_500
+    assert POLICY.stop_new_entries_loss(100_000) == 1_500
+    assert POLICY.flatten_account_loss(100_000) == 2_000
+    assert POLICY.position_quantity(
+        equity=100_000,
+        entry_price=20,
+        all_in_stop_pct=0.02,
+        buying_power=100_000,
+    ) == 1_250
+
+
+def test_position_quantity_rejects_stop_above_two_percent() -> None:
+    with pytest.raises(ValueError, match="2%"):
+        POLICY.position_quantity(
+            equity=100_000,
+            entry_price=20,
+            all_in_stop_pct=0.0201,
+            buying_power=100_000,
+        )
+
+
+def test_aggregate_risk_blocks_new_entries_at_every_confirmed_limit() -> None:
+    POLICY.validate_entry_risk(
+        proposed_risk_fraction=0.003,
+        symbol_open_risk=0.0,
+        sector_open_risk=0.0,
+        portfolio_open_risk=0.0,
+        daily_return=0.0,
+        sector_main_has_profit=False,
+    )
+    blocked = (
+        {"symbol_open_risk": 0.003},
+        {"sector_open_risk": 0.005, "sector_main_has_profit": True},
+        {"portfolio_open_risk": 0.013},
+        {"daily_return": -0.015},
+        {"sector_open_risk": 0.001, "sector_main_has_profit": False},
+    )
+    defaults: dict[str, object] = {
+        "proposed_risk_fraction": 0.003,
+        "symbol_open_risk": 0.0,
+        "sector_open_risk": 0.0,
+        "portfolio_open_risk": 0.0,
+        "daily_return": 0.0,
+        "sector_main_has_profit": False,
+    }
+    for overrides in blocked:
+        with pytest.raises(RuntimeError):
+            POLICY.validate_entry_risk(**(defaults | overrides))  # type: ignore[arg-type]
+
+
+def test_two_percent_daily_loss_requires_immediate_flatten() -> None:
+    assert not POLICY.must_flatten_for_daily_return(-0.0199)
+    assert POLICY.must_flatten_for_daily_return(-0.02)

@@ -10,7 +10,7 @@
 .\.venv\Scripts\python -m pytest -v
 .\.venv\Scripts\ruff check .
 .\.venv\Scripts\mypy data_plane kernel research execution schedule agent_gateway `
-  scripts tests
+  operations scripts tests
 ```
 
 ## 企业级协作与发布
@@ -30,11 +30,12 @@ Git worktree；评审通过后合并到 `main`，生产只部署明确记录的 
 
 ## 本地自主模拟盘
 
-三进程 Docker 运行方式现已覆盖 SIP 数据刷新、催化剂/红队/确定性监督器、
-安全信封、Alpaca Paper 执行和利弗莫尔中文通知。默认 compose 只有读取权限；
-Paper 写入必须同时通过环境授权、关闭 kill switch，并显式加载带
-`--arm-paper` 的覆盖文件。完整启动、紧急停止、状态保留和迁移说明见
-[本地自主模拟盘运行手册](docs/AUTONOMOUS_PAPER_LOCAL.md)。
+唯一自动执行链是 `schedule.modern_funnel` →
+`scripts.run_modern_funnel_stage` → `scripts.monitor_modern_momentum_paper`。
+它按纽约时间 08:00、09:25、09:35 运行三段漏斗，只有第三段的专用飞书 Base
+记录和利弗莫尔回执都成功后才生成不可变授权。默认保持冻结；Paper 启用还必须同时
+满足写入开关、关闭 kill switch、运行确认和不超过 100 美元的首次烟测上限。
+完整启动、停止、恢复和验收见[运行手册](docs/RUNBOOK.md)。
 
 The cloud multi-strategy service is a separate repository and deployment. This
 repository consumes its versioned feature API only through the slow-loop synchronization
@@ -193,8 +194,8 @@ Build a point-in-time, explicitly non-actionable ORB-5 research snapshot with:
 ```
 
 The snapshot uses the same explicit feed policy as RVOL, reports whether the session is
-still in progress, and never drives an order. Continuous live decisions use
-`scripts.run_paper_session` and the licensed SIP WebSocket. The July 20 audit predates
+still in progress, and never drives an order. The former ORB live runner is retired;
+only the Modern H15 Paper chain described above may execute. The July 20 audit predates
 the realtime subscription and remains historical evidence only; see the
 [selection accuracy audit](docs/SELECTION_ACCURACY_AUDIT_2026-07-20.md).
 
@@ -251,12 +252,10 @@ Install the complete local Windows observation loop with:
 .\scripts\install_local_observation_tasks.ps1
 ```
 
-This registers three current-user tasks: a five-minute idempotent premarket tick, a
-five-minute DST-safe Paper-session launcher, and a 30-minute postmarket review tick.
-The Paper launcher verifies SIP and Paper access before opening the one licensed stream.
-It still cannot submit an order while `BROKER_WRITE_ENABLED=false` and
-`TRADING_KILL_SWITCH=true`. Runtime output is appended to
-`runs/premarket_scheduler.*.log`, `runs/paper_scheduler.*.log`, and
+This registers one one-minute XNYS-aware funnel task and one postmarket review task.
+The installer disables the obsolete premarket and Paper-session tasks. The funnel
+submits no order unless the immutable third-stage authorization and all Paper gates
+pass. Runtime output is appended to `runs/modern_funnel_scheduler.*.log` and
 `runs/postmarket_scheduler.*.log`.
 
 The runner itself checks the XNYS close plus the configurable postmarket data-grace
@@ -337,20 +336,9 @@ Do not change the two write-control variables yet. The realtime data and Paper p
 are verified, but the coded maturity report remains `research_only` pending sufficient
 point-in-time history, net cost-complete labels, purged OOS folds, and operational drills.
 
-Once the current-date locked selection exists, the complete centralized shadow session
-can be started with:
-
-```powershell
-.\.venv\Scripts\python -m scripts.run_paper_session `
-  --trade-date 2026-07-21 `
-  --max-seconds 60
-```
-
-This is the actual SIP -> causal ORB intent -> NBBO -> account-aware sizing -> TradePlan
--> P0/P1/P2 -> OMS path. Under the current evidence and default environment it records
-plans and decisions but cannot submit an order. A future Paper order requires the
-maturity report to reach `paper_eligible`, the broker write flag to be deliberately
-enabled, and the kill switch to be deliberately disarmed at the same time.
+The historical centralized ORB session remains available as library code for tests and
+postmortems, but its CLI is permanently blocked and must not be deployed. New Paper
+execution goes only through the receipt-authorized Modern H15 chain.
 
 ## Production operations
 
@@ -391,3 +379,22 @@ and confirms the winner once on an untouched fifth holdout. It automatically rec
 new research champion or retains the baseline. The decision always has
 `production_eligible=false`: agents can propose hypotheses, but neither an agent nor the
 sandbox can silently modify the execution kernel or authorize capital.
+
+The loop is connected end to end. `runs/strategy/active.json` is the only policy
+allowed to affect selection; `runs/strategy/challenger.json` is shadow-only and cannot
+submit orders. Promotion requires at least 20 complete shadow sessions, no worse
+precision, at least 50% opportunity-capture retention, and an explicit human approver.
+Monthly jobs may build a challenger but cannot approve it. Every promotion archives the
+prior policy for hash-verified rollback.
+
+```powershell
+python -m scripts.manage_strategy_policy status --active runs/strategy/active.json `
+  --challenger runs/strategy/challenger.json
+python -m scripts.manage_strategy_policy approve --active runs/strategy/active.json `
+  --challenger runs/strategy/challenger.json --data-root data `
+  --history-dir runs/strategy/history --approved-by Frank `
+  --confirm-policy-hash <reviewed-challenger-hash>
+python -m scripts.manage_strategy_policy rollback --active runs/strategy/active.json `
+  --history-dir runs/strategy/history --target-version <verified-version> `
+  --approved-by Frank
+```

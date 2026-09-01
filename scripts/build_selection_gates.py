@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 import polars as pl
-from dotenv import load_dotenv
 
 from data_plane.calendar import build_xnys_schedule
 from data_plane.contracts import DataQualityCheck, DatasetSnapshot, QualitySeverity
@@ -24,6 +23,7 @@ from data_plane.providers.nasdaq_events import (
 from data_plane.storage import persist_snapshot
 from kernel.config import load_config
 from kernel.universe import apply_selection_gates
+from operations.local_env import load_project_env
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -221,7 +221,7 @@ def _counts(frame: pl.DataFrame, column: str) -> dict[str, int]:
 
 
 def main() -> None:
-    load_dotenv(ROOT / ".env")
+    load_project_env(ROOT)
     parser = argparse.ArgumentParser()
     parser.add_argument("--trade-date", type=_parse_date, required=True)
     parser.add_argument("--data-root", type=Path, default=ROOT / "data")
@@ -285,16 +285,30 @@ def main() -> None:
     # This endpoint returns only matched records, so a prior subset cannot prove that
     # it was requested for the same locked pool. It is a paginated table query rather
     # than one request per symbol; refresh it for every final gate build.
-    floats = fetch_free_float(symbols)
-    float_snapshot = _store_reference(
-        floats,
-        data_root=args.data_root,
+    provider_date = datetime.now(UTC).date()
+    float_cached = _latest_source(
+        args.data_root,
         source="massive.free_float",
-        schema_version="free_float.v1",
-        symbols=symbols,
-        parent_ids=(locked_snapshot.dataset_id,),
-        allow_empty=True,
+        predicate=lambda frame: (
+            not frame.is_empty()
+            and frame.height == frame.get_column("symbol").n_unique()
+            and set(frame.get_column("symbol").to_list()).issubset(symbol_set)
+            and frame.get_column("retrieved_utc").dt.date().max() == provider_date
+        ),
     )
+    if float_cached is None:
+        floats = fetch_free_float(symbols)
+        float_snapshot = _store_reference(
+            floats,
+            data_root=args.data_root,
+            source="massive.free_float",
+            schema_version="free_float.v1",
+            symbols=symbols,
+            parent_ids=(locked_snapshot.dataset_id,),
+            allow_empty=True,
+        )
+    else:
+        floats, float_snapshot = float_cached
 
     rvol_loaded = _load_rvol(args.data_root, args.trade_date)
     if rvol_loaded is None:
@@ -318,7 +332,10 @@ def main() -> None:
     # Market-cap details are the rate-limited endpoint. Probe all other hard gates
     # with a positive placeholder cap, then query Massive only for possible passes.
     probe_market = pl.DataFrame(
-        {"symbol": symbols, "market_cap": [1.0] * len(symbols)}
+        {
+            "symbol": symbols,
+            "market_cap": [cfg.universe.min_market_cap_usd] * len(symbols),
+        }
     )
     probe = apply_selection_gates(
         daily,
@@ -403,6 +420,7 @@ def main() -> None:
             | pl.col("current_halt")
             | pl.col("luld_risk")
             | pl.col("market_cap").is_null()
+            | (pl.col("market_cap") < cfg.universe.min_market_cap_usd)
         )
     ).height
     checks = (

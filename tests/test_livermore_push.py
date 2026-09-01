@@ -60,6 +60,20 @@ def test_livermore_push_error_never_exposes_secret_or_response_body() -> None:
     assert "403" in str(captured.value)
 
 
+@pytest.mark.parametrize("body", ["乱码\ufffd", "连续??问号"])
+def test_livermore_rejects_invalid_chinese_before_network(body: str) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(500)
+
+    with pytest.raises(ValueError, match="UTF-8"):
+        _client(handler).push(body)
+    assert calls == 0
+
+
 def test_channel_health_requires_the_exact_configured_channel_id() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"

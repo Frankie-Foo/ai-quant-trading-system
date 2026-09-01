@@ -21,3 +21,32 @@
     attempted configurations before model comparison.
 14. Trading-plane order state transitions are explicit and idempotent; process
     recovery must never create a duplicate broker order.
+15. `scripts.monitor_modern_momentum_paper` is the only automated broker-writing
+    module. It may target only `https://paper-api.alpaca.markets`; real trading is
+    forbidden.
+16. `schedule.modern_funnel` is the only production selection/Paper scheduler. A
+    successful third stage requires immutable dedicated-Base and Livermore receipts.
+17. Never read or write a disconnected legacy Feishu Base. The Investment Base uses
+    four explicit, distinct table IDs and stores transitions, not polling ticks.
+18. Paper is frozen by default. Unfreeze requires owner confirmation and complete
+    reconciliation. This release enforces a notional cap no greater than $100; raising
+    it requires a separate reviewed release and owner approval.
+
+## Intraday monitoring operating order
+
+For every user-supplied daily intraday plan, use this fixed sequence:
+
+1. Read the whole plan, extract symbols, roles, thresholds, risk/capital caps,
+   ETF or sector gates, and time rules. Reconcile missing decision fields from
+   traceable current SIP data where possible; otherwise record `N/A` and block
+   the dependent condition. Never invent a value.
+2. Configure or update the read-only 1-second monitor and send one initial
+   Chinese Buffett-bot plan summary before entries begin: pool, buy gates,
+   ETF anchors, positions reported by the user, and explicit no-buy boundaries.
+3. During the valid ET session, send only immediate action events plus a
+   half-hour ranked status summary: 可买, 强观察, 继续观察, 不能买. Include an
+   explicit reason for every symbol. Do not send routine per-second updates.
+4. Before every Chinese group message, perform a UTF-8 round-trip check and
+   reject literal `?` and U+FFFD. Record result, message ID, and a time-bucket
+   dedupe key. Use only the configured Buffett bot/channel. Never call real or
+   Paper order APIs.

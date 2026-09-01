@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import sqlite3
+import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -13,6 +13,7 @@ from operations.feishu_base import (
     FeishuBaseSettings,
     FeishuTableSettings,
     InvestmentTable,
+    _cell_text,
 )
 
 
@@ -67,9 +68,7 @@ class FakeLark:
 
 def test_event_write_is_create_then_exact_readback_and_replay_safe(tmp_path: Path) -> None:
     runner = FakeLark()
-    client = FeishuBaseEventClient(
-        _settings(tmp_path), runner=runner, sleep=lambda _: None
-    )
+    client = FeishuBaseEventClient(_settings(tmp_path), runner=runner, sleep=lambda _: None)
 
     first = client.record_event(
         InvestmentTable.TRADE,
@@ -102,6 +101,20 @@ def test_event_write_is_create_then_exact_readback_and_replay_safe(tmp_path: Pat
     )
 
 
+def test_readonly_access_check_never_upserts(tmp_path: Path) -> None:
+    runner = FakeLark()
+    checked = FeishuBaseEventClient(_settings(tmp_path), runner=runner).check_access()
+
+    assert checked == {
+        "selection": "tbl-selection",
+        "monitor": "tbl-monitor",
+        "trade": "tbl-trade",
+        "review": "tbl-review",
+    }
+    assert len(runner.commands) == 4
+    assert all("+record-list" in command for command in runner.commands)
+
+
 def test_event_write_rejects_duplicate_business_key(tmp_path: Path) -> None:
     class DuplicateRunner:
         def __call__(self, command: Sequence[str]) -> Mapping[str, object]:
@@ -116,9 +129,9 @@ def test_event_write_rejects_duplicate_business_key(tmp_path: Path) -> None:
             }
 
     with pytest.raises(FeishuBaseDuplicateError):
-        FeishuBaseEventClient(
-            _settings(tmp_path), runner=DuplicateRunner()
-        ).record_event(InvestmentTable.TRADE, "event-1", {"操作": "买入"})
+        FeishuBaseEventClient(_settings(tmp_path), runner=DuplicateRunner()).record_event(
+            InvestmentTable.TRADE, "event-1", {"操作": "买入"}
+        )
 
 
 def test_settings_are_optional_only_when_completely_unconfigured() -> None:
@@ -135,11 +148,43 @@ def test_settings_are_optional_only_when_completely_unconfigured() -> None:
     assert settings is not None
     assert settings.trade.event_id_field == "运行ID"
     with pytest.raises(RuntimeError, match="incomplete dedicated"):
-        FeishuBaseSettings.from_environment(
-            {"FEISHU_INVESTMENT_BASE_TOKEN": "base-token"}
-        )
+        FeishuBaseSettings.from_environment({"FEISHU_INVESTMENT_BASE_TOKEN": "base-token"})
 
 
 def test_legacy_configuration_is_rejected() -> None:
     with pytest.raises(RuntimeError, match="legacy"):
         FeishuBaseSettings.from_environment({"FEISHU_BASE_TOKEN": "old-base"})
+
+
+def test_cell_text_normalizes_feishu_millisecond_timestamps() -> None:
+    assert _cell_text(1786449600000) == "2026-08-11T12:00:00+00:00"
+
+
+def test_subprocess_json_payload_uses_utf8_file_for_windows_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(
+        command: Sequence[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        json_arg = command[command.index("--json") + 1]
+        assert json_arg.startswith("@")
+        payload_path = Path(json_arg[1:])
+        captured["exists_during_call"] = payload_path.exists()
+        captured["payload"] = json.loads(payload_path.read_text(encoding="utf-8"))
+        return subprocess.CompletedProcess(command, 0, '{"ok":true}', "")
+
+    monkeypatch.setattr("operations.feishu_base.subprocess.run", fake_run)
+    client = FeishuBaseEventClient(_settings(tmp_path))
+
+    assert client._run_subprocess(("base", "+record-upsert", "--json", '{"运行ID":"事件-1"}')) == {
+        "ok": True
+    }
+    assert captured == {
+        "exists_during_call": True,
+        "payload": {"运行ID": "事件-1"},
+    }

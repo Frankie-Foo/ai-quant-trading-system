@@ -28,10 +28,8 @@ from execution.sip_store import SipEventStore
 from execution.time_exit import TimeExitCoordinator, TimeExitLedger
 from kernel.config import load_config
 from operations.feishu_base import FeishuBaseError, FeishuBaseEventClient
-from operations.feishu_investment_events import (
-    record_paper_execution,
-    record_paper_monitor_trigger,
-)
+from operations.feishu_investment_events import record_paper_execution
+from operations.paper_runtime_policy import reject_retired_paper_runtime
 from operations.readiness import MaturityEvidence, assess_product_readiness
 from schedule.runtime import JsonEventLogger, ProcessLock
 
@@ -402,6 +400,7 @@ async def _run(args: argparse.Namespace, logger: JsonEventLogger) -> None:
 
 
 def main() -> int:
+    reject_retired_paper_runtime("centralized-causal-orb")
     args = _parse_args()
     logger = JsonEventLogger(service="paper_session")
     with ProcessLock(args.lock_file):

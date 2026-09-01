@@ -11,20 +11,19 @@ from pathlib import Path
 from typing import Any, cast
 
 import polars as pl
-from dotenv import load_dotenv
 
 from data_plane.calendar import build_xnys_schedule
 from data_plane.contracts import DatasetSnapshot
 from kernel.config import load_config
 from operations.feishu_base import FeishuBaseError, FeishuBaseEventClient
 from operations.feishu_investment_events import record_postmarket_review
-from schedule.child_process import run_child
+from operations.local_env import load_project_env, project_data_root
 from schedule.runtime import JsonEventLogger, LockUnavailableError, ProcessLock
 from schedule.state import JobLedger
 
 ROOT = Path(__file__).resolve().parents[1]
 JOB_NAME = "postmarket_review"
-JOB_VERSION = "postmarket_review.v7"
+JOB_VERSION = "postmarket_review.v9"
 
 
 def _truthy(value: str | None) -> bool:
@@ -65,9 +64,7 @@ def postmarket_due(
         ).market_data.postmarket_data_grace_minutes
     if data_grace_minutes < 0:
         raise ValueError("postmarket data grace must not be negative")
-    return now_utc.astimezone(UTC) >= close + timedelta(
-        minutes=data_grace_minutes
-    )
+    return now_utc.astimezone(UTC) >= close + timedelta(minutes=data_grace_minutes)
 
 
 def _selection_dates(data_root: Path) -> tuple[date, ...]:
@@ -238,6 +235,76 @@ def _run_one(
     if opportunity_review is None:
         raise RuntimeError("accepted intraday selection postmortem was not produced")
 
+    shadow_stdout = _run_module(
+        "scripts.evaluate_strategy_shadow",
+        trade_date,
+        data_root=data_root,
+        logger=logger,
+    )
+    shadow_payload = json.loads(shadow_stdout)
+    if not isinstance(shadow_payload, dict):
+        raise RuntimeError("strategy shadow output was not a JSON object")
+    shadow_dataset_id = shadow_payload.get("dataset_id")
+
+    no_trade_review = _latest_snapshot(
+        data_root,
+        "research.paper_no_trade_review-*/data.parquet",
+        trade_date,
+    )
+    autonomous_root = ROOT / "runs" / "autonomous" / trade_date.isoformat()
+    paper_config = autonomous_root / "autonomous_paper.json"
+    if no_trade_review is None and paper_config.exists():
+        _run_module(
+            "scripts.build_no_trade_review",
+            trade_date,
+            data_root=data_root,
+            logger=logger,
+            extra_args=(
+                "--config",
+                str(paper_config),
+                "--state-db",
+                str(autonomous_root / "paper.sqlite3"),
+            ),
+        )
+        no_trade_review = _latest_snapshot(
+            data_root,
+            "research.paper_no_trade_review-*/data.parquet",
+            trade_date,
+        )
+    if paper_config.exists() and no_trade_review is None:
+        raise RuntimeError("Paper no-trade review snapshot was not produced")
+
+    recovery_decision = _latest_snapshot(
+        data_root,
+        "research.selection_recovery_shadow-*/data.parquet",
+        trade_date,
+    )
+    recovery_outcome = _latest_snapshot(
+        data_root,
+        "research.selection_recovery_shadow_outcomes-*/data.parquet",
+        trade_date,
+    )
+    if recovery_decision is not None and (
+        recovery_outcome is None
+        or recovery_decision.dataset_id not in recovery_outcome.parent_snapshot_ids
+    ):
+        _run_module(
+            "scripts.label_selection_recovery_shadow",
+            trade_date,
+            data_root=data_root,
+            logger=logger,
+        )
+        recovery_outcome = _latest_snapshot(
+            data_root,
+            "research.selection_recovery_shadow_outcomes-*/data.parquet",
+            trade_date,
+        )
+    if recovery_decision is not None and (
+        recovery_outcome is None
+        or recovery_decision.dataset_id not in recovery_outcome.parent_snapshot_ids
+    ):
+        raise RuntimeError("selection recovery outcome was not produced")
+
     pdca_stdout = _run_module(
         "scripts.run_structured_pdca",
         trade_date,
@@ -261,6 +328,9 @@ def _run_one(
         episode.dataset_id,
         review.dataset_id,
         opportunity_review.dataset_id,
+        *((str(shadow_dataset_id),) if shadow_dataset_id else ()),
+        *((no_trade_review.dataset_id,) if no_trade_review is not None else ()),
+        *((recovery_outcome.dataset_id,) if recovery_outcome is not None else ()),
         *extra_artifacts,
     )
 
@@ -268,7 +338,7 @@ def _run_one(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trade-date", type=_parse_date)
-    parser.add_argument("--data-root", type=Path, default=ROOT / "data")
+    parser.add_argument("--data-root", type=Path, default=project_data_root(ROOT))
     parser.add_argument("--state-db", type=Path, default=ROOT / "runs" / "jobs.sqlite3")
     parser.add_argument("--lock-file", type=Path, default=ROOT / "runs" / "postmarket.lock")
     parser.add_argument(
@@ -280,7 +350,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def run(argv: list[str] | None = None) -> int:
-    load_dotenv(ROOT / ".env")
+    load_project_env(ROOT)
     args = _parser().parse_args(argv)
     logger = JsonEventLogger(service="postmarket")
     try:
@@ -295,9 +365,14 @@ def _run_locked(args: argparse.Namespace, logger: JsonEventLogger) -> int:
     now_utc = datetime.now(UTC)
     cfg = load_config(ROOT / "config.yaml")
     data_grace_minutes = cfg.market_data.postmarket_data_grace_minutes
-    candidates = (
-        (args.trade_date,) if args.trade_date is not None else _selection_dates(args.data_root)
-    )
+    candidates: tuple[date, ...]
+    if args.trade_date is not None:
+        candidates = (args.trade_date,)
+        skipped_historical_dates = 0
+    else:
+        available_dates = _selection_dates(args.data_root)
+        candidates = (max(available_dates),) if available_dates else ()
+        skipped_historical_dates = max(0, len(available_dates) - len(candidates))
     due_dates = [
         value
         for value in candidates
@@ -319,6 +394,7 @@ def _run_locked(args: argparse.Namespace, logger: JsonEventLogger) -> int:
         job_version=JOB_VERSION,
         data_grace_minutes=data_grace_minutes,
         llm_mode=args.llm_mode,
+        skipped_historical_dates=skipped_historical_dates,
         orders_submitted=0,
     )
     for trade_date in due_dates:

@@ -10,14 +10,12 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from dotenv import load_dotenv
-
 from data_plane.calendar import build_xnys_schedule
 from execution.locked_selection import load_locked_selection
 from kernel.config import load_config
 from operations.feishu_base import FeishuBaseError, FeishuBaseEventClient
 from operations.feishu_investment_events import record_locked_selection
-from schedule.child_process import run_child
+from operations.local_env import load_project_env, project_data_root
 from schedule.runtime import JsonEventLogger
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,7 +64,7 @@ def paper_session_window(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data-root", type=Path, default=ROOT / "data")
+    parser.add_argument("--data-root", type=Path, default=project_data_root(ROOT))
     parser.add_argument("--sip-db", type=Path, default=ROOT / "runs/sip-stream.sqlite3")
     parser.add_argument(
         "--order-db",
@@ -118,7 +116,7 @@ def _run_child(command: list[str], logger: JsonEventLogger) -> None:
 
 
 def run(argv: list[str] | None = None, *, now_utc: datetime | None = None) -> int:
-    load_dotenv(ROOT / ".env")
+    load_project_env(ROOT)
     args = _parser().parse_args(argv)
     logger = JsonEventLogger(service="paper_scheduler")
     cfg = load_config(ROOT / "config.yaml")

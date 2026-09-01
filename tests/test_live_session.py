@@ -41,6 +41,10 @@ class FakeSessionBroker:
     def submit_order_idempotent(self, request: PaperOrderRequest) -> BrokerOrder:
         raise AssertionError("shadow session must not submit")
 
+    def get_order_by_client_id(self, client_order_id: str) -> BrokerOrder | None:
+        del client_order_id
+        return None
+
 
 def _selection() -> LockedSelection:
     snapshot = DatasetSnapshot(

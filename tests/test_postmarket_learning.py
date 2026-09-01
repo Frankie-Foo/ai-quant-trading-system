@@ -426,6 +426,11 @@ def test_postmarket_pipeline_persists_intraday_opportunity_review(
         "research.intraday_selection_postmortem",
         parents=("universe", "gates"),
     )
+    no_trade = _snapshot(
+        "no-trade",
+        "research.paper_no_trade_review",
+        parents=("episode",),
+    )
     opportunity_lookups = 0
     modules: list[str] = []
 
@@ -443,6 +448,10 @@ def test_postmarket_pipeline_persists_intraday_opportunity_review(
         if pattern.startswith("research.intraday_selection_postmortem"):
             opportunity_lookups += 1
             return opportunity if opportunity_lookups > 1 else None
+        if pattern.startswith("research.paper_no_trade_review"):
+            return no_trade
+        if pattern.startswith("research.selection_recovery_shadow"):
+            return None
         raise AssertionError(pattern)
 
     def fake_run_module(
@@ -471,4 +480,4 @@ def test_postmarket_pipeline_persists_intraday_opportunity_review(
     )
 
     assert "scripts.run_postclose_missed_movers_review" in modules
-    assert artifacts == ("signal", "episode", "program", "opportunity")
+    assert artifacts == ("signal", "episode", "program", "opportunity", "no-trade")

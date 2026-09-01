@@ -57,6 +57,22 @@ def test_recovery_finds_posted_order_and_advances_to_fill(tmp_path: Path) -> Non
     assert ledger.get_broker_order_id(local.client_order_id) == "broker-1"
 
 
+def test_filled_status_requires_full_broker_filled_quantity(tmp_path: Path) -> None:
+    ledger = OrderLedger(tmp_path / "orders.sqlite3")
+    local = _approved(ledger)
+    broker = BrokerOrder(
+        id="broker-1",
+        client_order_id=local.client_order_id,
+        symbol="AAPL",
+        qty=10,
+        filled_qty="5",
+        status="filled",
+    )
+
+    with pytest.raises(ReconciliationError, match="filled quantity"):
+        reconcile_broker_order(ledger, local, broker, at_utc=NOW)
+
+
 def test_reconciliation_rejects_broker_identity_mismatch(tmp_path: Path) -> None:
     ledger = OrderLedger(tmp_path / "orders.sqlite3")
     local = _approved(ledger)

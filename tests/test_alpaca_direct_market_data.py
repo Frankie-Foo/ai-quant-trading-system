@@ -104,6 +104,43 @@ def test_direct_bars_follow_pagination_and_preserve_sip_provenance() -> None:
     assert all("alpaca.sip.rest.bars" in bar.provenance for bar in bars)
 
 
+def test_direct_daily_bars_forward_daily_timeframe() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["timeframe"] == "1Day"
+        assert request.url.params["adjustment"] == "raw"
+        return httpx.Response(
+            200,
+            json={
+                "bars": {
+                    "AAPL": [
+                        {
+                            "t": "2026-07-29T04:00:00Z",
+                            "o": 100.0,
+                            "h": 101.0,
+                            "l": 99.5,
+                            "c": 100.5,
+                            "v": 1000,
+                            "n": 50,
+                            "vw": 0,
+                        }
+                    ]
+                },
+                "next_page_token": None,
+            },
+        )
+
+    bars = _client(handler).fetch_bars(
+        ("AAPL",),
+        start_utc=START.replace(hour=0),
+        end_utc=END.replace(hour=23),
+        timeframe="1Day",
+        adjustment="raw",
+    )
+
+    assert len(bars) == 1
+    assert bars[0].vwap is None
+
+
 def test_direct_quotes_and_trades_are_schema_validated() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/quotes"):
@@ -165,6 +202,30 @@ def test_direct_market_data_errors_are_sanitized() -> None:
     assert "403" in str(captured.value)
 
 
+def test_direct_market_data_retries_transient_connection_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ConnectError("TLS EOF", request=request)
+        return httpx.Response(
+            200,
+            json={"quotes": {"AAPL": []}, "next_page_token": None},
+        )
+
+    monkeypatch.setattr("data_plane.providers.alpaca_direct.time.sleep", lambda _: None)
+    quotes = _client(handler).fetch_quotes(
+        ("AAPL",), start_utc=START, end_utc=END
+    )
+
+    assert quotes == ()
+    assert calls == 2
+
+
 def test_direct_news_is_paginated_bounded_and_symbol_filtered() -> None:
     calls = 0
 
@@ -189,6 +250,17 @@ def test_direct_news_is_paginated_bounded_and_symbol_filtered() -> None:
                             "created_at": "2026-07-29T13:30:30Z",
                             "updated_at": "2026-07-29T13:30:31Z",
                             "url": "https://example.com/101",
+                            "symbols": ["AAPL"],
+                            "source": "benzinga",
+                        },
+                        {
+                            "id": 102,
+                            "headline": "AAPL updated after as-of",
+                            "summary": "This row is not causal at the requested as-of.",
+                            "author": "Desk",
+                            "created_at": "2026-07-29T13:30:30Z",
+                            "updated_at": "2026-07-29T13:32:01Z",
+                            "url": "https://example.com/102",
                             "symbols": ["AAPL"],
                             "source": "benzinga",
                         }

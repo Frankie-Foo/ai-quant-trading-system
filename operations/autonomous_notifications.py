@@ -154,8 +154,7 @@ class AutonomousNotificationLedger:
             raise ValueError("notification identity is incomplete")
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT status FROM autonomous_notifications "
-                "WHERE notification_key=?",
+                "SELECT status FROM autonomous_notifications WHERE notification_key=?",
                 (notification_key,),
             ).fetchone()
             if row is not None:
@@ -190,11 +189,7 @@ class AutonomousNotificationLedger:
         payload: Mapping[str, object],
     ) -> None:
         _require_utc(sent_at_utc)
-        if (
-            not notification_key.strip()
-            or not message_id.strip()
-            or not message_body.strip()
-        ):
+        if not notification_key.strip() or not message_id.strip() or not message_body.strip():
             raise ValueError("notification identity is incomplete")
         payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         with self._connect() as connection:
@@ -279,10 +274,12 @@ class AutonomousPaperNotifier:
         push: PushPort,
         ledger: AutonomousNotificationLedger,
         base: FeishuBasePort | None = None,
+        broker_identity: str = "unknown",
     ):
         self.push = push
         self.ledger = ledger
         self.base = base
+        self.broker_identity = broker_identity.strip() or "unknown"
 
     def notify(
         self,
@@ -292,6 +289,15 @@ class AutonomousPaperNotifier:
         observed_at_utc: datetime,
     ) -> bool:
         _require_utc(observed_at_utc)
+        if result.action not in {
+            SessionAction.ENTRY_SUBMITTED,
+            SessionAction.REDUCE_SUBMITTED,
+            SessionAction.EXIT_SUBMITTED,
+            SessionAction.STOP_EXIT_SUBMITTED,
+            SessionAction.PROTECTION_SUBMITTED,
+            SessionAction.HARD_LOSS_FLATTEN,
+        }:
+            return False
         action_name = self._ACTION_NAMES.get(result.action)
         if action_name is None:
             return False
@@ -307,9 +313,7 @@ class AutonomousPaperNotifier:
                 f"notification delivery is already in flight: {notification_key}"
             )
         daily_return = result.daily_return * 100
-        stop_return = (
-            (plan.hard_stop / plan.reference_price) - 1
-        ) * 100
+        stop_return = ((plan.hard_stop / plan.reference_price) - 1) * 100
         reason_text = "、".join(result.reasons) if result.reasons else "无"
         order_ids = (
             *result.submitted_order_ids,
@@ -345,6 +349,7 @@ class AutonomousPaperNotifier:
                     observed_at_utc=observed_at_utc,
                     action_name=action_name,
                     message=message,
+                    broker_identity=self.broker_identity,
                 )
             except FeishuBaseError as exc:
                 # Base is an audit projection, not an execution dependency.
@@ -395,20 +400,13 @@ def record_push_delivery_health(
             event_identity,
         )
     )
-    source_id = (
-        "livermore-delivery-"
-        + hashlib.sha256(material.encode()).hexdigest()[:24]
-    )
+    source_id = "livermore-delivery-" + hashlib.sha256(material.encode()).hexdigest()[:24]
     write_push_health_evidence(
         path,
         PushHealthEvidence(
             generated_at_utc=observed_at_utc,
             expires_at_utc=observed_at_utc
-            + (
-                timedelta(seconds=45)
-                if healthy
-                else timedelta(minutes=5)
-            ),
+            + (timedelta(seconds=45) if healthy else timedelta(minutes=5)),
             healthy=healthy,
             source_snapshot_id=source_id,
             provenance="operations.autonomous_notifications.delivery.v1",

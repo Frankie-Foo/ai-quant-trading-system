@@ -4,15 +4,17 @@ from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from hashlib import sha256
 
+import pytest
+
 from data_plane.contracts import DatasetSnapshot
 from execution.engine import PaperExecutionResult
 from execution.locked_selection import LockedCandidate, LockedSelection
-from execution.order_state import OrderEvent, OrderLifecycle, OrderState
+from execution.order_state import OrderLifecycle, OrderState
 from kernel.guardrails import GuardrailVerdict
 from operations.feishu_base import InvestmentTable
 from operations.feishu_investment_events import (
     record_locked_selection,
-    record_paper_monitor_trigger,
+    record_paper_execution,
     record_postmarket_review,
 )
 
@@ -93,46 +95,51 @@ def test_postmarket_review_records_all_evidence_once() -> None:
     assert fields["关联交易ID"] == "signal-1|episode-1|program-review-1"
 
 
-def test_paper_state_transition_projects_monitor_event_not_poll() -> None:
-    writer = FakeEventWriter()
-    lifecycle = OrderLifecycle(
-        client_order_id="client-entry-1",
-        plan_id="plan-1",
-        symbol="NVDA",
-        requested_shares=10,
-        state=OrderState.SUBMITTED,
-        events=(
-            OrderEvent(
-                sequence=1,
-                at_utc=NOW,
-                from_state=OrderState.APPROVED,
-                to_state=OrderState.SUBMITTED,
-                filled_shares=0,
-                provenance="execution.engine.paper-submit.v1",
-            ),
+def _filled_result(*, confirmed: bool, price: str | None) -> PaperExecutionResult:
+    return PaperExecutionResult(
+        lifecycle=OrderLifecycle(
+            client_order_id="entry-1",
+            plan_id="plan-1",
+            symbol="AAPL",
+            requested_shares=10,
+            state=OrderState.FILLED,
+            filled_shares=10,
         ),
-    )
-    result = PaperExecutionResult(
-        lifecycle=lifecycle,
         verdict=GuardrailVerdict(approved=True, failure_code=None, checks=()),
         broker_order_id="broker-1",
         dry_run=False,
         replayed=False,
+        filled_avg_price=price,
+        position_confirmed=confirmed,
     )
 
-    record_id = record_paper_monitor_trigger(
+
+def test_filled_trade_projection_requires_broker_and_position_confirmation() -> None:
+    writer = FakeEventWriter()
+
+    with pytest.raises(ValueError, match="confirmation"):
+        record_paper_execution(
+            writer,
+            trade_date=date(2026, 8, 7),
+            observed_at_utc=NOW,
+            result=_filled_result(confirmed=False, price=None),
+        )
+
+    assert writer.events == []
+
+
+def test_confirmed_filled_trade_projection_writes_fill_facts() -> None:
+    writer = FakeEventWriter()
+
+    record_paper_execution(
         writer,
-        trade_date=date(2026, 8, 6),
-        result=result,
+        trade_date=date(2026, 8, 7),
         observed_at_utc=NOW,
+        result=_filled_result(confirmed=True, price="100.25"),
     )
 
-    assert record_id == "rec-1"
-    table, event_id, fields = writer.events[0]
-    assert table is InvestmentTable.MONITOR
-    assert event_id == "monitor:2026-08-06:client-entry-1:1:submitted"
-    assert fields["股票代码"] == "NVDA"
-    assert fields["触发类型"] == "突破"
-    assert fields["模拟动作"] == "买入"
-    assert fields["触发时间"] == NOW
-    assert "轮询" not in str(fields)
+    fields = writer.events[-1][2]
+    assert fields["成交价格"] == "100.25"
+    assert fields["成交金额"] == "1002.50"
+    assert fields["数量"] == 10
+    assert fields["持仓状态"] == "持仓中"

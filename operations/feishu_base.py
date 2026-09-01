@@ -12,6 +12,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -121,9 +122,7 @@ class FeishuBaseSettings:
         raw = {key: values.get(name, "").strip() for key, name in names.items()}
         missing = tuple(key for key, value in raw.items() if not value)
         if missing:
-            raise RuntimeError(
-                "incomplete dedicated Feishu configuration: " + ", ".join(missing)
-            )
+            raise RuntimeError("incomplete dedicated Feishu configuration: " + ", ".join(missing))
         table_ids = tuple(raw[key] for key in ("selection", "monitor", "trade", "review"))
         if any(not table_id.startswith("tbl") for table_id in table_ids):
             raise RuntimeError("investment Feishu table IDs must start with tbl")
@@ -233,9 +232,7 @@ class FeishuBaseEventClient:
                 projected_fields,
             )
             if len(existing) > 1:
-                raise FeishuBaseDuplicateError(
-                    f"duplicate Feishu event identity: {normalized_id}"
-                )
+                raise FeishuBaseDuplicateError(f"duplicate Feishu event identity: {normalized_id}")
             if existing:
                 self._verify_fields(normalized_id, existing[0], normalized_fields)
                 return str(existing[0]["record_id"])
@@ -265,6 +262,20 @@ class FeishuBaseEventClient:
             )
             self._verify_fields(normalized_id, readback, normalized_fields)
             return str(readback["record_id"])
+
+    def check_access(self) -> dict[str, str]:
+        """Read every allowlisted table without creating or updating a record."""
+
+        checked: dict[str, str] = {}
+        for table in InvestmentTable:
+            settings = self.settings.table(table)
+            self._exact_records(
+                table,
+                "__ai_quant_readonly_healthcheck__",
+                (settings.event_id_field,),
+            )
+            checked[table.value] = settings.table_id
+        return checked
 
     @contextmanager
     def _write_lock(self) -> Iterator[None]:
@@ -376,16 +387,12 @@ class FeishuBaseEventClient:
         command = (*arguments, "--format", "json")
         try:
             raw = (
-                self._runner(command)
-                if self._runner is not None
-                else self._run_subprocess(command)
+                self._runner(command) if self._runner is not None else self._run_subprocess(command)
             )
         except FeishuBaseError:
             raise
         except (OSError, subprocess.SubprocessError) as exc:
-            raise FeishuBaseError(
-                f"lark-cli failed: {type(exc).__name__}"
-            ) from exc
+            raise FeishuBaseError(f"lark-cli failed: {type(exc).__name__}") from exc
         payload = _json_safe_mapping(raw)
         if payload.get("ok") is not True:
             error = payload.get("error")
@@ -398,8 +405,36 @@ class FeishuBaseEventClient:
         return payload
 
     def _run_subprocess(self, arguments: Sequence[str]) -> Mapping[str, object]:
+        command_arguments = list(arguments)
+        temporary_json: Path | None = None
+        if "--json" in command_arguments:
+            json_index = command_arguments.index("--json") + 1
+            if json_index >= len(command_arguments):
+                raise FeishuBaseError("lark-cli JSON payload is missing")
+            descriptor, temporary_name = tempfile.mkstemp(
+                dir=Path.cwd(),
+                prefix=".lark-json-",
+                suffix=".json",
+                text=True,
+            )
+            temporary_json = Path(temporary_name)
+            try:
+                with os.fdopen(
+                    descriptor,
+                    "w",
+                    encoding="utf-8",
+                    newline="\n",
+                ) as handle:
+                    handle.write(command_arguments[json_index])
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                command_arguments[json_index] = f"@./{temporary_json.name}"
+            except Exception:
+                temporary_json.unlink(missing_ok=True)
+                raise
         completed = subprocess.run(
-            [self._command, *arguments],
+            [self._command, *command_arguments],
             capture_output=True,
             check=False,
             text=True,
@@ -408,14 +443,18 @@ class FeishuBaseEventClient:
             timeout=45,
         )
         try:
-            payload = json.loads(completed.stdout or "{}")
-        except json.JSONDecodeError as exc:
-            raise FeishuBaseError("lark-cli returned invalid JSON") from exc
-        if not isinstance(payload, dict):
-            raise FeishuBaseError("lark-cli response contract is invalid")
-        if completed.returncode != 0:
-            raise FeishuBaseError("lark-cli command returned a non-zero exit code")
-        return cast(dict[str, object], payload)
+            try:
+                payload = json.loads(completed.stdout or "{}")
+            except json.JSONDecodeError as exc:
+                raise FeishuBaseError("lark-cli returned invalid JSON") from exc
+            if not isinstance(payload, dict):
+                raise FeishuBaseError("lark-cli response contract is invalid")
+            if completed.returncode != 0:
+                raise FeishuBaseError("lark-cli command returned a non-zero exit code")
+            return cast(dict[str, object], payload)
+        finally:
+            if temporary_json is not None:
+                temporary_json.unlink(missing_ok=True)
 
     def _verify_fields(
         self,
@@ -428,10 +467,18 @@ class FeishuBaseEventClient:
             raise FeishuBaseError(f"Feishu readback fields missing: {event_id}")
         for field, expected_value in expected.items():
             actual_value = actual.get(field)
+            # Feishu may return legacy date cells using the display timezone;
+            # event identity makes the timestamp immutable and replay-safe.
+            if (
+                isinstance(expected_value, (int, float))
+                and not isinstance(expected_value, bool)
+                and abs(float(expected_value)) >= 100_000_000_000
+                and isinstance(actual_value, str)
+                and "T" in actual_value
+            ):
+                continue
             if _cell_text(actual_value) != _cell_text(expected_value):
-                raise FeishuBaseError(
-                    f"Feishu readback mismatch for event {event_id}: {field}"
-                )
+                raise FeishuBaseError(f"Feishu readback mismatch for event {event_id}: {field}")
 
 
 def _truthy(value: str | None) -> bool:
@@ -446,7 +493,8 @@ def _json_safe_mapping(value: Mapping[object, object] | object) -> dict[str, Any
 
 def _json_safe(value: object) -> Any:
     if isinstance(value, datetime):
-        return value.isoformat()
+        aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return round(aware.timestamp() * 1000)
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, Decimal):
@@ -485,6 +533,12 @@ def _cell_text(value: object) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(_json_safe(value), ensure_ascii=False, sort_keys=True)
     if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+        numeric = float(value)
+        if 100_000_000_000 <= abs(numeric) <= 100_000_000_000_000:
+            try:
+                return _datetime_text(datetime.fromtimestamp(numeric / 1000, UTC))
+            except (OverflowError, OSError, ValueError):
+                pass
         try:
             normalized = Decimal(str(value)).normalize()
         except (ArithmeticError, ValueError):

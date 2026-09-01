@@ -71,8 +71,9 @@ def reconcile_broker_order(
     status = broker.status.strip().lower()
     filled = _filled_shares(broker)
     if status == "filled":
+        if filled != current.requested_shares:
+            raise ReconciliationError("broker filled status has inconsistent filled quantity")
         target = OrderState.FILLED
-        filled = current.requested_shares
     elif status == "partially_filled":
         target = OrderState.PARTIALLY_FILLED
     elif status in CANCELLED_STATUSES:

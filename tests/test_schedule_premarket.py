@@ -8,8 +8,7 @@ import pytest
 
 from operations.feishu_base import FeishuBaseEventClient
 from schedule import premarket
-from schedule.premarket import phase_times, target_for_tick
-from schedule.runtime import JsonEventLogger
+from schedule.premarket import phase_times, recovery_due, target_for_tick
 from schedule.state import JobLedger, JobStatus
 
 
@@ -26,6 +25,12 @@ def test_tick_resolves_current_session_after_lock_and_none_before() -> None:
     # Monday lock is not yet due during Sunday Beijing daytime.
     assert target_for_tick(datetime(2026, 7, 19, 4, 0, tzinfo=UTC)) == date(
         2026, 7, 17
+    )
+
+
+def test_recovery_shadow_waits_for_six_complete_five_minute_bars() -> None:
+    assert recovery_due(date(2026, 7, 21)) == datetime(
+        2026, 7, 21, 14, 5, tzinfo=UTC
     )
 
 

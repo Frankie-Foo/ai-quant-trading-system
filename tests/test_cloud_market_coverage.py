@@ -35,10 +35,14 @@ def test_alpaca_direct_is_default_market_data_provider(
             *,
             start_utc: datetime,
             end_utc: datetime,
+            timeframe: str = "1Min",
+            adjustment: str = "split",
         ) -> tuple[SipBar, ...]:
             assert symbols == ("AAPL",)
             assert start_utc == START
             assert end_utc == END
+            assert timeframe == "1Min"
+            assert adjustment == "split"
             return (
                 SipBar(
                     symbol="AAPL",

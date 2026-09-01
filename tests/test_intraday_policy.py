@@ -495,7 +495,7 @@ def test_no_new_position_can_be_authorized_after_1200_et() -> None:
     assert decision.blockers == ("new_entries_cutoff_reached",)
 
 
-def test_all_positions_exit_at_1300_et() -> None:
+def test_all_positions_exit_at_1200_et() -> None:
     observed = datetime(2026, 7, 29, 17, 0, tzinfo=UTC)
     metric_time = observed - timedelta(seconds=1)
     decision = IntradayPolicy().evaluate(
@@ -523,7 +523,7 @@ def test_all_positions_exit_at_1300_et() -> None:
 
     assert decision.action is PolicyAction.EXIT
     assert decision.target_position_fraction == 0.0
-    assert decision.reasons == ("intraday_force_exit_1300",)
+    assert decision.reasons == ("intraday_force_exit_1200",)
 
 
 def test_standard_right_tail_score_trims_main_position_to_twenty_percent() -> None:
