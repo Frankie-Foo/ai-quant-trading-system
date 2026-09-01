@@ -115,6 +115,8 @@ def test_windows_observation_tasks_cover_all_daily_phases_without_order_flags() 
     )
     assert legacy_paper_registration not in installer
     assert "Trading System V2 - Postmarket Review" in installer
+    assert "Trading System V2 - Monthly Evolution" in installer
+    assert "Trading System V2 - Research Cycle" in installer
     assert "MultipleInstances IgnoreNew" in installer
     assert "schedule.premarket" in premarket
     assert "prepare_autonomous_selection_handoff" not in premarket
@@ -132,12 +134,20 @@ def test_windows_funnel_runner_uses_explicit_machine_runtime_dependencies() -> N
     funnel = (ROOT / "scripts/run_modern_funnel_tick.ps1").read_text(encoding="utf-8")
     postmarket = (ROOT / "scripts/run_postmarket_tick.ps1").read_text(encoding="utf-8")
 
-    for parameter in ("PythonPath", "EnvironmentFile", "DataRoot"):
+    for parameter in (
+        "PythonPath",
+        "EnvironmentFile",
+        "DataRoot",
+        "ActivePolicyFile",
+        "ChallengerPolicyFile",
+    ):
         assert parameter in installer
         assert parameter in funnel
         assert parameter in postmarket
     assert "AI_QUANT_RUNTIME_ENV_FILE" in funnel + postmarket
     assert "AI_QUANT_DATA_ROOT" in funnel + postmarket
+    assert "AI_QUANT_ACTIVE_POLICY_FILE" in funnel + postmarket
+    assert "AI_QUANT_CHALLENGER_POLICY_FILE" in funnel + postmarket
     assert "ArmPaper" in installer + funnel
     assert "AI_QUANT_PAPER_RUNTIME_CONFIRMED" in funnel
     assert "AI_QUANT_PAPER_SMOKE_MAX_NOTIONAL" in funnel

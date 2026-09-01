@@ -269,11 +269,33 @@ def test_protected_entry_is_a_marketable_limit_bracket_with_three_r_target() -> 
     }
 
 
+def test_protected_entry_allows_a_point_two_percent_immediate_spread() -> None:
+    now = datetime(2026, 8, 24, 14, 0, tzinfo=UTC)
+
+    request = build_protected_entry(
+        client_order_id="mm-20260824-AAPL-entry-wide",
+        symbol="AAPL",
+        qty=10,
+        signal_reference=Decimal("100.00"),
+        structural_stop=Decimal("98.50"),
+        quote=FreshNbboQuote(
+            symbol="AAPL",
+            bid=Decimal("100.00"),
+            ask=Decimal("100.20"),
+            asof_utc=now - timedelta(milliseconds=100),
+            feed="sip",
+        ),
+        observed_at_utc=now,
+    )
+
+    assert request.limit_price == "100.20"
+
+
 @pytest.mark.parametrize(
     ("bid", "ask", "age_seconds", "feed", "message"),
     [
         ("99.80", "100.05", 0.1, "sip", "spread"),
-        ("100.10", "100.11", 0.1, "sip", "slippage"),
+        ("100.25", "100.26", 0.1, "sip", "slippage"),
         ("100.00", "100.05", 3.0, "sip", "stale"),
         ("100.00", "100.05", 0.1, "iex", "SIP"),
     ],
@@ -537,6 +559,7 @@ def test_direct_adapter_submits_protected_entry_as_one_bracket() -> None:
                         "status": "held",
                         "side": "sell",
                         "type": "stop",
+                        "legs": None,
                     }
                 ],
             },

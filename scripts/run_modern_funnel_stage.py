@@ -22,6 +22,7 @@ from data_plane.calendar import build_xnys_schedule
 from data_plane.contracts import DataQualityCheck, DatasetSnapshot, QualitySeverity
 from data_plane.providers.alpaca import fetch_bars, fetch_quotes
 from data_plane.storage import persist_snapshot
+from kernel.strategy_policy import load_strategy_policy
 from operations.autonomous_notifications import AutonomousNotificationLedger
 from operations.autonomous_selection_handoff import (
     create_open_confirmation,
@@ -36,7 +37,8 @@ from scripts.monitor_modern_momentum_forward import SOURCE, _latest_pool
 
 ROOT = Path(__file__).resolve().parents[1]
 EASTERN = ZoneInfo("America/New_York")
-MAX_SPREAD = 0.001
+MAX_SECOND_WAVE_SPREAD = 0.003
+MAX_SECOND_WAVE_HARD_SPREAD = 0.01
 MIN_PREMARKET_DOLLAR_VOLUME = 1_000_000.0
 MIN_OPEN_DOLLAR_VOLUME = 1_000_000.0
 STRATEGY_VERSION = "modern-h15.v1"
@@ -49,6 +51,41 @@ CATALYST_LABELS = {
     "general_news": "行业消息",
 }
 CRYPTO_NEWS_SYMBOLS = {"COIN", "MSTR"}
+
+
+def _strategy_context(candidates: list[dict[str, object]]) -> dict[str, object]:
+    active_path = os.getenv("AI_QUANT_ACTIVE_POLICY_FILE", "").strip()
+    if not active_path:
+        return {
+            "active_version": STRATEGY_VERSION,
+            "active_policy_hash": None,
+            "challenger": None,
+        }
+    active = load_strategy_policy(active_path, required_status="active")
+    context: dict[str, object] = {
+        "active_version": active.version,
+        "active_policy_hash": active.policy_hash,
+        "challenger": None,
+    }
+    challenger_path = os.getenv("AI_QUANT_CHALLENGER_POLICY_FILE", "").strip()
+    if not challenger_path or not Path(challenger_path).is_file():
+        return context
+    challenger = load_strategy_policy(challenger_path, required_status="shadow")
+    if challenger.previous_version != active.version or challenger.min_rvol <= active.min_rvol:
+        raise RuntimeError("challenger does not match the active strategy baseline")
+    symbols = [
+        str(row["symbol"])
+        for row in candidates
+        if _first_wave_number(row, "rvol") > challenger.min_rvol
+    ]
+    context["challenger"] = {
+        "version": challenger.version,
+        "policy_hash": challenger.policy_hash,
+        "min_rvol": challenger.min_rvol,
+        "symbols": symbols,
+        "execution_eligible": False,
+    }
+    return context
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -196,7 +233,7 @@ def _open_plan_lines(candidates: list[dict[str, object]]) -> tuple[str, ...]:
             (
                 f"{symbol} 预案：09:56 ET后，完整5分钟K突破H15且位于上升VWAP上方，"
                 "MACD为正并增强、成交量确认后才允许入场；",
-                "参考入场：触发时最新SIP卖价，实际点差与滑点合计不得超过0.10%；",
+                "参考入场：触发时最新SIP卖价，实际点差和滑点分别不得超过0.25%；",
                 "失效/止损：跌回H15、失守VWAP或更高低点；含滑点全包止损不超过2%；",
                 "止盈/退出：3R目标或趋势退出；15:00后禁止新仓，15:50前全部清仓；",
                 "仓位：按账户风险动态反算，单票0.5%、板块0.75%、组合1.5%，"
@@ -219,6 +256,7 @@ def _selection_event_fields(
     row: dict[str, object],
     kept: bool,
     observed_at_utc: datetime,
+    strategy_version: str = STRATEGY_VERSION,
 ) -> dict[str, object]:
     symbol = str(row["symbol"])
     event_id = f"funnel:{trade_date.isoformat()}:{stage.value}:{symbol}"
@@ -244,7 +282,7 @@ def _selection_event_fields(
         "触发理由": _candidate_reason(row),
         "下一动作": next_action,
         "执行摘要": execution_summary,
-        "策略版本": STRATEGY_VERSION,
+        "策略版本": strategy_version,
         "数据源状态": "alpaca.sip|production=false",
     }
 
@@ -263,7 +301,7 @@ def evaluate_second_wave(
     bars: pl.DataFrame,
     quotes: pl.DataFrame,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Apply observable 09:25 liquidity and acceptance gates to the frozen pool."""
+    """Keep a liquid 09:25 watchlist; defer soft price acceptance to 09:35."""
 
     symbols = tuple(str(row["symbol"]) for row in candidates)
     last_bars = _latest_rows(bars, symbols)
@@ -275,43 +313,99 @@ def evaluate_second_wave(
         symbol_bars = bars.filter(pl.col("symbol") == symbol)
         bar = last_bars.get(symbol)
         quote = last_quotes.get(symbol)
-        reasons: list[str] = []
+        hard_reasons: list[str] = []
+        watch_reasons: list[str] = []
         if bar is None or quote is None or symbol_bars.is_empty():
-            reasons.append("Alpaca SIP盘前行情不完整")
+            hard_reasons.append("Alpaca SIP盘前行情不完整")
         else:
-            bid = float(quote["bid_price"])
-            ask = float(quote["ask_price"])
-            midpoint = (bid + ask) / 2
-            spread = (ask - bid) / midpoint if midpoint > 0 else float("inf")
-            volume = float(symbol_bars["volume"].sum())
-            dollar_volume = float(
-                (symbol_bars["close"] * symbol_bars["volume"]).sum()
+            raw_closes = symbol_bars["close"].to_list()
+            raw_volumes = symbol_bars["volume"].to_list()
+            invalid_bar = any(
+                value is None
+                or not math.isfinite(float(value))
+                or float(value) <= 0
+                for value in (*raw_closes, *raw_volumes)
             )
-            vwap = dollar_volume / volume if volume > 0 else 0.0
-            close = float(bar["close"])
-            if spread > MAX_SPREAD:
-                reasons.append(f"点差{spread:.2%}超过0.10%")
-            if dollar_volume < MIN_PREMARKET_DOLLAR_VOLUME:
-                reasons.append("盘前成交额不足100万美元")
-            if close <= vwap:
-                reasons.append("最新价未站上盘前VWAP")
-            candidate = {
-                **candidate,
-                "observed_price": close,
-                "observed_vwap": vwap,
-                "observed_spread": spread,
-                "observed_dollar_volume": dollar_volume,
-            }
-        result = {**candidate, "reasons": reasons or ["量价、VWAP、点差和流动性通过"]}
-        (rejected if reasons else kept).append(result)
+            if invalid_bar:
+                hard_reasons.append("Alpaca SIP盘前行情数值无效")
+                result = {
+                    **candidate,
+                    "watch_reasons": watch_reasons,
+                    "watch_warning_count": 0,
+                    "reasons": hard_reasons,
+                }
+                rejected.append(result)
+                continue
+            try:
+                bid = float(quote["bid_price"])
+                ask = float(quote["ask_price"])
+                volume = float(symbol_bars["volume"].sum())
+                dollar_volume = float(
+                    (symbol_bars["close"] * symbol_bars["volume"]).sum()
+                )
+                close = float(bar["close"])
+            except (TypeError, ValueError):
+                hard_reasons.append("Alpaca SIP盘前行情数值无效")
+            else:
+                values = (bid, ask, volume, dollar_volume, close)
+                if (
+                    not all(math.isfinite(value) for value in values)
+                    or bid <= 0
+                    or ask < bid
+                    or volume <= 0
+                    or dollar_volume <= 0
+                    or close <= 0
+                ):
+                    hard_reasons.append("Alpaca SIP盘前行情数值无效")
+                else:
+                    midpoint = (bid + ask) / 2
+                    spread = (ask - bid) / midpoint
+                    vwap = dollar_volume / volume
+                    if spread > MAX_SECOND_WAVE_HARD_SPREAD:
+                        hard_reasons.append(
+                            f"点差{spread:.2%}超过观察上限"
+                            f"{MAX_SECOND_WAVE_HARD_SPREAD:.2%}"
+                        )
+                    elif spread >= MAX_SECOND_WAVE_SPREAD:
+                        watch_reasons.append(
+                            f"盘前点差{spread:.2%}偏宽，09:35及入场前复核"
+                        )
+                    if dollar_volume < MIN_PREMARKET_DOLLAR_VOLUME:
+                        hard_reasons.append("盘前成交额不足100万美元")
+                    if close <= vwap:
+                        watch_reasons.append("暂未站上盘前VWAP，等待开盘确认")
+                    candidate = {
+                        **candidate,
+                        "observed_price": close,
+                        "observed_vwap": vwap,
+                        "observed_spread": spread,
+                        "observed_dollar_volume": dollar_volume,
+                    }
+        reasons = hard_reasons + watch_reasons
+        result = {
+            **candidate,
+            "watch_reasons": watch_reasons,
+            "watch_warning_count": len(watch_reasons),
+            "reasons": reasons or ["盘前量价、点差和流动性通过"],
+        }
+        (rejected if hard_reasons else kept).append(result)
     kept.sort(
         key=lambda row: (
+            -_number(row.get("watch_warning_count", 0)),
             _number(row.get("observed_dollar_volume", 0)),
             _number(row.get("premarket_return", 0)),
         ),
         reverse=True,
     )
-    return kept[:6], rejected + kept[6:]
+    selected = kept[:6]
+    capacity_rejected = [
+        {
+            **row,
+            "reasons": [f"观察池容量落选（排序第{rank}，上限6只）"],
+        }
+        for rank, row in enumerate(kept[6:], start=7)
+    ]
+    return selected, rejected + capacity_rejected
 
 
 def evaluate_open_confirmation(
@@ -426,6 +520,7 @@ def _publish_stage(
     candidates: list[dict[str, object]],
     rejected: list[dict[str, object]],
     state_root: Path,
+    strategy_version: str = STRATEGY_VERSION,
 ) -> tuple[tuple[str, ...], str]:
     base = FeishuBaseEventClient.from_environment(os.environ)
     if base is None:
@@ -444,6 +539,7 @@ def _publish_stage(
                 row=row,
                 kept=kept,
                 observed_at_utc=now,
+                strategy_version=strategy_version,
             ),
         )
         for row, kept in stage_rows
@@ -502,24 +598,35 @@ def _first_wave(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
         if not isinstance(raw_rows, list):
             raise ValueError("first-wave retry artifact is invalid")
         rows = raw_rows
+        strategy_context = existing.get("strategy_context")
+        if not isinstance(strategy_context, dict):
+            if os.getenv("AI_QUANT_ACTIVE_POLICY_FILE", "").strip():
+                raise RuntimeError(
+                    "legacy first-wave artifact cannot be replayed under a governed policy"
+                )
+            strategy_context = _strategy_context(rows)
     else:
         _run_module("schedule.premarket", args.trade_date, args.data_root)
         _run_module("scripts.prepare_modern_momentum_forward", args.trade_date, args.data_root)
         pool = _latest_pool(args.data_root, args.trade_date)
         rows = pool.to_dicts()
+        strategy_context = _strategy_context(rows)
         payload: dict[str, object] = {
-            "schema_version": "modern_funnel.first_wave.v1",
+            "schema_version": "modern_funnel.first_wave.v2",
             "trade_date": args.trade_date.isoformat(),
             "generated_at_utc": datetime.now(UTC),
             "candidates": rows,
+            "strategy_context": strategy_context,
         }
         _write_json(path, payload)
+    strategy_version = str(strategy_context.get("active_version", STRATEGY_VERSION))
     record_ids, message_id = _publish_stage(
         trade_date=args.trade_date,
         stage=FunnelStage.FIRST_WAVE,
         candidates=rows,
         rejected=[],
         state_root=args.state_root,
+        strategy_version=strategy_version,
     )
     return _receipt(path, record_ids, message_id)
 
@@ -536,6 +643,10 @@ def _second_wave(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
     candidates = source.get("candidates")
     if not isinstance(candidates, list) or not candidates:
         raise ValueError("first-wave candidates are missing")
+    strategy_context = source.get("strategy_context")
+    if not isinstance(strategy_context, dict):
+        strategy_context = _strategy_context(candidates)
+    strategy_version = str(strategy_context.get("active_version", STRATEGY_VERSION))
     path = day_root / "second_wave_pool.json"
     if path.exists():
         existing = _read_json(path)
@@ -558,6 +669,7 @@ def _second_wave(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
             "generated_at_utc": now,
             "candidates": kept,
             "rejected": rejected,
+            "strategy_context": strategy_context,
         }
         _write_json(path, payload)
     record_ids, message_id = _publish_stage(
@@ -566,6 +678,7 @@ def _second_wave(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
         candidates=kept,
         rejected=rejected,
         state_root=args.state_root,
+        strategy_version=strategy_version,
     )
     return _receipt(path, record_ids, message_id)
 
@@ -616,11 +729,16 @@ def _freeze_final_pool(
     return snapshot.assert_usable()
 
 
-def _plan_payload(trade_date: date, rows: list[dict[str, object]]) -> dict[str, object]:
+def _plan_payload(
+    trade_date: date,
+    rows: list[dict[str, object]],
+    *,
+    strategy_version: str = STRATEGY_VERSION,
+) -> dict[str, object]:
     return {
         "schema_version": "modern_h15_paper_plan.v1",
         "trade_date": trade_date.isoformat(),
-        "strategy_version": STRATEGY_VERSION,
+        "strategy_version": strategy_version,
         "paper_only": True,
         "entry_after_et": "09:56",
         "new_entry_cutoff_et": "15:00",
@@ -682,10 +800,7 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
     if confirmation_path.exists():
         confirmation = load_open_confirmation(confirmation_path)
         authorization = confirmation.authorization
-        if (
-            authorization.trade_date != args.trade_date
-            or authorization.strategy_version != STRATEGY_VERSION
-        ):
+        if authorization.trade_date != args.trade_date:
             raise RuntimeError("existing open confirmation does not match this stage")
         paper_pid = _launch_paper_if_confirmed(args.trade_date, confirmation_path)
         record_ids = tuple(authorization.feishu_record_id.split(","))
@@ -701,7 +816,15 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
             "paper_pid": str(paper_pid or ""),
         }
 
-    source = _read_json(day_root / "second_wave_pool.json")
+    frozen_source = _read_json(day_root / "second_wave_pool.json")
+    strategy_context = frozen_source.get("strategy_context")
+    if not isinstance(strategy_context, dict):
+        raw_candidates = frozen_source.get("candidates", [])
+        if not isinstance(raw_candidates, list):
+            raise ValueError("second-wave candidates are missing")
+        strategy_context = _strategy_context(raw_candidates)
+    strategy_version = str(strategy_context.get("active_version", STRATEGY_VERSION))
+    source = frozen_source
     candidates = source.get("candidates")
     if not isinstance(candidates, list):
         raise ValueError("second-wave candidates are missing")
@@ -715,6 +838,7 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
             candidates=[],
             rejected=prior_rejected,
             state_root=args.state_root,
+            strategy_version=strategy_version,
         )
         path = day_root / "open_no_trade.json"
         _write_json(
@@ -723,6 +847,7 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
                 "schema_version": "modern_funnel.no_trade.v1",
                 "trade_date": args.trade_date.isoformat(),
                 "reason": "第二波无候选",
+                "strategy_context": strategy_context,
             },
         )
         return _receipt(path, record_ids, message_id)
@@ -747,6 +872,7 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
                 "generated_at_utc": datetime.now(UTC),
                 "candidates": kept,
                 "rejected": rejected,
+                "strategy_context": strategy_context,
             },
         )
     record_ids, message_id = _publish_stage(
@@ -755,6 +881,7 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
         candidates=kept,
         rejected=rejected,
         state_root=args.state_root,
+        strategy_version=strategy_version,
     )
     if not kept:
         path = day_root / "open_no_trade.json"
@@ -765,13 +892,17 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
                 "trade_date": args.trade_date.isoformat(),
                 "reason": "开盘确认无标的通过",
                 "rejected": rejected,
+                "strategy_context": strategy_context,
             },
         )
         return _receipt(path, record_ids, message_id)
     final_symbols = tuple(str(row["symbol"]) for row in kept)
     snapshot = _freeze_final_pool(args.data_root, args.trade_date, final_symbols)
     plan_path = day_root / "modern_h15_paper_plan.json"
-    _write_json(plan_path, _plan_payload(args.trade_date, kept))
+    _write_json(
+        plan_path,
+        _plan_payload(args.trade_date, kept, strategy_version=strategy_version),
+    )
     authorization = create_open_confirmation(
         confirmation_path=confirmation_path,
         config_path=plan_path,
@@ -780,7 +911,7 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
         candidate_pool=final_symbols,
         feishu_record_ids=record_ids,
         livermore_message_id=message_id,
-        strategy_version=STRATEGY_VERSION,
+        strategy_version=strategy_version,
         generated_at_utc=datetime.now(UTC),
     )
     paper_pid = _launch_paper_if_confirmed(

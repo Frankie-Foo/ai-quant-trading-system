@@ -21,7 +21,10 @@ $env:AI_QUANT_DATA_ROOT = $sharedData
 $env:AI_QUANT_ACTIVE_POLICY_FILE = $activePolicy
 $env:AI_QUANT_CHALLENGER_POLICY_FILE = $challengerPolicy
 $env:AI_QUANT_PAPER_RUNTIME_CONFIRMED = "false"
-& $python -m schedule.postmarket `
-    1>> (Join-Path $runs "postmarket_scheduler.out.log") `
-    2>> (Join-Path $runs "postmarket_scheduler.err.log")
+& $python -m schedule.research_cycle `
+    --data-root $sharedData `
+    --state-root $runs `
+    --lock-file (Join-Path $runs "research-cycle.lock") `
+    1>> (Join-Path $runs "research_cycle.out.log") `
+    2>> (Join-Path $runs "research_cycle.err.log")
 exit $LASTEXITCODE

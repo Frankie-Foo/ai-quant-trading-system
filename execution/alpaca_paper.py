@@ -11,6 +11,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 PLATFORM_API_VERSION = "v1"
+MAXIMUM_PAPER_ENTRY_SPREAD_OR_SLIPPAGE = Decimal("0.0025")
 
 
 class BrokerError(RuntimeError):
@@ -59,6 +60,11 @@ class BrokerOrder(FrozenModel):
     side: str | None = None
     order_type: str | None = Field(default=None, alias="type")
     legs: tuple[BrokerOrder, ...] = ()
+
+    @field_validator("legs", mode="before")
+    @classmethod
+    def normalize_null_legs(cls, value: object) -> object:
+        return () if value is None else value
 
     @field_validator("symbol")
     @classmethod
@@ -172,7 +178,7 @@ def build_protected_entry(
     structural_stop: Decimal,
     quote: FreshNbboQuote,
     observed_at_utc: datetime,
-    maximum_spread_or_slippage: Decimal = Decimal("0.001"),
+    maximum_spread_or_slippage: Decimal = MAXIMUM_PAPER_ENTRY_SPREAD_OR_SLIPPAGE,
     maximum_quote_age_seconds: Decimal = Decimal("2"),
     maximum_all_in_stop: Decimal = Decimal("0.02"),
     stop_slippage_reserve: Decimal = Decimal("0"),
@@ -193,12 +199,13 @@ def build_protected_entry(
         raise ValueError("immediate NBBO is stale")
     midpoint = (quote.bid + quote.ask) / Decimal(2)
     spread = (quote.ask - quote.bid) / midpoint
+    spread_limit = f"{maximum_spread_or_slippage:.2%}"
     if spread > maximum_spread_or_slippage:
-        raise ValueError("immediate NBBO spread exceeds 0.10%")
+        raise ValueError(f"immediate NBBO spread exceeds {spread_limit}")
     if signal_reference <= 0 or quote.ask > signal_reference * (
         Decimal(1) + maximum_spread_or_slippage
     ):
-        raise ValueError("immediate NBBO slippage exceeds 0.10%")
+        raise ValueError(f"immediate NBBO slippage exceeds {spread_limit}")
     if structural_stop <= 0 or structural_stop >= quote.ask:
         raise ValueError("protective stop must be below the entry ask")
     all_in_stop = (quote.ask - structural_stop) / quote.ask + stop_slippage_reserve

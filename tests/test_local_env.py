@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -71,3 +72,57 @@ def test_load_project_env_accepts_an_explicit_machine_runtime_file(
 
     assert os.environ["FEISHU_INVESTMENT_BASE_TOKEN"] == "dedicated-base"
     assert project_data_root(project) == Path("D:/shared/ai-quant/data")
+
+
+def test_market_data_credentials_are_loaded_only_after_2100_beijing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    sip_env = tmp_path / "gary.env"
+    sip_env.write_text(
+        "ALPACA_API_KEY=sip-key\n"
+        "ALPACA_SECRET_KEY=sip-secret\n"
+        "ALPACA_DATA_URL=https://data.alpaca.markets\n"
+        "FINNHUB_API_KEY=finnhub-key\n"
+        "ALPHAVANTAGE_API_KEY=alpha-vantage-key\n",
+        encoding="utf-8",
+    )
+    (project / ".env").write_text(
+        f"ALPACA_ENV_FILE={tmp_path / 'missing.env'}\n"
+        f"ALPACA_SIP_ENV_FILE={sip_env}\n",
+        encoding="utf-8",
+    )
+    for name in (
+        "ALPACA_ENV_FILE",
+        "ALPACA_SIP_ENV_FILE",
+        "ALPACA_API_KEY_ID",
+        "ALPACA_API_SECRET_KEY",
+        "ALPACA_API_KEY",
+        "ALPACA_SECRET_KEY",
+        "APCA_API_KEY_ID",
+        "APCA_API_SECRET_KEY",
+        "ALPACA_PAPER_KEY_ID",
+        "ALPACA_PAPER_SECRET_KEY",
+        "ALPACA_DATA_URL",
+        "FINNHUB_API_KEY",
+        "ALPHAVANTAGE_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ALPACA_ENV_FILE", str(tmp_path / "missing.env"))
+    monkeypatch.setenv("ALPACA_SIP_ENV_FILE", str(sip_env))
+
+    load_project_env(project, now_utc=datetime(2026, 8, 31, 12, 59, tzinfo=UTC))
+    assert "ALPACA_API_KEY_ID" not in os.environ
+    assert "FINNHUB_API_KEY" not in os.environ
+    assert "ALPHAVANTAGE_API_KEY" not in os.environ
+
+    load_project_env(project, now_utc=datetime(2026, 8, 31, 13, 0, tzinfo=UTC))
+    assert os.environ["ALPACA_API_KEY_ID"] == "sip-key"
+    assert os.environ["ALPACA_API_SECRET_KEY"] == "sip-secret"
+    assert os.environ["ALPACA_DATA_URL"] == "https://data.alpaca.markets"
+    assert "ALPACA_PAPER_KEY_ID" not in os.environ
+    assert "ALPACA_PAPER_SECRET_KEY" not in os.environ
+    assert os.environ["FINNHUB_API_KEY"] == "finnhub-key"
+    assert os.environ["ALPHAVANTAGE_API_KEY"] == "alpha-vantage-key"

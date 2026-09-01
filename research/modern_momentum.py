@@ -19,7 +19,7 @@ class ModernMomentumConfig:
     target_r: float = 3.0
     max_all_in_stop_pct: float = 0.02
     relative_spread: float = 0.001
-    maximum_entry_relative_spread: float = 0.001
+    maximum_entry_relative_spread: float = 0.0025
     market_impact_pct: float = 0.0002
     stop_slippage_reserve_pct: float = 0.005
     signal_cutoff_minutes: int = 180

@@ -71,7 +71,7 @@ def test_modern_momentum_rejects_wide_structural_stop() -> None:
     assert trade is None
 
 
-def test_modern_momentum_rejects_entry_spread_above_ten_basis_points() -> None:
+def test_modern_momentum_rejects_entry_spread_above_twenty_five_basis_points() -> None:
     opened = datetime(2026, 8, 17, 13, 30, tzinfo=UTC)
 
     trade = evaluate_modern_momentum(
@@ -81,10 +81,26 @@ def test_modern_momentum_rejects_entry_spread_above_ten_basis_points() -> None:
         market_cap=2_000_000_000,
         premarket_rvol=2.0,
         config=ModernMomentumConfig(),
-        relative_spread=0.0011,
+        relative_spread=0.0026,
     )
 
     assert trade is None
+
+
+def test_modern_momentum_allows_entry_spread_at_twenty_five_basis_points() -> None:
+    opened = datetime(2026, 8, 17, 13, 30, tzinfo=UTC)
+
+    trade = evaluate_modern_momentum(
+        _bars(),
+        session_open_utc=opened,
+        prior_close=96.0,
+        market_cap=2_000_000_000,
+        premarket_rvol=2.0,
+        config=ModernMomentumConfig(),
+        relative_spread=0.0025,
+    )
+
+    assert trade is not None
 
 
 def test_modern_momentum_reentry_waits_for_three_completed_five_minute_bars() -> None:

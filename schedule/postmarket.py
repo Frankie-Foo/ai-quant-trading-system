@@ -242,6 +242,17 @@ def _run_one(
     if opportunity_review is None:
         raise RuntimeError("accepted intraday selection postmortem was not produced")
 
+    shadow_stdout = _run_module(
+        "scripts.evaluate_strategy_shadow",
+        trade_date,
+        data_root=data_root,
+        logger=logger,
+    )
+    shadow_payload = json.loads(shadow_stdout)
+    if not isinstance(shadow_payload, dict):
+        raise RuntimeError("strategy shadow output was not a JSON object")
+    shadow_dataset_id = shadow_payload.get("dataset_id")
+
     no_trade_review = _latest_snapshot(
         data_root,
         "research.paper_no_trade_review-*/data.parquet",
@@ -324,6 +335,7 @@ def _run_one(
         episode.dataset_id,
         review.dataset_id,
         opportunity_review.dataset_id,
+        *((str(shadow_dataset_id),) if shadow_dataset_id else ()),
         *((no_trade_review.dataset_id,) if no_trade_review is not None else ()),
         *((recovery_outcome.dataset_id,) if recovery_outcome is not None else ()),
         *extra_artifacts,

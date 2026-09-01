@@ -16,3 +16,12 @@
 - Made Windows funnel installation work across Git worktrees by explicitly pinning the
   Python interpreter, machine environment file and shared data root; installed the
   one-minute Paper-only funnel and retired the duplicate Codex heartbeat.
+- Separated the 09:25 observation spread cap (0.30%) from the actual Paper entry guard
+  (0.25%), so wider quotes do not erase the candidate pool prematurely while immediate
+  SIP NBBO and slippage checks still fail closed.
+- Connected postmarket Memory to an allowlisted, versioned strategy loop with OOS
+  challenger creation, daily no-order shadow evaluation, a 20-session human promotion
+  gate, atomic history and verified rollback. Automated jobs cannot change active policy.
+- Changed 09:25 from a final-entry gate into a true observation funnel: sub-VWAP prices
+  and 0.30%-1.00% premarket spreads are yellow flags, while missing SIP data, insufficient
+  dollar volume, and spreads above 1.00% remain hard rejects. Paper entry stays at 0.25%.

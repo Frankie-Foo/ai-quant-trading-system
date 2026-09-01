@@ -370,3 +370,22 @@ and confirms the winner once on an untouched fifth holdout. It automatically rec
 new research champion or retains the baseline. The decision always has
 `production_eligible=false`: agents can propose hypotheses, but neither an agent nor the
 sandbox can silently modify the execution kernel or authorize capital.
+
+The loop is connected end to end. `runs/strategy/active.json` is the only policy
+allowed to affect selection; `runs/strategy/challenger.json` is shadow-only and cannot
+submit orders. Promotion requires at least 20 complete shadow sessions, no worse
+precision, at least 50% opportunity-capture retention, and an explicit human approver.
+Monthly jobs may build a challenger but cannot approve it. Every promotion archives the
+prior policy for hash-verified rollback.
+
+```powershell
+python -m scripts.manage_strategy_policy status --active runs/strategy/active.json `
+  --challenger runs/strategy/challenger.json
+python -m scripts.manage_strategy_policy approve --active runs/strategy/active.json `
+  --challenger runs/strategy/challenger.json --data-root data `
+  --history-dir runs/strategy/history --approved-by Frank `
+  --confirm-policy-hash <reviewed-challenger-hash>
+python -m scripts.manage_strategy_policy rollback --active runs/strategy/active.json `
+  --history-dir runs/strategy/history --target-version <verified-version> `
+  --approved-by Frank
+```

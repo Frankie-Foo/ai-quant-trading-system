@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from datetime import UTC, datetime, time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from dotenv import dotenv_values, load_dotenv
 from pydantic import SecretStr
@@ -27,6 +29,7 @@ _SHARED_ENV_KEYS = frozenset(
         "CLOUD_MARKET_DATA_FEED",
     }
 )
+_BEIJING = ZoneInfo("Asia/Shanghai")
 
 
 def _promote_alias(target: str, *aliases: str) -> None:
@@ -39,7 +42,9 @@ def _promote_alias(target: str, *aliases: str) -> None:
             return
 
 
-def load_project_env(project_root: str | Path) -> None:
+def load_project_env(
+    project_root: str | Path, *, now_utc: datetime | None = None
+) -> None:
     """Load project settings, then an optional user-owned credential file."""
 
     root = Path(project_root).resolve()
@@ -82,6 +87,24 @@ def load_project_env(project_root: str | Path) -> None:
         "ALPACA_SECRET_KEY",
         "APCA_API_SECRET_KEY",
     )
+
+    sip_env_path = os.getenv("ALPACA_SIP_ENV_FILE", "").strip()
+    observed_at = now_utc or datetime.now(UTC)
+    if sip_env_path and observed_at.astimezone(_BEIJING).time() >= time(21):
+        values = dotenv_values(Path(sip_env_path).expanduser())
+        key_id = str(values.get("ALPACA_API_KEY") or "").strip()
+        secret_key = str(values.get("ALPACA_SECRET_KEY") or "").strip()
+        if not key_id or not secret_key:
+            raise RuntimeError("Alpaca SIP credential file is incomplete")
+        os.environ["ALPACA_API_KEY_ID"] = key_id
+        os.environ["ALPACA_API_SECRET_KEY"] = secret_key
+        data_url = str(values.get("ALPACA_DATA_URL") or "").strip()
+        if data_url:
+            os.environ["ALPACA_DATA_URL"] = data_url
+        for name in ("FINNHUB_API_KEY", "ALPHAVANTAGE_API_KEY"):
+            value = str(values.get(name) or "").strip()
+            if value:
+                os.environ[name] = value
 
 
 def project_data_root(project_root: str | Path) -> Path:

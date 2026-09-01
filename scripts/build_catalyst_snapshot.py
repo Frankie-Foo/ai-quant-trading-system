@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections.abc import Callable
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from data_plane.catalysts import (
     empty_catalyst_frame,
 )
 from data_plane.contracts import DataQualityCheck, DatasetSnapshot, QualitySeverity
+from data_plane.http import DownloadError
 from data_plane.providers.catalyst_news import (
     fetch_alpaca_news,
     fetch_alpaca_news_direct,
@@ -37,6 +39,15 @@ from operations.local_env import load_project_env
 ROOT = Path(__file__).resolve().parents[1]
 BEIJING = ZoneInfo("Asia/Shanghai")
 NEW_YORK = ZoneInfo("America/New_York")
+
+
+def _optional_sec_filings(
+    fetcher: Callable[..., pl.DataFrame], *args: object, **kwargs: object
+) -> tuple[pl.DataFrame, bool]:
+    try:
+        return fetcher(*args, **kwargs), True
+    except DownloadError:
+        return empty_catalyst_frame(), False
 
 
 def _parse_date(value: str) -> date:
@@ -392,6 +403,7 @@ def main() -> None:
         args.data_root, previous_session=previous_session, universe=candidate_universe
     )
 
+    sec_available = True
     if args.reuse_provider_snapshots:
         alpaca, alpaca_snapshot = _load_provider_snapshot(
             args.data_root,
@@ -437,13 +449,15 @@ def main() -> None:
             start_utc, end_utc, pace_seconds=args.massive_pace_seconds
         )
         if verification_mode:
-            sec = fetch_live_candidate_filings(
+            sec, sec_available = _optional_sec_filings(
+                fetch_live_candidate_filings,
                 cik_to_symbols=cik_map,
                 start_utc=start_utc,
                 end_utc=end_utc,
             )
         else:
-            sec = fetch_candidate_filings(
+            sec, sec_available = _optional_sec_filings(
+                fetch_candidate_filings,
                 _filing_dates(start_utc, asof_utc),
                 cik_to_symbols=cik_map,
                 start_utc=start_utc,
@@ -541,6 +555,7 @@ def main() -> None:
             "massive": massive.height,
             "sec": sec.height,
         },
+        "sec_status": "available" if sec_available else "unavailable",
         "prepared_rows": prepared.height,
         "eligible_overnight_events": overnight.height,
         "exclusions": _counts(

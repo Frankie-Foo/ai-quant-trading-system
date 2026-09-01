@@ -180,6 +180,14 @@ Before production deployment, rotate any credential that has ever been pasted in
 chat or terminal transcript. Delayed full-market data, censored minute paths, and
 missing quote-spread costs still prohibit live trading and performance claims.
 
+## Windows governed evolution tasks
+
+`install_local_observation_tasks.ps1` installs the daily funnel and postmarket tasks,
+the weekly research cycle, and a daily monthly-evolution tick whose Python scheduler
+runs only on the first XNYS session of a month. The installer bootstraps an approved
+active policy without overwriting an existing one. Automated tasks may create only a
+shadow challenger; promotion and rollback remain explicit human commands.
+
 ## Keyless cloud market-data process for the Linux research deployment
 
 The cloud-strategy-platform process owns the only Alpaca SIP WebSocket and all Alpaca

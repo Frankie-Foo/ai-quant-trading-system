@@ -2042,3 +2042,44 @@ Status: installed for Alpaca Paper only; real trading remains forbidden.
 - Verification: full pytest passed `723` tests; Ruff passed; strict Mypy passed across
   `430` source files; compileall passed. Two actual Task Scheduler ticks returned
   `not_due` with exit code 0 outside the ET windows.
+
+## M87 2026-08-26 stage-specific spread gates
+
+- Raised the second-wave observation spread cap from 0.10% to 0.30%, then raised the
+  immediate Alpaca Paper spread/slippage guard to 0.25% by explicit owner instruction.
+  SIP freshness, marketable-limit pricing and all-in stop checks remain mandatory.
+- A read-only 10:18 ET rescan of the frozen first-wave pool retained INTU, SMTC, NCNO
+  and OLN; SMTC and NCNO also passed the original opening-five-minute structure. Their
+  then-current spreads were about 0.15% and 0.14%; the earlier 0.10% guard blocked them.
+- This is an operator-directed Paper rule change, not a backtest-supported improvement.
+- Verification: full pytest passed `725` tests; Ruff, compileall and strict Mypy across
+  `430` source files passed.
+
+## M88 2026-08-27 governed strategy loop
+
+- Added a signed, allowlisted active strategy policy and a non-executable challenger.
+- Connected monthly Memory proposals to the purged OOS RVOL sandbox and challenger
+  creation; automated tasks still report `production_changes=0`.
+- Added daily same-pool shadow evaluation and accepted postmarket evidence. Promotion
+  requires 20 complete independent sessions, explicit human approval and preserves a
+  verified rollback history.
+- Added Windows monthly-evolution and weekly-research tasks. Alpaca Paper-only execution,
+  risk controls, Feishu isolation and zero-order shadow behavior are unchanged.
+- Verification: independent re-review found no Critical/Important issues; full pytest
+  passed `741` tests; Ruff passed; strict Mypy passed across `411` source files;
+  compileall and all five PowerShell parser checks passed. Cross-directory task install
+  succeeded. Read-only Alpaca verification reported Paper ACTIVE, zero open orders,
+  zero positions and broker writes disabled.
+
+## M89 2026-08-27 second-wave observation repair
+
+- Root cause: the non-ordering 09:25 stage incorrectly treated temporary sub-VWAP prices
+  and normal premarket quote widening as final-entry failures. On 2026-08-27 this removed
+  all ten names before the 09:35 opening confirmation could evaluate them.
+- Changed sub-VWAP and 0.30%-1.00% spreads to yellow flags. Missing SIP facts, premarket
+  dollar volume below $1 million and spreads above 1.00% remain hard rejects. Maximum
+  pool size remains six; 09:35 structure and the actual 0.25% Paper entry cap are unchanged.
+- Added per-minute finite/positive validation before VWAP aggregation and explicit
+  capacity-ranking rejection reasons. Independent review found no remaining
+  Critical/Important issues. Full pytest passed `745` tests; Ruff, strict Mypy across
+  `411` files and compileall passed.

@@ -21,7 +21,12 @@ $env:AI_QUANT_DATA_ROOT = $sharedData
 $env:AI_QUANT_ACTIVE_POLICY_FILE = $activePolicy
 $env:AI_QUANT_CHALLENGER_POLICY_FILE = $challengerPolicy
 $env:AI_QUANT_PAPER_RUNTIME_CONFIRMED = "false"
-& $python -m schedule.postmarket `
-    1>> (Join-Path $runs "postmarket_scheduler.out.log") `
-    2>> (Join-Path $runs "postmarket_scheduler.err.log")
+& $python -m schedule.monthly_evolution `
+    --data-root $sharedData `
+    --state-db (Join-Path $runs "jobs.sqlite3") `
+    --lock-file (Join-Path $runs "monthly-evolution.lock") `
+    --active-policy $activePolicy `
+    --challenger-policy $challengerPolicy `
+    1>> (Join-Path $runs "monthly_evolution.out.log") `
+    2>> (Join-Path $runs "monthly_evolution.err.log")
 exit $LASTEXITCODE

@@ -7,6 +7,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from kernel.strategy_policy import build_strategy_policy, write_strategy_policy
 from operations.autonomous_selection_handoff import create_open_confirmation
 from operations.paper_state import PaperStateStore
 from schedule.modern_funnel import FunnelStage
@@ -17,6 +18,7 @@ from scripts.run_modern_funnel_stage import (
     _open_plan_lines,
     _selection_event_fields,
     _stage_observed_at,
+    _strategy_context,
     evaluate_open_confirmation,
     evaluate_second_wave,
 )
@@ -92,6 +94,173 @@ def test_second_wave_keeps_only_liquid_tight_names_above_vwap() -> None:
     assert "点差" in str(rejected[0]["reasons"])
 
 
+def test_second_wave_allows_a_point_two_percent_observation_spread() -> None:
+    bars = pl.DataFrame(
+        {
+            "symbol": ["WATCH", "WATCH"],
+            "ts_utc": [NOW - timedelta(minutes=2), NOW - timedelta(minutes=1)],
+            "close": [10.0, 10.2],
+            "volume": [100_000, 100_000],
+        }
+    )
+    quotes = pl.DataFrame(
+        {
+            "symbol": ["WATCH"],
+            "ts_utc": [NOW],
+            "bid_price": [10.18],
+            "ask_price": [10.20],
+        }
+    )
+
+    kept, rejected = evaluate_second_wave([_candidate("WATCH")], bars, quotes)
+
+    assert [row["symbol"] for row in kept] == ["WATCH"]
+    assert rejected == []
+
+
+def test_second_wave_keeps_soft_vwap_and_spread_warnings_for_open_review() -> None:
+    bars = pl.DataFrame(
+        {
+            "symbol": ["WATCH", "WATCH"],
+            "ts_utc": [NOW - timedelta(minutes=2), NOW - timedelta(minutes=1)],
+            "close": [10.2, 10.0],
+            "volume": [100_000, 100_000],
+        }
+    )
+    quotes = pl.DataFrame(
+        {
+            "symbol": ["WATCH"],
+            "ts_utc": [NOW],
+            "bid_price": [9.96],
+            "ask_price": [10.04],
+        }
+    )
+
+    kept, rejected = evaluate_second_wave([_candidate("WATCH")], bars, quotes)
+
+    assert [row["symbol"] for row in kept] == ["WATCH"]
+    assert rejected == []
+    assert kept[0]["watch_reasons"] == [
+        "盘前点差0.80%偏宽，09:35及入场前复核",
+        "暂未站上盘前VWAP，等待开盘确认",
+    ]
+
+
+def test_second_wave_rejects_non_finite_market_facts() -> None:
+    bars = pl.DataFrame(
+        {
+            "symbol": ["BAD"],
+            "ts_utc": [NOW],
+            "close": [float("nan")],
+            "volume": [200_000],
+        }
+    )
+    quotes = pl.DataFrame(
+        {
+            "symbol": ["BAD"],
+            "ts_utc": [NOW],
+            "bid_price": [10.0],
+            "ask_price": [10.01],
+        }
+    )
+
+    kept, rejected = evaluate_second_wave([_candidate("BAD")], bars, quotes)
+
+    assert kept == []
+    assert rejected[0]["reasons"] == ["Alpaca SIP盘前行情数值无效"]
+
+
+def test_second_wave_rejects_null_in_any_vwap_input_bar() -> None:
+    bars = pl.DataFrame(
+        {
+            "symbol": ["BAD", "BAD"],
+            "ts_utc": [NOW - timedelta(minutes=1), NOW],
+            "close": [None, 10.2],
+            "volume": [200_000, 200_000],
+        }
+    )
+    quotes = pl.DataFrame(
+        {
+            "symbol": ["BAD"],
+            "ts_utc": [NOW],
+            "bid_price": [10.19],
+            "ask_price": [10.20],
+        }
+    )
+
+    kept, rejected = evaluate_second_wave([_candidate("BAD")], bars, quotes)
+
+    assert kept == []
+    assert rejected[0]["reasons"] == ["Alpaca SIP盘前行情数值无效"]
+
+
+def test_second_wave_capacity_rejection_has_an_explicit_ranking_reason() -> None:
+    symbols = [f"S{i}" for i in range(7)]
+    bars = pl.DataFrame(
+        {
+            "symbol": symbols,
+            "ts_utc": [NOW] * 7,
+            "close": [10.0] * 7,
+            "volume": [200_000] * 7,
+        }
+    )
+    quotes = pl.DataFrame(
+        {
+            "symbol": symbols,
+            "ts_utc": [NOW] * 7,
+            "bid_price": [9.995] * 7,
+            "ask_price": [10.005] * 7,
+        }
+    )
+
+    kept, rejected = evaluate_second_wave([_candidate(s) for s in symbols], bars, quotes)
+
+    assert len(kept) == 6
+    assert len(rejected) == 1
+    assert rejected[0]["reasons"] == ["观察池容量落选（排序第7，上限6只）"]
+
+
+def test_strategy_context_builds_a_non_executable_challenger_subset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime(2026, 8, 27, 1, 0, tzinfo=UTC)
+    active_path = tmp_path / "active.json"
+    challenger_path = tmp_path / "challenger.json"
+    active = build_strategy_policy(
+        version="selection-baseline",
+        status="active",
+        min_rvol=3.0,
+        created_at_utc=now,
+        approved_by="owner",
+        approved_at_utc=now,
+    )
+    challenger = build_strategy_policy(
+        version="challenger-202609-test",
+        status="shadow",
+        min_rvol=4.0,
+        created_at_utc=now,
+        previous_version=active.version,
+        source_snapshot_ids=("sandbox",),
+    )
+    write_strategy_policy(active_path, active)
+    write_strategy_policy(challenger_path, challenger)
+    monkeypatch.setenv("AI_QUANT_ACTIVE_POLICY_FILE", str(active_path))
+    monkeypatch.setenv("AI_QUANT_CHALLENGER_POLICY_FILE", str(challenger_path))
+
+    context = _strategy_context(
+        [
+            {"symbol": "KEEP", "rvol": 4.5},
+            {"symbol": "DROP", "rvol": 3.5},
+        ]
+    )
+
+    challenger_context = context["challenger"]
+    assert isinstance(challenger_context, dict)
+    assert context["active_version"] == active.version
+    assert challenger_context["symbols"] == ["KEEP"]
+    assert challenger_context["execution_eligible"] is False
+
+
 def test_open_confirmation_requires_complete_positive_accepted_five_minutes() -> None:
     rows: list[dict[str, object]] = []
     for index in range(5):
@@ -134,7 +303,7 @@ def test_open_plan_contains_every_execution_gate_in_chinese() -> None:
         "09:56 ET后",
         "H15",
         "VWAP",
-        "0.10%",
+        "0.25%",
         "全包止损不超过2%",
         "3R",
         "15:00后禁止新仓",
@@ -153,7 +322,7 @@ def test_open_stage_feishu_summary_contains_complete_plan() -> None:
 
     assert "PASS 预案" in summary
     assert "H15" in summary
-    assert "0.10%" in summary
+    assert "0.25%" in summary
     assert "全包止损不超过2%" in summary
     assert "3R" in summary
     assert "15:50前全部清仓" in summary
