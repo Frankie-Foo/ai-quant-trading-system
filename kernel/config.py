@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import yaml
@@ -32,6 +33,7 @@ class ExitConfig(FrozenModel):
 
 class UniverseConfig(FrozenModel):
     min_price: float = Field(gt=0)
+    min_market_cap_usd: float = Field(gt=0)
     min_rvol: float = Field(gt=0)
     min_premarket_return: float = Field(ge=0)
     min_premarket_gap_return: float = Field(ge=0)
@@ -132,4 +134,12 @@ def load_config(path: str | Path) -> Config:
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("config root must be a mapping")
-    return Config.model_validate(payload)
+    config = Config.model_validate(payload)
+    policy_path = os.getenv("AI_QUANT_ACTIVE_POLICY_FILE", "").strip()
+    if not policy_path:
+        return config
+    from kernel.strategy_policy import load_strategy_policy
+
+    policy = load_strategy_policy(policy_path, required_status="active")
+    universe = config.universe.model_copy(update={"min_rvol": policy.min_rvol})
+    return config.model_copy(update={"universe": universe})

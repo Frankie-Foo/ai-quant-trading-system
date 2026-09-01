@@ -9,8 +9,6 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
-from dotenv import load_dotenv
-
 from data_plane.calendar import build_xnys_schedule
 from data_plane.providers.alpaca_direct import DirectAlpacaMarketDataClient
 from execution.alpaca_sip_stream import SipEvent
@@ -19,8 +17,8 @@ from operations.autonomous_paper_config import (
     AutonomousPaperRuntimeConfig,
     load_autonomous_paper_config,
 )
+from operations.local_env import alpaca_paper_credentials, load_project_env
 from schedule.runtime import ProcessLock
-from scripts.run_autonomous_paper_session import direct_paper_credentials
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -114,7 +112,7 @@ def _symbols(
 
 
 def main() -> int:
-    load_dotenv(ROOT / ".env")
+    load_project_env(ROOT)
     args = _parser().parse_args()
     config = load_autonomous_paper_config(args.config)
     trade_dates = {bundle.plan.trade_date for bundle in config.plans}
@@ -129,7 +127,7 @@ def main() -> int:
         incremental=bool(args.incremental),
     )
     market_symbols, plan_symbols = _symbols(config)
-    key_id, secret_key = direct_paper_credentials(os.environ)
+    key_id, secret_key = alpaca_paper_credentials(os.environ)
     client = DirectAlpacaMarketDataClient(
         key_id=key_id,
         secret_key=secret_key,

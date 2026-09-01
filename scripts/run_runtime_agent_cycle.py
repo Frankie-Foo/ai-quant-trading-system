@@ -8,18 +8,17 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from dotenv import load_dotenv
 from pydantic import SecretStr
 
 from data_plane.providers.alpaca_direct import DirectAlpacaMarketDataClient
 from execution.alpaca_paper import DirectAlpacaPaperBroker
 from operations.autonomous_paper_config import load_autonomous_paper_config
-from operations.livermore_push import LivermorePushClient
+from operations.livermore_push import LivermorePushClient, configured_identity
+from operations.local_env import alpaca_paper_credentials, load_project_env
 from operations.runtime_agent_cycle import run_runtime_agent_cycle
 from operations.runtime_agent_safety import RuntimeAgentRole
 from research.providers.deepseek import DEEPSEEK_MODEL, DeepSeekClient
 from schedule.runtime import JsonEventLogger, ProcessLock
-from scripts.run_autonomous_paper_session import direct_paper_credentials
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -53,14 +52,14 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    load_dotenv(ROOT / ".env")
+    load_project_env(ROOT)
     args = _parser().parse_args()
     if not 10 <= args.interval_seconds <= 30:
         raise ValueError("interval-seconds must be in [10, 30]")
     if args.max_seconds is not None and args.max_seconds <= 0:
         raise ValueError("max-seconds must be positive")
     config = load_autonomous_paper_config(args.config)
-    key_id, secret_key = direct_paper_credentials(os.environ)
+    key_id, secret_key = alpaca_paper_credentials(os.environ)
     market = DirectAlpacaMarketDataClient(
         key_id=key_id,
         secret_key=secret_key,
@@ -71,12 +70,13 @@ def main() -> int:
         writes_enabled=False,
     )
     deepseek = DeepSeekClient.from_env()
+    app_id, channel_id = configured_identity(os.environ)
     push = LivermorePushClient(
-        app_id=os.getenv("VPS_LIVERMORE_APP_ID", "").strip(),
+        app_id=app_id,
         app_secret=SecretStr(
             os.getenv("VPS_LIVERMORE_APP_SECRET", "")
         ),
-        channel_id=os.getenv("VPS_LIVERMORE_CHANNEL_ID", "").strip(),
+        channel_id=channel_id,
     )
     completions = {
         RuntimeAgentRole.CATALYST: (

@@ -5,7 +5,7 @@
   "exit_decision_time_bjt": "00:00:00",
   "force_exit_time_bjt": "01:00:00",
   "market_close_time_et": "16:00:00",
-  "channel_id": "4edcd570-603f-4c5f-a070-db88c48a5c9b",
+  "channel_id": "",
   "account_value": 100000,
   "daily_loss_limit": 700,
   "plans": [

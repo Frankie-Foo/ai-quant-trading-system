@@ -16,6 +16,7 @@ BASE_URL = "https://api.massive.com/v2/aggs/ticker"
 GROUPED_DAILY_URL = "https://api.massive.com/v2/aggs/grouped/locale/us/market/stocks"
 TICKER_REFERENCE_URL = "https://api.massive.com/v3/reference/tickers"
 FREE_FLOAT_URL = "https://api.massive.com/stocks/vX/float"
+MASSIVE_TICKER_DETAILS_MIN_INTERVAL_SECONDS = 12.5
 
 
 def _set_query_value(url: str, name: str, value: str) -> str:
@@ -206,42 +207,57 @@ def fetch_ticker_details(
     key = api_key_from_env()
     headers = {"Authorization": f"Bearer {key}"}
     requested = tuple(sorted(set(symbols)))
+    # Massive Basic is rate-limited. A zero pace must not turn into a burst of
+    # concurrent requests: 429 responses used to be swallowed as null fields.
+    effective_pace_seconds = max(
+        pace_seconds, MASSIVE_TICKER_DETAILS_MIN_INTERVAL_SECONDS
+    )
+
+    def fetch_one(symbol: str) -> dict[str, object]:
+        fetch_error: str | None = None
+        try:
+            payload = get_json(
+                f"{TICKER_REFERENCE_URL}/{symbol}",
+                params={"date": asof_date.isoformat()},
+                headers=headers,
+                attempts=1,
+                timeout_seconds=8.0,
+            )
+            item = payload.get("results")
+            values = item if isinstance(item, dict) else {}
+        except DownloadError as exc:
+            values = {}
+            fetch_error = str(exc)
+        return {
+            "asof_date": asof_date,
+            "symbol": symbol,
+            "market_cap": nullable_float(values.get("market_cap")),
+            "weighted_shares_outstanding": nullable_float(
+                values.get("weighted_shares_outstanding")
+            ),
+            "share_class_shares_outstanding": nullable_float(
+                values.get("share_class_shares_outstanding")
+            ),
+            "security_type": values.get("type"),
+            "active": values.get("active"),
+            "cik": values.get("cik"),
+            "last_updated_utc": values.get("last_updated_utc"),
+            "retrieved_utc": datetime.now(UTC),
+            "source": "massive.ticker_details",
+            "fetch_error": fetch_error,
+            "provenance": (
+                f"massive.ticker_details:{symbol}@{asof_date.isoformat()}"
+            ),
+        }
+
     rows: list[dict[str, object]] = []
     previous_request_started = 0.0
     for index, symbol in enumerate(requested, start=1):
         elapsed = time.monotonic() - previous_request_started
-        if previous_request_started and elapsed < pace_seconds:
-            time.sleep(pace_seconds - elapsed)
+        if previous_request_started and elapsed < effective_pace_seconds:
+            time.sleep(effective_pace_seconds - elapsed)
         previous_request_started = time.monotonic()
-        payload = get_json(
-            f"{TICKER_REFERENCE_URL}/{symbol}",
-            params={"date": asof_date.isoformat()},
-            headers=headers,
-        )
-        item = payload.get("results")
-        values = item if isinstance(item, dict) else {}
-        rows.append(
-            {
-                "asof_date": asof_date,
-                "symbol": symbol,
-                "market_cap": nullable_float(values.get("market_cap")),
-                "weighted_shares_outstanding": nullable_float(
-                    values.get("weighted_shares_outstanding")
-                ),
-                "share_class_shares_outstanding": nullable_float(
-                    values.get("share_class_shares_outstanding")
-                ),
-                "security_type": values.get("type"),
-                "active": values.get("active"),
-                "cik": values.get("cik"),
-                "last_updated_utc": values.get("last_updated_utc"),
-                "retrieved_utc": datetime.now(UTC),
-                "source": "massive.ticker_details",
-                "provenance": (
-                    f"massive.ticker_details:{symbol}@{asof_date.isoformat()}"
-                ),
-            }
-        )
+        rows.append(fetch_one(symbol))
         if on_symbol:
             on_symbol(index, len(requested))
     frame = pl.DataFrame(rows) if rows else empty_ticker_details_frame()
@@ -341,14 +357,19 @@ def _empty_daily_frame() -> pl.DataFrame:
 
 
 def _canonicalize_reference(frame: pl.DataFrame) -> pl.DataFrame:
-    return frame.with_columns(
-        pl.col("asof_date").cast(pl.Date),
-        pl.col("symbol").cast(pl.String),
-        pl.col("active").cast(pl.Boolean),
-        pl.col("last_updated_utc").cast(pl.String).str.to_datetime(
-            time_zone="UTC", strict=False
-        ),
-    ).sort("symbol")
+    return (
+        frame.with_columns(
+            pl.col("asof_date").cast(pl.Date),
+            pl.col("symbol").cast(pl.String),
+            pl.col("active").cast(pl.Boolean),
+            pl.col("last_updated_utc").cast(pl.String).str.to_datetime(
+                time_zone="UTC", strict=False
+            ),
+        )
+        .sort("symbol", "last_updated_utc", nulls_last=True)
+        .unique(subset=["asof_date", "symbol"], keep="last")
+        .sort("symbol")
+    )
 
 
 def _empty_reference_frame() -> pl.DataFrame:
@@ -384,6 +405,7 @@ def _canonicalize_ticker_details(frame: pl.DataFrame) -> pl.DataFrame:
             time_zone="UTC", strict=False
         ),
         pl.col("retrieved_utc").cast(pl.Datetime("ms", "UTC")),
+        pl.col("fetch_error").cast(pl.String),
     ).sort("symbol")
 
 
@@ -401,6 +423,7 @@ def empty_ticker_details_frame() -> pl.DataFrame:
             "last_updated_utc": pl.Datetime("ms", "UTC"),
             "retrieved_utc": pl.Datetime("ms", "UTC"),
             "source": pl.String,
+            "fetch_error": pl.String,
             "provenance": pl.String,
         }
     )

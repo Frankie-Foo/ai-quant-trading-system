@@ -4,6 +4,8 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from execution.alpaca_paper import (
     BrokerOrder,
     PaperAccount,
@@ -32,6 +34,47 @@ TRADE_DATE = date(2026, 7, 29)
 
 def _metric(value: float, observed_at: datetime) -> DecisionMetric:
     return DecisionMetric(value, observed_at, "test.metric.v1")
+
+
+def test_ledger_aggregates_plan_evaluations_without_storing_market_ticks(
+    tmp_path: Path,
+) -> None:
+    ledger = PaperSessionLedger(tmp_path / "paper.sqlite3")
+    plan = AutonomousPaperPlan(
+        plan_id="plan-test",
+        symbol="TEST",
+        trade_date=TRADE_DATE,
+        reference_price=Decimal("100"),
+        hard_stop=Decimal("98"),
+        max_notional_fraction=Decimal("0.1"),
+        full_risk_fraction=Decimal("0.001"),
+        source_snapshot_ids=("selection-test",),
+        provenance="test.plan.v1",
+    )
+
+    ledger.record_plan_evaluation(
+        plan,
+        action=SessionAction.DATA_BLOCKED,
+        reasons=("market_facts_unavailable",),
+        degraded_reasons=("market_facts_unavailable",),
+        submitted_order_ids=(),
+        at_utc=NOW,
+    )
+    ledger.record_plan_evaluation(
+        plan,
+        action=SessionAction.OBSERVE,
+        reasons=("waiting_for_trigger",),
+        degraded_reasons=(),
+        submitted_order_ids=(),
+        at_utc=NOW + timedelta(seconds=1),
+    )
+
+    summary = ledger.plan_evaluation_summaries(TRADE_DATE)[0]
+    assert summary.evaluation_count == 2
+    assert summary.data_blocked_count == 1
+    assert summary.observe_count == 1
+    assert summary.submitted_order_count == 0
+    assert summary.last_reasons == ("waiting_for_trigger",)
 
 
 def _policy_snapshot(
@@ -218,6 +261,41 @@ class FakeAutonomousBroker:
         )
         self.entry_orders[request.client_order_id] = order
         return order
+
+
+def test_paper_session_ledger_keeps_a_hash_chained_audit_trail_without_secrets(
+    tmp_path: Path,
+) -> None:
+    ledger = PaperSessionLedger(tmp_path / "autonomous-paper.sqlite3")
+
+    first = ledger.record_audit_event(
+        run_id="paper-run-20260729-1",
+        event_type="tick_open",
+        at_utc=NOW,
+        payload={"symbol": "AAPL", "source_snapshot_ids": ["selection-20260729"]},
+    )
+    second = ledger.record_audit_event(
+        run_id="paper-run-20260729-1",
+        event_type="tick_result",
+        at_utc=NOW + timedelta(seconds=1),
+        payload={"action": "observe", "order_ids": []},
+    )
+
+    events = ledger.audit_events(run_id="paper-run-20260729-1")
+
+    assert [event["sequence"] for event in events] == [first["sequence"], second["sequence"]]
+    assert events[0]["payload"] == {
+        "source_snapshot_ids": ["selection-20260729"],
+        "symbol": "AAPL",
+    }
+    assert events[1]["previous_hash"] == events[0]["event_hash"]
+    with pytest.raises(ValueError, match="secret"):
+        ledger.record_audit_event(
+            run_id="paper-run-20260729-1",
+            event_type="unsafe",
+            at_utc=NOW,
+            payload={"api_key": "must-not-persist"},
+        )
 
 
 def _orchestrator(
@@ -1067,7 +1145,7 @@ def test_thirteen_hundred_force_exit_is_idempotent(
     replay = orchestrator.tick(_plan(), snapshot)
 
     assert first.decision is not None
-    assert first.decision.reasons == ("intraday_force_exit_1300",)
+    assert first.decision.reasons == ("intraday_force_exit_1200",)
     assert first.action is SessionAction.EXIT_SUBMITTED
     assert len(broker.close_requests) == 1
     assert broker.close_requests[0].qty == 21
@@ -1232,3 +1310,23 @@ def test_runtime_failure_flat_account_cancels_pending_entry_before_returning(
     assert result.cancelled_order_ids == ("pending-entry-1",)
     assert broker.cancelled == ["pending-entry-1"]
     assert broker.close_requests == []
+
+
+def test_autonomous_paper_schema_is_versioned(tmp_path: Path) -> None:
+    ledger = PaperSessionLedger(tmp_path / "autonomous-paper.sqlite3")
+
+    with ledger._connect() as connection:
+        row = connection.execute(
+            """
+            SELECT owner, version, name
+            FROM schema_migrations
+            WHERE owner = 'execution.autonomous_paper_session'
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert tuple(row) == (
+        "execution.autonomous_paper_session",
+        1,
+        "autonomous_paper_schema",
+    )

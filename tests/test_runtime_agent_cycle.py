@@ -205,3 +205,45 @@ def test_runtime_agent_cycle_preserves_current_delivery_failure_latch(
     )
     assert summary.push_healthy is False
     assert envelope.push_healthy is False
+
+
+def test_runtime_agent_cycle_reuses_unchanged_news_classification(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    def completion(prompt: str) -> ModelScoreResponse:
+        calls.append(prompt)
+        return _complete(prompt)
+
+    first = run_runtime_agent_cycle(
+        bundles=(_bundle(tmp_path),),
+        agent_root=tmp_path / "agents",
+        push_health_path=tmp_path / "agents" / "push-health.json",
+        observed_at_utc=NOW,
+        market=FakeMarket(),
+        broker=FakeBroker(),
+        push=FakePush(),
+        model_id="deepseek-v4-pro",
+        completions={
+            RuntimeAgentRole.CATALYST: completion,
+            RuntimeAgentRole.RED_TEAM: completion,
+        },
+    )
+    second = run_runtime_agent_cycle(
+        bundles=(_bundle(tmp_path),),
+        agent_root=tmp_path / "agents",
+        push_health_path=tmp_path / "agents" / "push-health.json",
+        observed_at_utc=NOW + timedelta(seconds=15),
+        market=FakeMarket(),
+        broker=FakeBroker(),
+        push=FakePush(),
+        model_id="deepseek-v4-pro",
+        completions={
+            RuntimeAgentRole.CATALYST: completion,
+            RuntimeAgentRole.RED_TEAM: completion,
+        },
+    )
+
+    assert first.healthy_envelopes == second.healthy_envelopes == 1
+    assert len(calls) == 2

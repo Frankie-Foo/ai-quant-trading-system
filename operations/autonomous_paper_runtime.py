@@ -151,7 +151,7 @@ class AutonomousPaperRuntime:
                 )
                 if facts.observed_at_utc != observed_at_utc:
                     raise ValueError("market facts observation time mismatch")
-            except (KeyError, OSError, RuntimeError, ValueError):
+            except Exception:
                 result = self._market_failure(
                     plan,
                     observed_at_utc=observed_at_utc,
@@ -166,15 +166,31 @@ class AutonomousPaperRuntime:
                 )
                 continue
             self._last_facts[plan.symbol] = facts
-            snapshot = self.snapshot_factory.build(
-                plan=plan,
-                evidence=bundle.evidence,
-                facts=facts,
-                envelope=envelope,
-                position=position,
-                account_equity=equity,
-            )
-            result = self.orchestrator.tick(plan, snapshot)
+            try:
+                snapshot = self.snapshot_factory.build(
+                    plan=plan,
+                    evidence=bundle.evidence,
+                    facts=facts,
+                    envelope=envelope,
+                    position=position,
+                    account_equity=equity,
+                )
+                result = self.orchestrator.tick(plan, snapshot)
+            except Exception:
+                result = self.fail_closed_plan(
+                    plan_id=plan.plan_id,
+                    observed_at_utc=observed_at_utc,
+                    reason="runtime_evaluation_failed",
+                )
+                outcomes.append(
+                    AutonomousRuntimeOutcome(
+                        plan_id=plan.plan_id,
+                        symbol=plan.symbol,
+                        result=result,
+                        degraded_reasons=("runtime_evaluation_failed",),
+                    )
+                )
+                continue
             outcomes.append(
                 AutonomousRuntimeOutcome(
                     plan_id=plan.plan_id,
@@ -240,7 +256,7 @@ class AutonomousPaperRuntime:
                 or envelope.symbol != bundle.plan.symbol
             ):
                 return None, ("safety_envelope_identity_mismatch",)
-        except (FileNotFoundError, OSError, RuntimeError, ValueError):
+        except Exception:
             return None, ("safety_envelope_unavailable",)
         return envelope, ()
 

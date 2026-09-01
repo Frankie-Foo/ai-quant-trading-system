@@ -8,6 +8,8 @@ from datetime import date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 
+from db.migrations.sqlite import SQLiteMigration, apply_sqlite_migrations
+
 
 class PaperSessionStatus(StrEnum):
     RUNNING = "running"
@@ -27,6 +29,36 @@ class PaperSessionRecord:
     orders_submitted: int
     reconciliation_match_rate: float
     error_type: str | None
+
+
+def _create_paper_sessions(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS paper_sessions (
+            trade_date TEXT PRIMARY KEY,
+            started_at_utc TEXT NOT NULL,
+            expected_close_utc TEXT NOT NULL,
+            ended_at_utc TEXT,
+            status TEXT NOT NULL,
+            event_count INTEGER NOT NULL CHECK(event_count >= 0),
+            orders_submitted INTEGER NOT NULL CHECK(orders_submitted >= 0),
+            reconciliation_match_rate REAL NOT NULL
+                CHECK(reconciliation_match_rate >= 0
+                      AND reconciliation_match_rate <= 1),
+            error_type TEXT
+        )
+        """
+    )
+
+
+PAPER_SESSION_LEDGER_MIGRATIONS = (
+    SQLiteMigration(
+        version=1,
+        name="paper_sessions",
+        signature="paper_sessions.v1",
+        apply=_create_paper_sessions,
+    ),
+)
 
 
 class PaperSessionLedger:
@@ -51,22 +83,10 @@ class PaperSessionLedger:
 
     def _initialize(self) -> None:
         with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS paper_sessions (
-                    trade_date TEXT PRIMARY KEY,
-                    started_at_utc TEXT NOT NULL,
-                    expected_close_utc TEXT NOT NULL,
-                    ended_at_utc TEXT,
-                    status TEXT NOT NULL,
-                    event_count INTEGER NOT NULL CHECK(event_count >= 0),
-                    orders_submitted INTEGER NOT NULL CHECK(orders_submitted >= 0),
-                    reconciliation_match_rate REAL NOT NULL
-                        CHECK(reconciliation_match_rate >= 0
-                              AND reconciliation_match_rate <= 1),
-                    error_type TEXT
-                )
-                """
+            apply_sqlite_migrations(
+                connection,
+                owner="execution.paper_session_ledger",
+                migrations=PAPER_SESSION_LEDGER_MIGRATIONS,
             )
 
     def start(

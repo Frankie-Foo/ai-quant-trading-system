@@ -11,6 +11,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Protocol
 
+from db.migrations.sqlite import SQLiteMigration, apply_sqlite_migrations
 from execution.alpaca_paper import (
     BrokerOrder,
     PaperExtendedLimitRequest,
@@ -62,6 +63,36 @@ class SyntheticStopExecutionResult:
     broker_order_id: str | None
 
 
+def _create_synthetic_stop_actions(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS synthetic_stop_actions (
+            plan_id TEXT PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            qty INTEGER NOT NULL,
+            stop_price TEXT NOT NULL,
+            plan_json TEXT NOT NULL,
+            runtime_json TEXT NOT NULL,
+            active_client_order_id TEXT,
+            active_broker_order_id TEXT,
+            active_limit_price TEXT,
+            active_qty INTEGER,
+            updated_at_utc TEXT NOT NULL
+        )
+        """
+    )
+
+
+SYNTHETIC_STOP_LEDGER_MIGRATIONS = (
+    SQLiteMigration(
+        version=1,
+        name="synthetic_stop_actions",
+        signature="synthetic_stop_actions.v1",
+        apply=_create_synthetic_stop_actions,
+    ),
+)
+
+
 class SyntheticStopExecutionLedger:
     """SQLite outbox: command intent is durable before a broker write occurs."""
 
@@ -69,22 +100,10 @@ class SyntheticStopExecutionLedger:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS synthetic_stop_actions (
-                    plan_id TEXT PRIMARY KEY,
-                    symbol TEXT NOT NULL,
-                    qty INTEGER NOT NULL,
-                    stop_price TEXT NOT NULL,
-                    plan_json TEXT NOT NULL,
-                    runtime_json TEXT NOT NULL,
-                    active_client_order_id TEXT,
-                    active_broker_order_id TEXT,
-                    active_limit_price TEXT,
-                    active_qty INTEGER,
-                    updated_at_utc TEXT NOT NULL
-                )
-                """
+            apply_sqlite_migrations(
+                connection,
+                owner="execution.synthetic_stop_ledger",
+                migrations=SYNTHETIC_STOP_LEDGER_MIGRATIONS,
             )
 
     def _connect(self) -> sqlite3.Connection:

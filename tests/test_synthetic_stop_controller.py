@@ -184,3 +184,23 @@ def test_controller_is_read_only_until_paper_writes_are_armed(
     assert result.action is StopAction.ALERT
     assert result.dry_run is True
     assert broker.submissions == []
+
+
+def test_synthetic_stop_schema_is_versioned(tmp_path: Path) -> None:
+    ledger = SyntheticStopExecutionLedger(tmp_path / "synthetic-stops.sqlite3")
+
+    with ledger._connect() as connection:
+        row = connection.execute(
+            """
+            SELECT owner, version, name
+            FROM schema_migrations
+            WHERE owner = 'execution.synthetic_stop_ledger'
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert tuple(row) == (
+        "execution.synthetic_stop_ledger",
+        1,
+        "synthetic_stop_actions",
+    )

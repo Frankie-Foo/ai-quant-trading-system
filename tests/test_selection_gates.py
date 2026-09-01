@@ -86,10 +86,11 @@ def test_nasdaq_halt_parser_handles_luld_and_resumption_times() -> None:
 
 def test_market_cap_tiers_follow_frozen_config() -> None:
     cfg = load_config("config.yaml")
+    assert cfg.universe.min_market_cap_usd == 1_000_000_000
     assert market_cap_tier(250_000_000_000, cfg) == "mega"
     assert market_cap_tier(15_000_000_000, cfg) == "large"
     assert market_cap_tier(3_000_000_000, cfg) == "mid"
-    assert market_cap_tier(500_000_000, cfg) == "small"
+    assert market_cap_tier(1_000_000_000, cfg) == "small"
     assert market_cap_tier(None, cfg) is None
 
 
@@ -182,6 +183,49 @@ def test_selection_gates_are_fail_closed_and_rank_only_survivors() -> None:
     assert rows["LULD"]["reject_reason"] == "recent_luld_low_or_unknown_float"
     assert rows["LOWRV"]["reject_reason"] == "rvol_below_or_equal_min"
     assert rows["NOCAP"]["reject_reason"] == "missing_market_cap"
+
+
+def test_selection_gates_reject_market_caps_below_configured_floor() -> None:
+    inputs = list(_gate_inputs())
+    market = inputs[3].with_columns(
+        pl.when(pl.col("symbol") == "PASS")
+        .then(pl.lit(499_999_999.0))
+        .otherwise(pl.col("market_cap"))
+        .alias("market_cap")
+    )
+    inputs[3] = market
+    result = apply_selection_gates(
+        *inputs,
+        trade_date=date(2026, 7, 20),
+        asof_utc=datetime(2026, 7, 20, 12, 0, tzinfo=UTC),
+        recent_session_dates=[date(2026, 7, day) for day in range(13, 18)],
+        cfg=load_config("config.yaml"),
+        low_float_shares=20_000_000,
+    )
+    row = result.filter(pl.col("symbol") == "PASS").row(0, named=True)
+    assert row["pass_gate"] is False
+    assert row["reject_reason"] == "market_cap_below_min"
+
+
+def test_selection_gates_accept_exact_market_cap_floor() -> None:
+    inputs = list(_gate_inputs())
+    market = inputs[3].with_columns(
+        pl.when(pl.col("symbol") == "PASS")
+        .then(pl.lit(1_000_000_000.0))
+        .otherwise(pl.col("market_cap"))
+        .alias("market_cap")
+    )
+    inputs[3] = market
+    result = apply_selection_gates(
+        *inputs,
+        trade_date=date(2026, 7, 20),
+        asof_utc=datetime(2026, 7, 20, 12, 0, tzinfo=UTC),
+        recent_session_dates=[date(2026, 7, day) for day in range(13, 18)],
+        cfg=load_config("config.yaml"),
+        low_float_shares=20_000_000,
+    )
+    row = result.filter(pl.col("symbol") == "PASS").row(0, named=True)
+    assert row["pass_gate"] is True
 
 
 def test_future_halt_after_asof_does_not_change_current_halt_gate() -> None:

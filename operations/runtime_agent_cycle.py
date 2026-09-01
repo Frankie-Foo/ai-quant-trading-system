@@ -79,7 +79,7 @@ def run_runtime_agent_cycle(
     market: RuntimeAgentMarketPort,
     broker: RuntimeAgentBrokerPort,
     push: RuntimeAgentPushPort,
-    model_id: str,
+    model_id: str | Mapping[RuntimeAgentRole, str],
     completions: Mapping[
         RuntimeAgentRole,
         Callable[[str], ModelScoreResponse],
@@ -94,6 +94,7 @@ def run_runtime_agent_cycle(
     }
     if set(completions) != required_roles:
         raise ValueError("runtime agent cycle requires catalyst and red-team completions")
+    model_ids = _news_model_ids(model_id)
     symbols = tuple(sorted(bundle.plan.symbol for bundle in bundles))
     news_start = observed_at_utc - timedelta(hours=24)
     error_count = 0
@@ -112,8 +113,7 @@ def run_runtime_agent_cycle(
         error_count += 1
     query_id = _snapshot_id(
         "alpaca-news-query",
-        observed_at_utc,
-        *(article.provenance for article in articles),
+        *(sorted(article.provenance for article in articles)),
         "healthy" if news_healthy else f"failed:{news_error_code}",
     )
 
@@ -186,7 +186,7 @@ def run_runtime_agent_cycle(
                         role=role,
                         package=package,
                         generated_at_utc=observed_at_utc,
-                        model_id=model_id,
+                        model_id=model_ids[role],
                         complete_json=completions[role],
                         previous=previous,
                     )
@@ -197,7 +197,7 @@ def run_runtime_agent_cycle(
                         symbol=plan.symbol,
                         role=role,
                         generated_at_utc=observed_at_utc,
-                        model_id=model_id,
+                        model_id=model_ids[role],
                         prompt_sha256=prompt_hash,
                         source_snapshot_ids=package.source_snapshot_ids,
                         error_code=type(exc).__name__,
@@ -216,7 +216,7 @@ def run_runtime_agent_cycle(
                         symbol=plan.symbol,
                         role=role,
                         generated_at_utc=observed_at_utc,
-                        model_id=model_id,
+                        model_id=model_ids[role],
                         prompt_sha256=failure_hash,
                         source_snapshot_ids=(query_id,),
                         error_code=news_error_code,
@@ -317,6 +317,21 @@ def _snapshot_id(prefix: str, *parts: object) -> str:
     material = "|".join(str(part) for part in parts)
     digest = hashlib.sha256(material.encode()).hexdigest()[:24]
     return f"{prefix}-{digest}"
+
+
+def _news_model_ids(
+    value: str | Mapping[RuntimeAgentRole, str],
+) -> dict[RuntimeAgentRole, str]:
+    roles = (RuntimeAgentRole.CATALYST, RuntimeAgentRole.RED_TEAM)
+    if isinstance(value, str):
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("runtime agent model ID is required")
+        return {role: normalized for role in roles}
+    result = {role: str(value.get(role, "")).strip() for role in roles}
+    if not all(result.values()) or set(value) != set(roles):
+        raise ValueError("runtime agent model IDs are incomplete")
+    return result
 
 
 def _require_utc(value: datetime) -> None:

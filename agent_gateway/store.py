@@ -27,6 +27,7 @@ from agent_gateway.contracts import (
     Thesis,
     now_utc,
 )
+from db.migrations.sqlite import SQLiteMigration, apply_sqlite_migrations
 
 ENTITY_TABLES: dict[QueryEntity, str] = {
     QueryEntity.THESES: "agent_theses",
@@ -48,6 +49,101 @@ def _content_id(prefix: str, document: object) -> tuple[str, str]:
     encoded = _json(document).encode("utf-8")
     digest = hashlib.sha256(encoded).hexdigest()
     return f"{prefix}-{digest[:24]}", digest
+
+
+_SQLITE_AGENT_FACT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS tool_audit (
+    audit_id TEXT PRIMARY KEY,
+    actor TEXT,
+    tool TEXT NOT NULL,
+    request_json TEXT NOT NULL,
+    response_json TEXT,
+    success INTEGER NOT NULL CHECK(success IN (0, 1)),
+    error_code TEXT,
+    created_at_utc TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS agent_theses (
+    record_id TEXT PRIMARY KEY,
+    actor TEXT NOT NULL,
+    trade_date TEXT NOT NULL,
+    category TEXT,
+    status TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    document_json TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS lessons (
+    record_id TEXT PRIMARY KEY,
+    actor TEXT NOT NULL,
+    trade_date TEXT NOT NULL,
+    category TEXT NOT NULL CHECK(category IN (
+        'selection_review','signal_decay','execution_gap','cost_drift'
+    )),
+    status TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    document_json TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS audit_reports (
+    record_id TEXT PRIMARY KEY,
+    actor TEXT NOT NULL CHECK(actor = 'discipline'),
+    trade_date TEXT NOT NULL,
+    category TEXT,
+    status TEXT NOT NULL CHECK(status IN ('complete', 'incomplete_evidence')),
+    content_sha256 TEXT NOT NULL,
+    document_json TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS evolution_proposals (
+    record_id TEXT PRIMARY KEY,
+    actor TEXT NOT NULL CHECK(actor = 'pdca'),
+    trade_date TEXT NOT NULL,
+    category TEXT,
+    status TEXT NOT NULL CHECK(status = 'draft'),
+    content_sha256 TEXT NOT NULL,
+    document_json TEXT NOT NULL CHECK(
+        json_extract(document_json, '$.status') = 'draft'
+        AND json_extract(document_json, '$.production_eligible') = 0
+    ),
+    created_at_utc TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS agent_tradeplan_drafts (
+    record_id TEXT PRIMARY KEY,
+    actor TEXT NOT NULL CHECK(actor = 'commander'),
+    trade_date TEXT NOT NULL,
+    category TEXT,
+    status TEXT NOT NULL CHECK(status = 'shadow_draft'),
+    content_sha256 TEXT NOT NULL,
+    document_json TEXT NOT NULL CHECK(
+        json_extract(document_json, '$.status') = 'shadow_draft'
+        AND json_extract(document_json, '$.execution_eligible') = 0
+        AND json_extract(document_json, '$.broker_submission_count') = 0
+    ),
+    created_at_utc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_theses_date_actor ON agent_theses(trade_date, actor);
+CREATE INDEX IF NOT EXISTS idx_lessons_date_category ON lessons(trade_date, category);
+CREATE INDEX IF NOT EXISTS idx_audit_reports_date ON audit_reports(trade_date);
+CREATE INDEX IF NOT EXISTS idx_proposals_date ON evolution_proposals(trade_date);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON tool_audit(created_at_utc);
+"""
+
+
+def _create_sqlite_agent_fact_schema(connection: sqlite3.Connection) -> None:
+    for statement in _SQLITE_AGENT_FACT_SCHEMA.split(";"):
+        normalized = statement.strip()
+        if normalized:
+            connection.execute(normalized)
+
+
+SQLITE_AGENT_FACT_MIGRATIONS = (
+    SQLiteMigration(
+        version=1,
+        name="agent_fact_store",
+        signature="agent_fact_store.v1",
+        apply=_create_sqlite_agent_fact_schema,
+    ),
+)
 
 
 class AgentFactStore(Protocol):
@@ -93,84 +189,12 @@ class SQLiteAgentFactStore:
         return connection
 
     def initialize(self) -> None:
-        schema = """
-        CREATE TABLE IF NOT EXISTS tool_audit (
-            audit_id TEXT PRIMARY KEY,
-            actor TEXT,
-            tool TEXT NOT NULL,
-            request_json TEXT NOT NULL,
-            response_json TEXT,
-            success INTEGER NOT NULL CHECK(success IN (0, 1)),
-            error_code TEXT,
-            created_at_utc TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS agent_theses (
-            record_id TEXT PRIMARY KEY,
-            actor TEXT NOT NULL,
-            trade_date TEXT NOT NULL,
-            category TEXT,
-            status TEXT NOT NULL,
-            content_sha256 TEXT NOT NULL,
-            document_json TEXT NOT NULL,
-            created_at_utc TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS lessons (
-            record_id TEXT PRIMARY KEY,
-            actor TEXT NOT NULL,
-            trade_date TEXT NOT NULL,
-            category TEXT NOT NULL CHECK(category IN (
-                'selection_review','signal_decay','execution_gap','cost_drift'
-            )),
-            status TEXT NOT NULL,
-            content_sha256 TEXT NOT NULL,
-            document_json TEXT NOT NULL,
-            created_at_utc TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS audit_reports (
-            record_id TEXT PRIMARY KEY,
-            actor TEXT NOT NULL CHECK(actor = 'discipline'),
-            trade_date TEXT NOT NULL,
-            category TEXT,
-            status TEXT NOT NULL CHECK(status IN ('complete', 'incomplete_evidence')),
-            content_sha256 TEXT NOT NULL,
-            document_json TEXT NOT NULL,
-            created_at_utc TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS evolution_proposals (
-            record_id TEXT PRIMARY KEY,
-            actor TEXT NOT NULL CHECK(actor = 'pdca'),
-            trade_date TEXT NOT NULL,
-            category TEXT,
-            status TEXT NOT NULL CHECK(status = 'draft'),
-            content_sha256 TEXT NOT NULL,
-            document_json TEXT NOT NULL CHECK(
-                json_extract(document_json, '$.status') = 'draft'
-                AND json_extract(document_json, '$.production_eligible') = 0
-            ),
-            created_at_utc TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS agent_tradeplan_drafts (
-            record_id TEXT PRIMARY KEY,
-            actor TEXT NOT NULL CHECK(actor = 'commander'),
-            trade_date TEXT NOT NULL,
-            category TEXT,
-            status TEXT NOT NULL CHECK(status = 'shadow_draft'),
-            content_sha256 TEXT NOT NULL,
-            document_json TEXT NOT NULL CHECK(
-                json_extract(document_json, '$.status') = 'shadow_draft'
-                AND json_extract(document_json, '$.execution_eligible') = 0
-                AND json_extract(document_json, '$.broker_submission_count') = 0
-            ),
-            created_at_utc TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_theses_date_actor ON agent_theses(trade_date, actor);
-        CREATE INDEX IF NOT EXISTS idx_lessons_date_category ON lessons(trade_date, category);
-        CREATE INDEX IF NOT EXISTS idx_audit_reports_date ON audit_reports(trade_date);
-        CREATE INDEX IF NOT EXISTS idx_proposals_date ON evolution_proposals(trade_date);
-        CREATE INDEX IF NOT EXISTS idx_audit_created ON tool_audit(created_at_utc);
-        """
         with self._connect() as connection:
-            connection.executescript(schema)
+            apply_sqlite_migrations(
+                connection,
+                owner="agent_gateway.sqlite_fact_store",
+                migrations=SQLITE_AGENT_FACT_MIGRATIONS,
+            )
 
     def record_audit(
         self,

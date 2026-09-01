@@ -11,6 +11,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
+from db.migrations.sqlite import SQLiteMigration, apply_sqlite_migrations
 from execution.alpaca_paper import (
     BrokerOrder,
     PaperCloseRequest,
@@ -64,24 +65,42 @@ class TimeExitBroker(Protocol):
     ) -> BrokerOrder: ...
 
 
+def _create_time_exit_actions(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS time_exit_actions (
+            plan_id TEXT PRIMARY KEY,
+            client_order_id TEXT NOT NULL UNIQUE,
+            symbol TEXT NOT NULL,
+            status TEXT NOT NULL,
+            quantity INTEGER,
+            broker_order_id TEXT,
+            updated_at_utc TEXT NOT NULL,
+            provenance TEXT NOT NULL
+        )
+        """
+    )
+
+
+TIME_EXIT_LEDGER_MIGRATIONS = (
+    SQLiteMigration(
+        version=1,
+        name="time_exit_actions",
+        signature="time_exit_actions.v1",
+        apply=_create_time_exit_actions,
+    ),
+)
+
+
 class TimeExitLedger:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS time_exit_actions (
-                    plan_id TEXT PRIMARY KEY,
-                    client_order_id TEXT NOT NULL UNIQUE,
-                    symbol TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    quantity INTEGER,
-                    broker_order_id TEXT,
-                    updated_at_utc TEXT NOT NULL,
-                    provenance TEXT NOT NULL
-                )
-                """
+            apply_sqlite_migrations(
+                connection,
+                owner="execution.time_exit_ledger",
+                migrations=TIME_EXIT_LEDGER_MIGRATIONS,
             )
 
     def _connect(self) -> sqlite3.Connection:

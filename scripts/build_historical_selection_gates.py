@@ -8,10 +8,10 @@ from pathlib import Path
 from typing import Any
 
 import polars as pl
-from dotenv import load_dotenv
 
 from data_plane.calendar import build_xnys_schedule
 from data_plane.contracts import DataQualityCheck, DatasetSnapshot, QualitySeverity
+from data_plane.http import DownloadError
 from data_plane.providers.massive import (
     empty_free_float_frame,
     empty_ticker_details_frame,
@@ -24,6 +24,7 @@ from data_plane.providers.nasdaq_events import (
 from data_plane.storage import persist_snapshot
 from kernel.config import load_config
 from kernel.universe import apply_selection_gates
+from operations.local_env import load_project_env
 from research.history import HISTORICAL_SELECTION_PROFILE, premarket_decision_asof_utc
 from schedule.runtime import ProcessLock
 
@@ -156,7 +157,11 @@ def _market_checks(
 
 
 def _gate_checks(
-    frame: pl.DataFrame, *, target: date, locked_symbols: tuple[str, ...]
+    frame: pl.DataFrame,
+    *,
+    target: date,
+    locked_symbols: tuple[str, ...],
+    min_market_cap_usd: float,
 ) -> tuple[DataQualityCheck, ...]:
     provenance = f"{HISTORICAL_SELECTION_PROFILE}.gates@{target.isoformat()}"
     duplicates = frame.height - frame["symbol"].n_unique()
@@ -169,6 +174,7 @@ def _gate_checks(
             | pl.col("current_halt")
             | pl.col("luld_risk")
             | pl.col("market_cap").is_null()
+            | (pl.col("market_cap") < min_market_cap_usd)
         )
     ).height
     future = frame.filter(pl.col("gate_asof_utc") > premarket_decision_asof_utc(target)).height
@@ -187,7 +193,7 @@ def _gate_checks(
 
 
 def main() -> None:
-    load_dotenv(ROOT / ".env")
+    load_project_env(ROOT)
     parser = argparse.ArgumentParser()
     parser.add_argument("--end", type=_parse_date, required=True)
     parser.add_argument("--data-root", type=Path, default=ROOT / "data")
@@ -253,7 +259,35 @@ def main() -> None:
             earnings_provenance = f"nasdaq.earnings_calendar@{target.isoformat()}"
             cached_earnings = earnings_cache.get(earnings_provenance)
             if cached_earnings is None:
-                earnings = fetch_earnings_calendar(target)
+                try:
+                    earnings = fetch_earnings_calendar(target)
+                except DownloadError as exc:
+                    rows.append(
+                        {
+                            "trade_date": target,
+                            "selection_profile": HISTORICAL_SELECTION_PROFILE,
+                            "locked_symbols": 0,
+                            "rvol_pass": 0,
+                            "final_pass": 0,
+                            "status": "blocked",
+                            "block_reason": f"earnings_unavailable:{exc}",
+                            "unknown_float_policy": "fail_recent_luld_only",
+                            "selection_gate_snapshot_id": None,
+                        }
+                    )
+                    print(
+                        json.dumps(
+                            {
+                                "event": "selection_gate_blocked",
+                                "completed": index_number,
+                                "total": len(targets),
+                                "trade_date": target.isoformat(),
+                                "reason": "earnings_unavailable",
+                            }
+                        ),
+                        flush=True,
+                    )
+                    continue
                 earnings_snapshot, _ = persist_snapshot(
                     earnings,
                     root=args.data_root,
@@ -367,7 +401,10 @@ def main() -> None:
                 low_float_shares=cfg.universe.luld_low_float_shares,
             )
             checks = _gate_checks(
-                output, target=target, locked_symbols=locked_symbols
+                output,
+                target=target,
+                locked_symbols=locked_symbols,
+                min_market_cap_usd=cfg.universe.min_market_cap_usd,
             )
             halt_parent_ids = tuple(
                 halt_frames[value][1].dataset_id for value in (*prior_dates, target)
@@ -396,6 +433,8 @@ def main() -> None:
                     "rvol_pass": len(market_symbols),
                     "final_pass": output.filter(pl.col("pass_gate")).height,
                     "unknown_float_policy": "fail_recent_luld_only",
+                    "status": "complete",
+                    "block_reason": None,
                     "selection_gate_snapshot_id": gate_snapshot.dataset_id,
                 }
             )
@@ -413,8 +452,11 @@ def main() -> None:
                 flush=True,
             )
 
-    output_index = pl.DataFrame(rows).with_columns(pl.col("trade_date").cast(pl.Date))
+    output_index = pl.DataFrame(rows, infer_schema_length=None).with_columns(
+        pl.col("trade_date").cast(pl.Date)
+    )
     duplicates = output_index.height - output_index["trade_date"].n_unique()
+    blocked = output_index.filter(pl.col("status") == "blocked").height
     checks = (
         _check(
             "exact_target_count",
@@ -430,6 +472,13 @@ def main() -> None:
             "0",
             GATE_INDEX_SOURCE,
         ),
+        _check(
+            "blocked_sessions_recorded",
+            True,
+            blocked,
+            "provider failures are explicit and excluded from candidates",
+            GATE_INDEX_SOURCE,
+        ),
     )
     snapshot, path = persist_snapshot(
         output_index,
@@ -440,7 +489,11 @@ def main() -> None:
         parent_snapshot_ids=(
             pit_snapshot.dataset_id,
             rvol_index_snapshot.dataset_id,
-            *(str(row["selection_gate_snapshot_id"]) for row in rows),
+            *(
+                str(row["selection_gate_snapshot_id"])
+                for row in rows
+                if row["selection_gate_snapshot_id"] is not None
+            ),
         ),
     )
     snapshot.assert_usable()
@@ -450,6 +503,7 @@ def main() -> None:
                 "status": "complete",
                 "sessions": len(targets),
                 "final_pass": int(output_index["final_pass"].sum()),
+                "blocked_sessions": blocked,
                 "dataset_id": snapshot.dataset_id,
                 "path": str(path),
             }

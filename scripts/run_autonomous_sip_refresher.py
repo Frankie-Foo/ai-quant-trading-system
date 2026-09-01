@@ -8,6 +8,7 @@ import sys
 import time
 from pathlib import Path
 
+from operations.local_env import load_project_env
 from schedule.runtime import JsonEventLogger, ProcessLock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +66,7 @@ def refresh_command(
 
 
 def main() -> int:
+    load_project_env(ROOT)
     args = _parser().parse_args()
     if args.history_days < 7:
         raise ValueError("history-days must be at least 7")

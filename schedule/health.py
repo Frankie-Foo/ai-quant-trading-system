@@ -10,10 +10,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
+from data_plane.providers.alpaca import market_data_provider_from_env
+from operations.local_env import load_project_env, project_data_root
+from schedule.state import JOB_LEDGER_MIGRATIONS
 
 ROOT = Path(__file__).resolve().parents[1]
-REQUIRED_PROVIDER_ENV = (
+CLOUD_PROVIDER_ENV = (
     "CLOUD_PLATFORM_BASE_URL",
     "CLOUD_MARKET_DATA_API_TOKEN",
 )
@@ -80,6 +82,18 @@ def _ledger_checks(state_db: Path, *, require_success: bool) -> list[dict[str, o
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 ).fetchall()
             }
+            applied_migration_versions: set[int] | None = None
+            if "schema_migrations" in tables:
+                applied_migration_versions = {
+                    int(row[0])
+                    for row in connection.execute(
+                        """
+                        SELECT version
+                        FROM schema_migrations
+                        WHERE owner = 'schedule.job_ledger'
+                        """
+                    ).fetchall()
+                }
             if "job_runs" in tables:
                 success = connection.execute(
                     """
@@ -118,6 +132,25 @@ def _ledger_checks(state_db: Path, *, require_success: bool) -> list[dict[str, o
             critical=True,
         )
     ]
+    if healthy:
+        expected_migration_versions = {
+            migration.version for migration in JOB_LEDGER_MIGRATIONS
+        }
+        missing_migrations = expected_migration_versions - (
+            applied_migration_versions or set()
+        )
+        checks.append(
+            _check(
+                "ledger_migrations",
+                status="pass" if not missing_migrations else "fail",
+                detail=(
+                    "schedule job-ledger migrations are applied"
+                    if not missing_migrations
+                    else "schedule job-ledger migrations are missing"
+                ),
+                critical=bool(missing_migrations),
+            )
+        )
     checks.append(
         _check(
             "prior_success",
@@ -162,7 +195,37 @@ def _ledger_checks(state_db: Path, *, require_success: bool) -> list[dict[str, o
 
 
 def _credential_check() -> dict[str, object]:
-    missing = [name for name in REQUIRED_PROVIDER_ENV if not os.getenv(name, "").strip()]
+    try:
+        provider = market_data_provider_from_env()
+    except RuntimeError as exc:
+        return _check(
+            "provider_credentials",
+            status="fail",
+            detail=str(exc),
+            critical=True,
+        )
+    if provider == "alpaca_direct":
+        missing = []
+        if not any(
+            os.getenv(name, "").strip()
+            for name in (
+                "ALPACA_API_KEY_ID",
+                "ALPACA_PAPER_KEY_ID",
+                "ALPACA_API_KEY",
+            )
+        ):
+            missing.append("ALPACA_API_KEY_ID or ALPACA_PAPER_KEY_ID")
+        if not any(
+            os.getenv(name, "").strip()
+            for name in (
+                "ALPACA_API_SECRET_KEY",
+                "ALPACA_PAPER_SECRET_KEY",
+                "ALPACA_SECRET_KEY",
+            )
+        ):
+            missing.append("ALPACA_API_SECRET_KEY or ALPACA_PAPER_SECRET_KEY")
+    else:
+        missing = [name for name in CLOUD_PROVIDER_ENV if not os.getenv(name, "").strip()]
     return _check(
         "provider_credentials",
         status="pass" if not missing else "fail",
@@ -200,9 +263,9 @@ def evaluate_health(
 
 
 def main() -> None:
-    load_dotenv(ROOT / ".env")
+    load_project_env(ROOT)
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-root", type=Path, default=ROOT / "data")
+    parser.add_argument("--data-root", type=Path, default=project_data_root(ROOT))
     parser.add_argument("--state-db", type=Path, default=ROOT / "runs" / "jobs.sqlite3")
     parser.add_argument("--check-credentials", action="store_true")
     parser.add_argument("--require-success", action="store_true")

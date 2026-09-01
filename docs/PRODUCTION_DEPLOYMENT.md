@@ -1,5 +1,9 @@
 # Production deployment
 
+> The current Windows Paper production boundary is documented in
+> [RUNBOOK.md](RUNBOOK.md). The systemd units below are retained only for Linux
+> postmarket/research jobs. Premarket and Paper units are retired and must stay disabled.
+
 The supported production shape is a Linux one-shot process launched by a systemd
 timer. The process is not a daemon: every invocation acquires a cross-process lock,
 discovers due XNYS sessions, claims a versioned SQLite lease, reuses immutable accepted
@@ -76,8 +80,8 @@ sudo install -o root -g root -m 0644 \
   /opt/trading-system/deploy/systemd/*.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now \
-  trading-premarket.timer trading-paper.timer trading-postmarket.timer \
-  trading-backup.timer trading-research.timer trading-monthly-evolution.timer
+  trading-postmarket.timer trading-backup.timer trading-research.timer \
+  trading-monthly-evolution.timer
 ```
 
 If local accepted snapshots are being migrated, copy the entire immutable data tree to
@@ -96,8 +100,8 @@ sudo -u trading /opt/trading-system/.venv/bin/python -m schedule.health \
 sudo systemctl start trading-postmarket.service
 ```
 
-Before enabling the Paper timer, generate the first evidence file and run the local
-safety drills. Neither command submits orders:
+For historical evidence maintenance, generate the maturity file and run local safety
+drills. Neither command submits orders, and neither authorizes a retired Paper timer:
 
 ```bash
 sudo -u trading /opt/trading-system/.venv/bin/python \
@@ -118,8 +122,7 @@ Inspect status and structured logs:
 
 ```bash
 systemctl list-timers 'trading-*'
-systemctl status trading-premarket.service trading-paper.service \
-  trading-postmarket.service trading-backup.service
+systemctl status trading-postmarket.service trading-backup.service
 journalctl -u 'trading-*' --since today -o cat
 ```
 
@@ -177,7 +180,15 @@ Before production deployment, rotate any credential that has ever been pasted in
 chat or terminal transcript. Delayed full-market data, censored minute paths, and
 missing quote-spread costs still prohibit live trading and performance claims.
 
-## Keyless cloud market-data process
+## Windows governed evolution tasks
+
+`install_local_observation_tasks.ps1` installs the daily funnel and postmarket tasks,
+the weekly research cycle, and a daily monthly-evolution tick whose Python scheduler
+runs only on the first XNYS session of a month. The installer bootstraps an approved
+active policy without overwriting an existing one. Automated tasks may create only a
+shadow challenger; promotion and rollback remain explicit human commands.
+
+## Keyless cloud market-data process for the Linux research deployment
 
 The cloud-strategy-platform process owns the only Alpaca SIP WebSocket and all Alpaca
 credentials. This repository consumes its scoped HTTPS event API and stores a local
@@ -207,13 +218,13 @@ The AI service environment uses only scoped platform tokens:
 ```text
 CLOUD_PLATFORM_BASE_URL=https://cloud-strategy-platform.example.internal
 CLOUD_MARKET_DATA_API_TOKEN=<secret-manager-reference>
-CLOUD_PAPER_API_TOKEN=<secret-manager-reference>
 CLOUD_FEATURE_API_TOKEN=<secret-manager-reference>
+# This deployment uses the separately operated cloud proxy explicitly.
+MARKET_DATA_PROVIDER=cloud_proxy
 CLOUD_MARKET_DATA_FEED=sip
 BROKER_WRITE_ENABLED=false
 TRADING_KILL_SWITCH=true
 ```
 
-The market token cannot read Paper state or place orders. The Paper token cannot access
-collaborator signals. Never copy the cloud service's Alpaca credentials into this
-repository or its runtime environment.
+The market token cannot read Paper state or place orders. Never copy the cloud service's
+Alpaca credentials into this Linux research runtime.

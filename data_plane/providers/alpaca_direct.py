@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, overload
 
 import httpx
 from pydantic import SecretStr
@@ -17,6 +18,8 @@ from execution.alpaca_sip_stream import (
 )
 
 EndpointKind = Literal["bars", "quotes", "trades"]
+BarTimeframe = Literal["1Min", "1Day"]
+BarAdjustment = Literal["split", "raw"]
 
 
 class DirectMarketDataError(RuntimeError):
@@ -54,6 +57,32 @@ class AlpacaNewsArticle:
         return f"alpaca.news.{self.source.lower()}:{self.article_id}"
 
 
+@dataclass(frozen=True)
+class DailySipBar:
+    symbol: str
+    ts_utc: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int
+    trade_count: int
+    vwap: float | None
+    provenance: str
+    feed: str = "sip"
+
+    def __post_init__(self) -> None:
+        if not SYMBOL_PATTERN.fullmatch(self.symbol):
+            raise ValueError("daily SIP bar symbol is invalid")
+        _window_timestamp(self.ts_utc, name="daily SIP bar timestamp")
+        if min(self.open, self.high, self.low, self.close) <= 0:
+            raise ValueError("daily SIP OHLC must be positive")
+        if self.volume < 0 or self.trade_count < 0:
+            raise ValueError("daily SIP counts must be nonnegative")
+        if self.vwap is not None and self.vwap <= 0:
+            raise ValueError("daily SIP VWAP must be positive when present")
+
+
 class DirectAlpacaMarketDataClient:
     DATA_BASE_URL = "https://data.alpaca.markets"
 
@@ -65,6 +94,7 @@ class DirectAlpacaMarketDataClient:
         base_url: str = DATA_BASE_URL,
         client: httpx.Client | None = None,
         max_pages: int = 500,
+        max_retries: int = 2,
     ):
         normalized = base_url.rstrip("/")
         if normalized != self.DATA_BASE_URL:
@@ -75,8 +105,11 @@ class DirectAlpacaMarketDataClient:
             raise ValueError("Alpaca market-data secret key is required")
         if max_pages < 1:
             raise ValueError("max_pages must be positive")
+        if max_retries < 0:
+            raise ValueError("max_retries cannot be negative")
         self.base_url = normalized
         self.max_pages = max_pages
+        self.max_retries = max_retries
         self._headers = {
             "APCA-API-KEY-ID": key_id.get_secret_value(),
             "APCA-API-SECRET-KEY": secret_key.get_secret_value(),
@@ -88,42 +121,79 @@ class DirectAlpacaMarketDataClient:
         if self._owns_client:
             self._client.close()
 
+    @overload
     def fetch_bars(
         self,
         symbols: tuple[str, ...],
         *,
         start_utc: datetime,
         end_utc: datetime,
-    ) -> tuple[SipBar, ...]:
+        timeframe: Literal["1Day"],
+        adjustment: BarAdjustment = "split",
+    ) -> tuple[DailySipBar, ...]: ...
+
+    @overload
+    def fetch_bars(
+        self,
+        symbols: tuple[str, ...],
+        *,
+        start_utc: datetime,
+        end_utc: datetime,
+        timeframe: Literal["1Min"] = "1Min",
+        adjustment: BarAdjustment = "split",
+    ) -> tuple[SipBar, ...]: ...
+
+    def fetch_bars(
+        self,
+        symbols: tuple[str, ...],
+        *,
+        start_utc: datetime,
+        end_utc: datetime,
+        timeframe: BarTimeframe = "1Min",
+        adjustment: BarAdjustment = "split",
+    ) -> tuple[SipBar | DailySipBar, ...]:
         rows = self._rows(
             "bars",
             symbols=symbols,
             start_utc=start_utc,
             end_utc=end_utc,
-            extra={"timeframe": "1Min", "adjustment": "split"},
+            extra={"timeframe": timeframe, "adjustment": adjustment},
         )
-        events: list[SipBar] = []
+        events: list[SipBar | DailySipBar] = []
         for symbol, row in rows:
             try:
                 ts_utc = _timestamp(row.get("t"))
-                events.append(
-                    SipBar.model_validate(
-                        {
-                            "symbol": symbol,
-                            "ts_utc": ts_utc,
-                            "open": row.get("o"),
-                            "high": row.get("h"),
-                            "low": row.get("l"),
-                            "close": row.get("c"),
-                            "volume": row.get("v"),
-                            "trade_count": row.get("n"),
-                            "vwap": row.get("vw"),
-                            "provenance": (
-                                f"alpaca.sip.rest.bars@{ts_utc.isoformat()}"
-                            ),
-                        }
+                raw_vwap = row.get("vw")
+                vwap = None if timeframe == "1Day" and raw_vwap == 0 else raw_vwap
+                values = {
+                    "symbol": symbol,
+                    "ts_utc": ts_utc,
+                    "open": row.get("o"),
+                    "high": row.get("h"),
+                    "low": row.get("l"),
+                    "close": row.get("c"),
+                    "volume": row.get("v"),
+                    "trade_count": row.get("n"),
+                    "vwap": vwap,
+                    "provenance": f"alpaca.sip.rest.bars@{ts_utc.isoformat()}",
+                }
+                if timeframe == "1Day":
+                    events.append(
+                        DailySipBar(
+                            symbol=symbol,
+                            ts_utc=ts_utc,
+                            open=float(row["o"]),
+                            high=float(row["h"]),
+                            low=float(row["l"]),
+                            close=float(row["c"]),
+                            volume=int(row["v"]),
+                            trade_count=int(row["n"]),
+                            vwap=float(vwap) if vwap is not None else None,
+                            provenance=str(values["provenance"]),
+                        )
                     )
-                )
+                else:
+                    events.append(SipBar.model_validate(values))
             except (TypeError, ValueError) as exc:
                 raise DirectMarketDataError(
                     "Alpaca SIP bar failed schema validation"
@@ -287,9 +357,10 @@ class DirectAlpacaMarketDataClient:
                     or article.created_at_utc > end_utc
                     or article.updated_at_utc > end_utc
                 ):
-                    raise DirectMarketDataError(
-                        "Alpaca news row violated the causal request window"
-                    )
+                    # Alpaca may return a symbol-matched row outside the requested
+                    # causal window. Exclude that row; do not let one non-causal
+                    # article discard otherwise usable evidence from the page.
+                    continue
                 articles.append(article)
             next_token = payload.get("next_page_token")
             if next_token is None:
@@ -389,16 +460,20 @@ class DirectAlpacaMarketDataClient:
         label: str,
         params: dict[str, str],
     ) -> dict[str, Any]:
-        try:
-            response = self._client.get(
-                f"{self.base_url}{path}",
-                headers=self._headers,
-                params=params,
-            )
-        except (httpx.HTTPError, OSError) as exc:
-            raise DirectMarketDataError(
-                f"Alpaca {label} request failed: {type(exc).__name__}"
-            ) from exc
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = self._client.get(
+                    f"{self.base_url}{path}",
+                    headers=self._headers,
+                    params=params,
+                )
+                break
+            except (httpx.HTTPError, OSError) as exc:
+                if attempt == self.max_retries:
+                    raise DirectMarketDataError(
+                        f"Alpaca {label} request failed: {type(exc).__name__}"
+                    ) from exc
+                time.sleep(0.5 * (attempt + 1))
         if response.status_code != 200:
             raise DirectMarketDataError(
                 f"Alpaca {label} request failed with HTTP "

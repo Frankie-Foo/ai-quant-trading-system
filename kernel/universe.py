@@ -238,6 +238,8 @@ def apply_selection_gates(
             reasons.append("premarket_not_above_prior_close")
         if cap is None or cap <= 0:
             reasons.append("missing_market_cap")
+        elif cap < cfg.universe.min_market_cap_usd:
+            reasons.append("market_cap_below_min")
         if earnings_day:
             reasons.append("earnings_day")
         if current_halt:
@@ -319,7 +321,10 @@ def apply_selection_gates(
         )
         output.append(row)
 
-    result = pl.DataFrame(output).sort("symbol")
+    # Gate inputs can legitimately mix integer and fractional ratios across rows.
+    # Infer from the complete output so one early integer does not reject later
+    # valid float observations.
+    result = pl.DataFrame(output, infer_schema_length=None).sort("symbol")
     survivors = (
         result.filter(pl.col("pass_gate"))
         .sort("rvol", "symbol", descending=[True, False])

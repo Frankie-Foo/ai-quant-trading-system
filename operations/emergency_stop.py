@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from db.migrations.sqlite import SQLiteMigration, apply_sqlite_migrations
+
 
 @dataclass(frozen=True)
 class EmergencyStopState:
@@ -15,27 +17,45 @@ class EmergencyStopState:
     reason: str | None
 
 
+def _create_emergency_stop(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS emergency_stop (
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+            active INTEGER NOT NULL CHECK(active IN (0, 1)),
+            activated_at_utc TEXT,
+            reason TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO emergency_stop (
+            singleton, active, activated_at_utc, reason
+        ) VALUES (1, 0, NULL, NULL)
+        """
+    )
+
+
+EMERGENCY_STOP_MIGRATIONS = (
+    SQLiteMigration(
+        version=1,
+        name="emergency_stop",
+        signature="emergency_stop.v1",
+        apply=_create_emergency_stop,
+    ),
+)
+
+
 class EmergencyStopStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS emergency_stop (
-                    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                    active INTEGER NOT NULL CHECK(active IN (0, 1)),
-                    activated_at_utc TEXT,
-                    reason TEXT
-                )
-                """
-            )
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO emergency_stop (
-                    singleton, active, activated_at_utc, reason
-                ) VALUES (1, 0, NULL, NULL)
-                """
+            apply_sqlite_migrations(
+                connection,
+                owner="operations.emergency_stop",
+                migrations=EMERGENCY_STOP_MIGRATIONS,
             )
 
     def _connect(self) -> sqlite3.Connection:

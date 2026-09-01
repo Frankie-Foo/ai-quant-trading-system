@@ -2,18 +2,28 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+from collections.abc import Callable
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import polars as pl
-from dotenv import load_dotenv
 
 from data_plane.calendar import build_xnys_schedule
-from data_plane.catalysts import CATALYST_SCHEMA_VERSION, audit_catalysts
+from data_plane.catalysts import (
+    CATALYST_SCHEMA_VERSION,
+    audit_catalysts,
+    empty_catalyst_frame,
+)
 from data_plane.contracts import DataQualityCheck, DatasetSnapshot, QualitySeverity
-from data_plane.providers.catalyst_news import fetch_alpaca_news, fetch_massive_news
+from data_plane.http import DownloadError
+from data_plane.providers.catalyst_news import (
+    fetch_alpaca_news,
+    fetch_alpaca_news_direct,
+    fetch_massive_news,
+)
 from data_plane.providers.sec_filings import (
     fetch_candidate_filings,
     fetch_live_candidate_filings,
@@ -24,10 +34,20 @@ from kernel.catalysts import (
     prepare_catalysts,
     select_overnight_catalysts,
 )
+from operations.local_env import load_project_env
 
 ROOT = Path(__file__).resolve().parents[1]
 BEIJING = ZoneInfo("Asia/Shanghai")
 NEW_YORK = ZoneInfo("America/New_York")
+
+
+def _optional_sec_filings(
+    fetcher: Callable[..., pl.DataFrame], *args: object, **kwargs: object
+) -> tuple[pl.DataFrame, bool]:
+    try:
+        return fetcher(*args, **kwargs), True
+    except DownloadError:
+        return empty_catalyst_frame(), False
 
 
 def _parse_date(value: str) -> date:
@@ -341,7 +361,7 @@ def _counts(frame: pl.DataFrame, column: str) -> dict[str, int]:
 
 
 def main() -> None:
-    load_dotenv(ROOT / ".env")
+    load_project_env(ROOT)
     parser = argparse.ArgumentParser()
     parser.add_argument("--trade-date", type=_parse_date, required=True)
     parser.add_argument("--asof", type=_parse_utc)
@@ -383,6 +403,7 @@ def main() -> None:
         args.data_root, previous_session=previous_session, universe=candidate_universe
     )
 
+    sec_available = True
     if args.reuse_provider_snapshots:
         alpaca, alpaca_snapshot = _load_provider_snapshot(
             args.data_root,
@@ -403,18 +424,40 @@ def main() -> None:
             end_utc=end_utc,
         )
     else:
-        alpaca = fetch_alpaca_news(start_utc, end_utc)
+        market_provider = os.getenv("DESKTOP_MARKET_DATA_PROVIDER", "").strip().lower()
+        standalone = market_provider in {
+            "local_massive",
+            "alpaca_proxy_rest",
+        }
+        if market_provider == "alpaca_direct":
+            direct_symbols = tuple(
+                candidate_universe
+                .filter(pl.col("precheck_pass"))
+                .get_column("symbol")
+                .to_list()
+            )
+            alpaca = fetch_alpaca_news_direct(
+                start_utc,
+                end_utc,
+                symbols=direct_symbols,
+            )
+        elif standalone:
+            alpaca = empty_catalyst_frame()
+        else:
+            alpaca = fetch_alpaca_news(start_utc, end_utc)
         massive = fetch_massive_news(
             start_utc, end_utc, pace_seconds=args.massive_pace_seconds
         )
         if verification_mode:
-            sec = fetch_live_candidate_filings(
+            sec, sec_available = _optional_sec_filings(
+                fetch_live_candidate_filings,
                 cik_to_symbols=cik_map,
                 start_utc=start_utc,
                 end_utc=end_utc,
             )
         else:
-            sec = fetch_candidate_filings(
+            sec, sec_available = _optional_sec_filings(
+                fetch_candidate_filings,
                 _filing_dates(start_utc, asof_utc),
                 cik_to_symbols=cik_map,
                 start_utc=start_utc,
@@ -427,7 +470,7 @@ def main() -> None:
             source="alpaca.news.benzinga",
             start_utc=start_utc,
             end_utc=end_utc,
-            require_non_empty=True,
+            require_non_empty=not standalone,
         )
         massive_snapshot = _store_provider(
             massive,
@@ -512,6 +555,7 @@ def main() -> None:
             "massive": massive.height,
             "sec": sec.height,
         },
+        "sec_status": "available" if sec_available else "unavailable",
         "prepared_rows": prepared.height,
         "eligible_overnight_events": overnight.height,
         "exclusions": _counts(

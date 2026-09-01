@@ -127,3 +127,18 @@ def test_batch_append_is_atomic_and_uses_the_same_deduplication(tmp_path: Path) 
     store.append_many((quote, quote, trade, trade))
 
     assert store.counts() == {"bars": 0, "quote_seconds": 1, "trades": 1}
+
+
+def test_sip_schema_is_versioned(tmp_path: Path) -> None:
+    store = SipEventStore(tmp_path / "sip.sqlite3")
+
+    with store._connect() as connection:
+        row = connection.execute(
+            """
+            SELECT owner, version, name
+            FROM schema_migrations
+            WHERE owner = 'execution.sip_event_store'
+            """
+        ).fetchone()
+
+    assert row == ("execution.sip_event_store", 1, "sip_event_store")

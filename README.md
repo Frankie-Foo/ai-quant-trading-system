@@ -1,31 +1,41 @@
-# Intraday Trading System v2
+# 日内量化交易系统 v2
 
-Deterministic, auditable, long-only U.S. equity intraday research and execution
-kernel. M0 is complete; no strategy performance claim is produced by this
-repository yet.
+这是一个面向美股、只做多、可审计的日内研究系统。仓库包含确定性选股、盘中监控、
+证据答疑、收盘复盘，以及与研究面隔离的人工 IBKR 实盘执行台。当前版本仍处于工程
+验证阶段，不代表策略已经成熟，也不对选股准确率或收益作保证。
 
-## Local verification
+## 本地验证
 
 ```powershell
 .\.venv\Scripts\python -m pytest -v
 .\.venv\Scripts\ruff check .
 .\.venv\Scripts\mypy data_plane kernel research execution schedule agent_gateway `
-  scripts tests
+  operations scripts tests
 ```
 
-Secrets belong in `.env`, which is ignored. Never paste credentials into reports or
-commit them to the repository.
+## 企业级协作与发布
 
-The frozen specification is supplemented by [architecture decisions](docs/ARCHITECTURE.md),
-which map data, model, strategy, trading, and application layers onto this repository.
+`main` 是唯一生产基线。每个需求使用独立的 `codex/<task>` 分支和独立
+Git worktree；评审通过后合并到 `main`，生产只部署明确记录的 `main` commit。
+工作树、提交、发布、部署和故障处理规则见
+[CONTRIBUTING](CONTRIBUTING.md)、[DEPLOYMENT](docs/DEPLOYMENT.md) 和
+[RUNBOOK](docs/RUNBOOK.md)。架构边界和禁止事项见
+[AGENTS.md](AGENTS.md) 与 [ADR-0001](docs/ADR/0001-modular-monolith-and-worktrees.md)。
+
+敏感凭据只能放在被忽略的 `.env` 或客户端系统安全存储中，不能写入报告、安装包、
+源码或 Git。
+
+冻结规范的补充说明见[架构决策](docs/ARCHITECTURE.md)，其中记录了数据、模型、策略、
+交易与应用层在本仓库中的映射。
 
 ## 本地自主模拟盘
 
-三进程 Docker 运行方式现已覆盖 SIP 数据刷新、催化剂/红队/确定性监督器、
-安全信封、Alpaca Paper 执行和利弗莫尔中文通知。默认 compose 只有读取权限；
-Paper 写入必须同时通过环境授权、关闭 kill switch，并显式加载带
-`--arm-paper` 的覆盖文件。完整启动、紧急停止、状态保留和迁移说明见
-[本地自主模拟盘运行手册](docs/AUTONOMOUS_PAPER_LOCAL.md)。
+唯一自动执行链是 `schedule.modern_funnel` →
+`scripts.run_modern_funnel_stage` → `scripts.monitor_modern_momentum_paper`。
+它按纽约时间 08:00、09:25、09:35 运行三段漏斗，只有第三段的专用飞书 Base
+记录和利弗莫尔回执都成功后才生成不可变授权。默认保持冻结；Paper 启用还必须同时
+满足写入开关、关闭 kill switch、运行确认和不超过 100 美元的首次烟测上限。
+完整启动、停止、恢复和验收见[运行手册](docs/RUNBOOK.md)。
 
 The cloud multi-strategy service is a separate repository and deployment. This
 repository consumes its versioned feature API only through the slow-loop synchronization
@@ -34,33 +44,58 @@ realtime kernel reads the local point-in-time cache and never waits on remote fe
 HTTP. Its separate market collector declares a bounded lease, verifies detailed market
 health, then consumes resumable cloud SSE into the existing local SIP store.
 
-## Windows adaptive decision client
+## 跨平台本地研究客户端
 
-The desktop client is a read-only operating console over a deterministic adaptive-plan
-engine. It reconciles positions from the Broker, evaluates observed SIP quotes/trades
-and completed 1/5/15-minute bars every 15 seconds, and records only material state
-changes in an append-only SQLite event stream. Soft plan revisions have a three-minute
-cooldown and a per-session cap; hard stops and the UTC time stop remain immediate.
-Neither the client nor its HTTP interface contains an order route.
+Windows 与 macOS 发行版使用同一套 Electron 界面和本地 Python sidecar。客户端在
+用户电脑上完成数据增量同步、今日选股、盘中监控、证据答疑、三个研究 Agent 和收盘
+复盘；accepted 快照、任务账本、复盘结果与执行账本都留在本机。内置 bootstrap 只含
+研究数据和哈希清单，不含 API Key。
 
-Install the JavaScript dependencies once, copy the secret-free example plan, replace
-every placeholder with accepted point-in-time evidence, and start the complete local
-loop:
+首次启动需要配置用户自己的 OpenRouter Key、Massive Key、Alpaca SIP
+Key/Secret 和 SEC 联系信息。模型角色可分别选择。行情、新闻或财务证据缺失时，系统
+会明确阻断对应研究流程，不会用旧名单或测试数据冒充今日结果。凭据由 Electron
+`safeStorage` 调用 macOS Keychain 或 Windows 系统安全存储加密，渲染页面只接收
+脱敏状态。
+
+客户端还提供一个与研究面隔离的“盈透手动执行台”。它只连接已经由用户登录的 TWS
+或 IB Gateway，端口固定为 IBKR 实盘端口 `4001`。研究管线、选股脚本、自动复盘和
+Agent 永远不能调用该执行入口；只有用户在执行页手工输入订单并逐级确认，才可能发送
+实盘委托。研究运行状态中的 `orders_authorized=false` 仍然成立，它描述的是研究面，
+不是对人工执行台的授权。
+
+人工执行台当前具备以下约束：
+
+- 每次启动默认关闭，并且写权限默认未解锁；
+- 首次连接只允许单一可见 IBKR 账户，确认后加密绑定，后续连接严格核对；多账户环境
+  在尚未指定并绑定唯一账户时会失败关闭；
+- 只允许 `OpenLong` 和 `ReduceLong`，固定为 `STK / SMART / USD / DAY / LMT`；
+- 预览阶段先调用 IBKR What-If，再要求输入包含账户脱敏值、方向、数量、价格和随机码
+  的动态确认文字；
+- 设有单笔名义金额上限、短时预览、临时写权限、持仓与未完成卖单核对；
+- 本机 SQLite 执行账本使用客户端订单号和 `orderRef` 做幂等；提交结果不确定时进入
+  `recovery_required`，核对完成前禁止新单。
+
+必须注意：关闭实盘开关、退出客户端或清除账户绑定只会禁止新委托并断开 API，**不会
+撤销已经到达 IBKR 的订单**。当前客户端没有撤单功能；已有挂单必须在 TWS / IB
+Gateway 中核对和撤销。
+
+当前人工执行台不支持模拟盘、卖空、市价单、自动下单、括号单、止盈止损联动或客户端
+撤单，也不能替代 TWS 的风控和成交回报。用户名和密码始终只输入 TWS / IB Gateway，
+不会进入本应用。
+
+开发模式启动本地客户端：
 
 ```powershell
 Set-Location client
-npm install
-Set-Location ..
-Copy-Item config\adaptive_plans.example.json config\adaptive_plans.local.json
-.\scripts\start_adaptive_client.ps1 -Config config\adaptive_plans.local.json
+npm ci
+npm.cmd run desktop:analyst
 ```
 
-The launcher registers immutable baselines, warms the local store with historical SIP
-observations, starts the licensed event collector and Broker-authoritative plan monitor,
-and opens the Electron client. Closing the client stops only the background processes
-owned by that launch. Full contracts, state transitions, safety boundaries, and VPS
-deployment topology are documented in
-[adaptive desktop client](docs/ADAPTIVE_DESKTOP_CLIENT.md).
+完整使用与安全边界见 [macOS 本地研究客户端](docs/MACOS_RESEARCH_CLIENT.md) 和
+[IBKR 人工实盘执行台](docs/IBKR_LIVE_EXECUTION.md)；跨平台打包步骤见
+[客户端构建说明](docs/CROSS_PLATFORM_DESKTOP_BUILD.md)。原有自适应监控引擎的状态
+契约与部署说明仍见[自适应桌面客户端](docs/ADAPTIVE_DESKTOP_CLIENT.md)，但它本身不能
+越过人工执行台触发订单。
 
 Real-data bootstrap and local credential setup are documented in
 [data access](docs/DATA_ACCESS.md). Community and undocumented feeds are automatically
@@ -159,8 +194,8 @@ Build a point-in-time, explicitly non-actionable ORB-5 research snapshot with:
 ```
 
 The snapshot uses the same explicit feed policy as RVOL, reports whether the session is
-still in progress, and never drives an order. Continuous live decisions use
-`scripts.run_paper_session` and the licensed SIP WebSocket. The July 20 audit predates
+still in progress, and never drives an order. The former ORB live runner is retired;
+only the Modern H15 Paper chain described above may execute. The July 20 audit predates
 the realtime subscription and remains historical evidence only; see the
 [selection accuracy audit](docs/SELECTION_ACCURACY_AUDIT_2026-07-20.md).
 
@@ -217,12 +252,10 @@ Install the complete local Windows observation loop with:
 .\scripts\install_local_observation_tasks.ps1
 ```
 
-This registers three current-user tasks: a five-minute idempotent premarket tick, a
-five-minute DST-safe Paper-session launcher, and a 30-minute postmarket review tick.
-The Paper launcher verifies SIP and Paper access before opening the one licensed stream.
-It still cannot submit an order while `BROKER_WRITE_ENABLED=false` and
-`TRADING_KILL_SWITCH=true`. Runtime output is appended to
-`runs/premarket_scheduler.*.log`, `runs/paper_scheduler.*.log`, and
+This registers one one-minute XNYS-aware funnel task and one postmarket review task.
+The installer disables the obsolete premarket and Paper-session tasks. The funnel
+submits no order unless the immutable third-stage authorization and all Paper gates
+pass. Runtime output is appended to `runs/modern_funnel_scheduler.*.log` and
 `runs/postmarket_scheduler.*.log`.
 
 The runner itself checks the XNYS close plus the configurable postmarket data-grace
@@ -246,19 +279,21 @@ The command exits nonzero until every objective metric and external attestation 
 present. Even `live_eligible` never arms the broker; live approval remains a separate
 owner action.
 
-## Keyless cloud market data and Paper execution
+## Direct Alpaca market data and Paper execution
 
-The AI investment process owns no Alpaca credential. It verifies scoped cloud market
-and Paper API access without calling any order endpoint:
+The AI investment process uses direct Alpaca SIP market data by default. Configure
+`ALPACA_API_KEY_ID` and `ALPACA_API_SECRET_KEY`; the provider records source and feed
+provenance on every returned decision-time row. Access can be checked without calling
+any order endpoint:
 
 ```powershell
 .\.venv\Scripts\python -m scripts.verify_alpaca_access --symbols AAPL
 ```
 
-The safe output must report an active, unblocked Paper account, authenticated cloud
-market events, and `orders_submitted: 0`. Alpaca WebSocket ownership lives only in the
-separate cloud-strategy-platform repository. This local collector leases its symbols,
-waits for usable market health, then consumes the scoped SSE event API:
+The safe output must report an active, unblocked Paper account, authenticated Alpaca
+market events, and `orders_submitted: 0`. Alpaca WebSocket ownership remains separate
+from this REST data path. This local collector leases its symbols, waits for usable
+market health, then consumes the SIP event API:
 
 ```powershell
 .\.venv\Scripts\python -m scripts.stream_alpaca_sip `
@@ -271,14 +306,14 @@ It persists every received minute bar and latest NBBO quote for each symbol-seco
 WAL/FULL SQLite ledger. API failure yields no event and therefore no decision; missing
 market data is never filled.
 
-Historical cloud bars and quotes must carry a valid per-symbol `coverage` contract.
-When the cloud reports regular-session gaps, an empty upstream response, stale realtime
-events, or `fallback_recommended=true`, the AI process stops that path. It does not
-silently switch to Yahoo/community data or reconnect to Alpaca with a hidden key.
+Historical Alpaca bars and quotes carry source/feed provenance and are never filled
+when upstream data is missing. If direct Alpaca access is unavailable, the process
+fails closed; it does not silently switch to Yahoo/community data. An environment may
+opt into the old proxy only by setting `MARKET_DATA_PROVIDER=cloud_proxy`.
 
 Broker writes remain fail-closed through three independent controls:
 
-1. the AI process has only a scoped cloud Paper token, never an Alpaca Key;
+1. the AI process uses separate market-data and Paper credentials;
 2. both cloud and AI environments default Broker writes to false;
 3. `.env` defaults to `BROKER_WRITE_ENABLED=false` and `TRADING_KILL_SWITCH=true`;
 4. the execution engine also requires coded Paper product readiness before it can call
@@ -301,20 +336,9 @@ Do not change the two write-control variables yet. The realtime data and Paper p
 are verified, but the coded maturity report remains `research_only` pending sufficient
 point-in-time history, net cost-complete labels, purged OOS folds, and operational drills.
 
-Once the current-date locked selection exists, the complete centralized shadow session
-can be started with:
-
-```powershell
-.\.venv\Scripts\python -m scripts.run_paper_session `
-  --trade-date 2026-07-21 `
-  --max-seconds 60
-```
-
-This is the actual SIP -> causal ORB intent -> NBBO -> account-aware sizing -> TradePlan
--> P0/P1/P2 -> OMS path. Under the current evidence and default environment it records
-plans and decisions but cannot submit an order. A future Paper order requires the
-maturity report to reach `paper_eligible`, the broker write flag to be deliberately
-enabled, and the kill switch to be deliberately disarmed at the same time.
+The historical centralized ORB session remains available as library code for tests and
+postmortems, but its CLI is permanently blocked and must not be deployed. New Paper
+execution goes only through the receipt-authorized Modern H15 chain.
 
 ## Production operations
 
@@ -355,3 +379,22 @@ and confirms the winner once on an untouched fifth holdout. It automatically rec
 new research champion or retains the baseline. The decision always has
 `production_eligible=false`: agents can propose hypotheses, but neither an agent nor the
 sandbox can silently modify the execution kernel or authorize capital.
+
+The loop is connected end to end. `runs/strategy/active.json` is the only policy
+allowed to affect selection; `runs/strategy/challenger.json` is shadow-only and cannot
+submit orders. Promotion requires at least 20 complete shadow sessions, no worse
+precision, at least 50% opportunity-capture retention, and an explicit human approver.
+Monthly jobs may build a challenger but cannot approve it. Every promotion archives the
+prior policy for hash-verified rollback.
+
+```powershell
+python -m scripts.manage_strategy_policy status --active runs/strategy/active.json `
+  --challenger runs/strategy/challenger.json
+python -m scripts.manage_strategy_policy approve --active runs/strategy/active.json `
+  --challenger runs/strategy/challenger.json --data-root data `
+  --history-dir runs/strategy/history --approved-by Frank `
+  --confirm-policy-hash <reviewed-challenger-hash>
+python -m scripts.manage_strategy_policy rollback --active runs/strategy/active.json `
+  --history-dir runs/strategy/history --target-version <verified-version> `
+  --approved-by Frank
+```

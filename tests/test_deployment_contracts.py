@@ -25,20 +25,19 @@ def test_systemd_service_is_non_root_hardened_and_idempotent() -> None:
     assert "Persistent=true" in timer
 
 
-def test_premarket_and_paper_units_preserve_fail_closed_defaults() -> None:
-    premarket = (ROOT / "deploy/systemd/trading-premarket.service").read_text(encoding="utf-8")
-    paper = (ROOT / "deploy/systemd/trading-paper.service").read_text(encoding="utf-8")
+def test_retired_linux_premarket_and_paper_units_are_absent() -> None:
     environment = (ROOT / "deploy/trading-system.env.example").read_text(encoding="utf-8")
-    assert "User=trading" in premarket and "User=trading" in paper
-    assert "NoNewPrivileges=true" in premarket and "NoNewPrivileges=true" in paper
-    assert "schedule.premarket" in premarket
-    assert "scripts.run_paper_session" in paper
-    assert "scripts.verify_alpaca_access" in paper
-    assert "--sip-lock-file /run/trading-system/alpaca-sip.lock" in paper
-    assert "scripts.refresh_maturity_evidence" in paper
+    for name in (
+        "trading-premarket.service",
+        "trading-premarket.timer",
+        "trading-paper.service",
+        "trading-paper.timer",
+    ):
+        assert not (ROOT / "deploy" / "systemd" / name).exists()
     assert "BROKER_WRITE_ENABLED=false" in environment
     assert "TRADING_KILL_SWITCH=true" in environment
     assert "CLOUD_PLATFORM_BASE_URL=https://cloud-strategy-platform.example.internal" in environment
+    assert "MARKET_DATA_PROVIDER=cloud_proxy" in environment
     assert "ALPACA_API_KEY_ID" not in environment
     assert "ALPACA_API_SECRET_KEY" not in environment
 
@@ -106,18 +105,52 @@ def test_windows_observation_tasks_cover_all_daily_phases_without_order_flags() 
         encoding="utf-8"
     )
     premarket = (ROOT / "scripts/run_premarket_tick.ps1").read_text(encoding="utf-8")
-    paper = (ROOT / "scripts/run_paper_tick.ps1").read_text(encoding="utf-8")
     postmarket = (ROOT / "scripts/run_postmarket_tick.ps1").read_text(encoding="utf-8")
 
-    assert "Trading System V2 - Premarket" in installer
-    assert "Trading System V2 - Paper Session" in installer
+    assert 'TaskName "Trading System V2 - AI Quant Funnel"' in installer
+    assert 'Runner (Join-Path $PSScriptRoot "run_modern_funnel_tick.ps1")' in installer
+    assert "-IntervalMinutes 1" in installer
+    legacy_paper_registration = (
+        'Register-ObservationTask `\n    -TaskName "Trading System V2 - Paper Session"'
+    )
+    assert legacy_paper_registration not in installer
     assert "Trading System V2 - Postmarket Review" in installer
+    assert "Trading System V2 - Monthly Evolution" in installer
+    assert "Trading System V2 - Research Cycle" in installer
     assert "MultipleInstances IgnoreNew" in installer
     assert "schedule.premarket" in premarket
-    assert "schedule.paper" in paper
+    assert "prepare_autonomous_selection_handoff" not in premarket
+    assert "start_autonomous_paper_day" not in premarket
+    assert not (ROOT / "scripts/run_paper_tick.ps1").exists()
     assert "schedule.postmarket" in postmarket
-    assert "BROKER_WRITE_ENABLED" not in installer + premarket + paper + postmarket
-    assert "TRADING_KILL_SWITCH" not in installer + premarket + paper + postmarket
+    assert "BROKER_WRITE_ENABLED" not in installer + premarket + postmarket
+    assert "TRADING_KILL_SWITCH" not in installer + premarket + postmarket
+
+
+def test_windows_funnel_runner_uses_explicit_machine_runtime_dependencies() -> None:
+    installer = (ROOT / "scripts/install_local_observation_tasks.ps1").read_text(
+        encoding="utf-8"
+    )
+    funnel = (ROOT / "scripts/run_modern_funnel_tick.ps1").read_text(encoding="utf-8")
+    postmarket = (ROOT / "scripts/run_postmarket_tick.ps1").read_text(encoding="utf-8")
+
+    for parameter in (
+        "PythonPath",
+        "EnvironmentFile",
+        "DataRoot",
+        "ActivePolicyFile",
+        "ChallengerPolicyFile",
+    ):
+        assert parameter in installer
+        assert parameter in funnel
+        assert parameter in postmarket
+    assert "AI_QUANT_RUNTIME_ENV_FILE" in funnel + postmarket
+    assert "AI_QUANT_DATA_ROOT" in funnel + postmarket
+    assert "AI_QUANT_ACTIVE_POLICY_FILE" in funnel + postmarket
+    assert "AI_QUANT_CHALLENGER_POLICY_FILE" in funnel + postmarket
+    assert "ArmPaper" in installer + funnel
+    assert "AI_QUANT_PAPER_RUNTIME_CONFIRMED" in funnel
+    assert "AI_QUANT_PAPER_SMOKE_MAX_NOTIONAL" in funnel
 
 
 def test_windows_supervisor_is_a_current_user_startup_fallback() -> None:

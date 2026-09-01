@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from datetime import UTC, date, datetime, timedelta
@@ -26,12 +27,22 @@ from execution.settings import ExecutionSettings
 from execution.sip_store import SipEventStore
 from execution.time_exit import TimeExitCoordinator, TimeExitLedger
 from kernel.config import load_config
+from operations.feishu_base import FeishuBaseError, FeishuBaseEventClient
+from operations.feishu_investment_events import (
+    record_paper_execution,
+    record_paper_monitor_trigger,
+)
+from operations.paper_runtime_policy import reject_retired_paper_runtime
 from operations.readiness import MaturityEvidence, assess_product_readiness
 from schedule.runtime import JsonEventLogger, ProcessLock
 
 ROOT = Path(__file__).resolve().parents[1]
 NEW_YORK = ZoneInfo("America/New_York")
 TIME_EXIT_POLL_SECONDS = 5.0
+
+
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 async def _read_next_event(events: AsyncIterator[SipEvent]) -> SipEvent:
@@ -141,6 +152,7 @@ async def _run(args: argparse.Namespace, logger: JsonEventLogger) -> None:
         trade_date,
         min_rvol=cfg.universe.min_rvol,
     )
+    feishu = FeishuBaseEventClient.from_environment(os.environ)
     calendar = build_xnys_schedule(trade_date, trade_date)
     if calendar.height != 1:
         raise ValueError("target XNYS session is unavailable")
@@ -175,7 +187,12 @@ async def _run(args: argparse.Namespace, logger: JsonEventLogger) -> None:
         config=cfg,
         paper_authorized=readiness.paper_eligible,
     )
-    recovery = reconcile_startup(order_ledger, broker, at_utc=datetime.now(UTC))
+    recovery = reconcile_startup(
+        order_ledger,
+        broker,
+        at_utc=datetime.now(UTC),
+        trade_date=trade_date,
+    )
     logger.emit(
         "paper_startup_reconciliation",
         checked_orders=recovery.checked_orders,
@@ -183,6 +200,7 @@ async def _run(args: argparse.Namespace, logger: JsonEventLogger) -> None:
         unresolved_orders=recovery.unresolved_orders,
         position_symbols=recovery.position_symbols,
         unmatched_position_symbols=recovery.unmatched_position_symbols,
+        position_mismatch_symbols=recovery.position_mismatch_symbols,
         match_rate=recovery.match_rate,
         safe_to_resume=recovery.safe_to_resume,
     )
@@ -319,6 +337,30 @@ async def _run(args: argparse.Namespace, logger: JsonEventLogger) -> None:
                         dry_run=result.dry_run,
                         replayed=result.replayed,
                     )
+                    if feishu is not None:
+                        try:
+                            observed_at_utc = datetime.now(UTC)
+                            record_paper_monitor_trigger(
+                                feishu,
+                                trade_date=trade_date,
+                                observed_at_utc=observed_at_utc,
+                                result=result,
+                            )
+                            record_paper_execution(
+                                feishu,
+                                trade_date=trade_date,
+                                observed_at_utc=observed_at_utc,
+                                result=result,
+                            )
+                        except FeishuBaseError as exc:
+                            logger.emit(
+                                "feishu_trade_write_failed",
+                                level="error",
+                                error_type=type(exc).__name__,
+                                plan_id=result.lifecycle.plan_id,
+                            )
+                            if _truthy(os.environ.get("FEISHU_INVESTMENT_AUDIT_REQUIRED")):
+                                raise
             finally:
                 await _cancel_pending_event(pending_event)
     except BaseException as exc:
@@ -361,6 +403,7 @@ async def _run(args: argparse.Namespace, logger: JsonEventLogger) -> None:
 
 
 def main() -> int:
+    reject_retired_paper_runtime("centralized-causal-orb")
     args = _parse_args()
     logger = JsonEventLogger(service="paper_session")
     with ProcessLock(args.lock_file):

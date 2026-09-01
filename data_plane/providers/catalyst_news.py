@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import os
+import re
 import time
 from datetime import UTC, datetime
 
 import httpx
 import polars as pl
+from pydantic import SecretStr
 
 from data_plane.catalysts import canonicalize_catalysts, empty_catalyst_frame
 from data_plane.http import DownloadError, QueryValue, get_json
 from data_plane.providers.alpaca import PLATFORM_API_VERSION, platform_access_from_env
+from data_plane.providers.alpaca_direct import DirectAlpacaMarketDataClient
 from data_plane.providers.massive import _set_query_value, api_key_from_env
 
 MASSIVE_NEWS_URL = "https://api.massive.com/v2/reference/news"
@@ -81,15 +85,100 @@ def fetch_alpaca_news(
     )
 
 
+def fetch_alpaca_news_direct(
+    start_utc: datetime,
+    end_utc: datetime,
+    *,
+    symbols: tuple[str, ...],
+    chunk_size: int = 50,
+) -> pl.DataFrame:
+    """Temporary direct Alpaca fallback; credentials stay in the child process."""
+
+    _validate_window(start_utc, end_utc)
+    normalized = tuple(sorted({symbol.strip().upper() for symbol in symbols if symbol.strip()}))
+    if not normalized:
+        return empty_catalyst_frame()
+    if not 1 <= chunk_size <= 100:
+        raise ValueError("chunk_size must be between 1 and 100")
+    key_id = (
+        os.getenv("ALPACA_API_KEY_ID", "").strip()
+        or os.getenv("ALPACA_API_KEY", "").strip()
+        or os.getenv("APCA_API_KEY_ID", "").strip()
+    )
+    secret_key = (
+        os.getenv("ALPACA_API_SECRET_KEY", "").strip()
+        or os.getenv("ALPACA_SECRET_KEY", "").strip()
+        or os.getenv("APCA_API_SECRET_KEY", "").strip()
+    )
+    if not key_id or not secret_key:
+        raise DownloadError("direct Alpaca credentials are missing")
+    client = DirectAlpacaMarketDataClient(
+        key_id=SecretStr(key_id), secret_key=SecretStr(secret_key)
+    )
+    merged: dict[str, dict[str, object]] = {}
+    try:
+        for offset in range(0, len(normalized), chunk_size):
+            for article in client.fetch_news(
+                normalized[offset : offset + chunk_size],
+                start_utc=start_utc,
+                end_utc=end_utc,
+            ):
+                existing = merged.get(article.article_id)
+                if existing is None:
+                    merged[article.article_id] = {
+                        "source": "alpaca.news.benzinga",
+                        "source_event_id": article.article_id,
+                        "event_type": "news",
+                        "event_subtype": None,
+                        "published_utc": article.created_at_utc,
+                        "updated_utc": article.updated_at_utc,
+                        "retrieved_utc": datetime.now(UTC),
+                        "symbols": list(article.symbols),
+                        "headline": article.headline,
+                        "summary": article.summary,
+                        "publisher": article.source,
+                        "url": article.url,
+                        "cik": None,
+                        "accession_number": None,
+                        "form_items": [],
+                        "tags": [],
+                        "provenance": article.provenance,
+                    }
+                else:
+                    existing_symbols = existing["symbols"]
+                    if not isinstance(existing_symbols, list):
+                        raise DownloadError("direct Alpaca symbols merge failed")
+                    existing["symbols"] = sorted(
+                        {str(item) for item in existing_symbols} | set(article.symbols)
+                    )
+    finally:
+        client.close()
+    frame = canonicalize_catalysts(
+        pl.DataFrame(tuple(merged.values()))
+        if merged
+        else empty_catalyst_frame()
+    )
+    return frame.filter(
+        (pl.col("published_utc") >= start_utc) & (pl.col("published_utc") < end_utc)
+    )
+
+
 def fetch_massive_news(
     start_utc: datetime,
     end_utc: datetime,
     *,
     pace_seconds: float = 12.5,
+    ticker: str | None = None,
 ) -> pl.DataFrame:
     _validate_window(start_utc, end_utc)
     if pace_seconds < 0:
         raise ValueError("pace_seconds must be nonnegative")
+    normalized_ticker = None if ticker is None else ticker.strip().upper()
+    if normalized_ticker is not None and (
+        not normalized_ticker
+        or re.fullmatch(r"[A-Z][A-Z0-9.-]{0,14}", normalized_ticker) is None
+    ):
+        raise ValueError("Massive news ticker is invalid")
     headers = {"Authorization": f"Bearer {api_key_from_env()}"}
     url = MASSIVE_NEWS_URL
     params: dict[str, QueryValue] | None = {
@@ -98,6 +187,7 @@ def fetch_massive_news(
         "sort": "published_utc",
         "order": "asc",
         "limit": 1000,
+        **({"ticker": normalized_ticker} if normalized_ticker else {}),
     }
     retrieved = datetime.now(UTC)
     rows: list[dict[str, object]] = []

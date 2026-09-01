@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -11,10 +13,13 @@ from execution.alpaca_paper import (
     BrokerWritesDisabledError,
     CloudPaperBroker,
     DirectAlpacaPaperBroker,
+    FreshNbboQuote,
     PaperCloseRequest,
     PaperExtendedLimitRequest,
     PaperOrderRequest,
     PaperStopRequest,
+    ProtectedPaperEntryRequest,
+    build_protected_entry,
 )
 
 
@@ -199,6 +204,126 @@ def test_regular_entry_can_attach_stop_without_forcing_full_take_profit() -> Non
         "order_class": "oto",
         "stop_loss": {"stop_price": "223.00"},
     }
+
+
+def test_regular_entry_can_be_submitted_without_attached_legs() -> None:
+    request = PaperOrderRequest(
+        client_order_id="tsv2-AAPL-probe-entry",
+        symbol="AAPL",
+        qty=5,
+    )
+
+    assert request.broker_payload() == {
+        "client_order_id": "tsv2-AAPL-probe-entry",
+        "symbol": "AAPL",
+        "qty": "5",
+        "side": "buy",
+        "type": "market",
+        "time_in_force": "day",
+        "extended_hours": False,
+    }
+
+
+def test_take_profit_entry_requires_a_protective_stop() -> None:
+    with pytest.raises(ValueError, match="requires stop_loss_price"):
+        PaperOrderRequest(
+            client_order_id="tsv2-AAPL-invalid-entry",
+            symbol="AAPL",
+            qty=5,
+            take_profit_price="230.00",
+        )
+
+
+def test_protected_entry_is_a_marketable_limit_bracket_with_three_r_target() -> None:
+    now = datetime(2026, 8, 24, 14, 0, tzinfo=UTC)
+    request = build_protected_entry(
+        client_order_id="mm-20260824-AAPL-entry-1",
+        symbol="AAPL",
+        qty=100,
+        signal_reference=Decimal("100.00"),
+        structural_stop=Decimal("98.55"),
+        quote=FreshNbboQuote(
+            symbol="AAPL",
+            bid=Decimal("100.00"),
+            ask=Decimal("100.05"),
+            asof_utc=now - timedelta(milliseconds=100),
+            feed="sip",
+        ),
+        observed_at_utc=now,
+        stop_slippage_reserve=Decimal("0.005"),
+    )
+
+    assert isinstance(request, ProtectedPaperEntryRequest)
+    assert request.broker_payload() == {
+        "client_order_id": "mm-20260824-AAPL-entry-1",
+        "symbol": "AAPL",
+        "qty": "100",
+        "side": "buy",
+        "type": "limit",
+        "time_in_force": "day",
+        "extended_hours": False,
+        "limit_price": "100.05",
+        "order_class": "bracket",
+        "stop_loss": {"stop_price": "98.55"},
+        "take_profit": {"limit_price": "104.55"},
+    }
+
+
+def test_protected_entry_allows_a_point_two_percent_immediate_spread() -> None:
+    now = datetime(2026, 8, 24, 14, 0, tzinfo=UTC)
+
+    request = build_protected_entry(
+        client_order_id="mm-20260824-AAPL-entry-wide",
+        symbol="AAPL",
+        qty=10,
+        signal_reference=Decimal("100.00"),
+        structural_stop=Decimal("98.50"),
+        quote=FreshNbboQuote(
+            symbol="AAPL",
+            bid=Decimal("100.00"),
+            ask=Decimal("100.20"),
+            asof_utc=now - timedelta(milliseconds=100),
+            feed="sip",
+        ),
+        observed_at_utc=now,
+    )
+
+    assert request.limit_price == "100.20"
+
+
+@pytest.mark.parametrize(
+    ("bid", "ask", "age_seconds", "feed", "message"),
+    [
+        ("99.80", "100.05", 0.1, "sip", "spread"),
+        ("100.25", "100.26", 0.1, "sip", "slippage"),
+        ("100.00", "100.05", 3.0, "sip", "stale"),
+        ("100.00", "100.05", 0.1, "iex", "SIP"),
+    ],
+)
+def test_protected_entry_rejects_bad_immediate_nbbo(
+    bid: str,
+    ask: str,
+    age_seconds: float,
+    feed: str,
+    message: str,
+) -> None:
+    now = datetime(2026, 8, 24, 14, 0, tzinfo=UTC)
+    with pytest.raises(ValueError, match=message):
+        build_protected_entry(
+            client_order_id="mm-20260824-AAPL-entry-1",
+            symbol="AAPL",
+            qty=100,
+            signal_reference=Decimal("100.00"),
+            structural_stop=Decimal("98.50"),
+            quote=FreshNbboQuote(
+                symbol="AAPL",
+                bid=Decimal(bid),
+                ask=Decimal(ask),
+                asof_utc=now - timedelta(seconds=age_seconds),
+                feed=feed,
+            ),
+            observed_at_utc=now,
+        )
 
 
 def test_regular_protective_stop_is_sell_only_and_cannot_open_a_long() -> None:
@@ -404,6 +529,63 @@ def test_direct_adapter_submits_structured_paper_orders_and_cancels() -> None:
     assert submitted[1]["extended_hours"] is True
     assert submitted[1]["type"] == "limit"
     assert broker.cancel_order("working-1") is True
+
+
+def test_direct_adapter_submits_protected_entry_as_one_bracket() -> None:
+    submitted: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            assert request.url.params["nested"] == "true"
+            return httpx.Response(404)
+        payload = json.loads(request.content)
+        submitted.append(payload)
+        return httpx.Response(
+            201,
+            json={
+                "id": "protected-parent",
+                "client_order_id": payload["client_order_id"],
+                "symbol": payload["symbol"],
+                "qty": payload["qty"],
+                "filled_qty": "0",
+                "status": "new",
+                "legs": [
+                    {
+                        "id": "stop-child",
+                        "client_order_id": "stop-child-client",
+                        "symbol": "AAPL",
+                        "qty": "100",
+                        "filled_qty": "0",
+                        "status": "held",
+                        "side": "sell",
+                        "type": "stop",
+                        "legs": None,
+                    }
+                ],
+            },
+        )
+
+    request = build_protected_entry(
+        client_order_id="mm-20260824-AAPL-entry-1",
+        symbol="AAPL",
+        qty=100,
+        signal_reference=Decimal("100.00"),
+        structural_stop=Decimal("98.55"),
+        quote=FreshNbboQuote(
+            symbol="AAPL",
+            bid=Decimal("100.00"),
+            ask=Decimal("100.05"),
+            asof_utc=datetime(2026, 8, 24, 14, 0, tzinfo=UTC),
+            feed="sip",
+        ),
+        observed_at_utc=datetime(2026, 8, 24, 14, 0, tzinfo=UTC),
+        stop_slippage_reserve=Decimal("0.005"),
+    )
+    order = _direct_broker(handler).submit_protected_entry_idempotent(request)
+
+    assert submitted[0]["type"] == "limit"
+    assert submitted[0]["order_class"] == "bracket"
+    assert order.legs[0].order_type == "stop"
 
 
 def test_direct_adapter_write_gate_blocks_before_idempotency_network_read() -> None:

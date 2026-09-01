@@ -187,3 +187,23 @@ def test_cleared_blocker_can_be_emitted_again_without_poll_noise(
     assert first_block.sequence == 2
     assert cleared.sequence is None
     assert second_block.sequence == 3
+
+
+def test_adaptive_plan_schema_is_versioned(tmp_path: Path) -> None:
+    store = AdaptivePlanStore(tmp_path / "adaptive.sqlite3")
+
+    with store._connect() as connection:
+        row = connection.execute(
+            """
+            SELECT owner, version, name
+            FROM schema_migrations
+            WHERE owner = 'operations.adaptive_plan_store'
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert tuple(row) == (
+        "operations.adaptive_plan_store",
+        1,
+        "adaptive_plan_schema",
+    )

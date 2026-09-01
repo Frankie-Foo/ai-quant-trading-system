@@ -1,1 +1,2 @@
--- Frozen Postgres schema is implemented and migration-tested in M6.
+-- Domain schemas are currently owned by their adapters and bootstrapped
+-- idempotently. See db/README.md before adding an executable migration.

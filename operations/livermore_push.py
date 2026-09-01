@@ -3,14 +3,26 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any, cast
 
 import httpx
 from pydantic import SecretStr
 
+DEFAULT_APP_ID = ""
+DEFAULT_CHANNEL_ID = ""
+
 
 class LivermorePushError(RuntimeError):
     """Sanitized push failure without secrets or response content."""
+
+
+def configured_identity(environment: Mapping[str, str]) -> tuple[str, str]:
+    """Read the collaborator-owned Livermore identity from local configuration."""
+
+    app_id = str(environment.get("VPS_LIVERMORE_APP_ID", "")).strip() or DEFAULT_APP_ID
+    channel_id = str(environment.get("VPS_LIVERMORE_CHANNEL_ID", "")).strip() or DEFAULT_CHANNEL_ID
+    return app_id, channel_id
 
 
 class LivermorePushClient:
@@ -47,6 +59,12 @@ class LivermorePushClient:
     def push(self, body: str) -> str:
         if not body.strip():
             raise ValueError("Livermore message body is required")
+        if (
+            "\ufffd" in body
+            or "??" in body
+            or body.encode("utf-8").decode("utf-8") != body
+        ):
+            raise ValueError("Livermore message must contain reversible UTF-8 text")
         request_body = json.dumps(
             {"channel_id": self.channel_id, "body": body},
             ensure_ascii=False,

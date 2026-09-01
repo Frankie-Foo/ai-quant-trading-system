@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal, InvalidOperation
-from enum import StrEnum
+from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
+from db.migrations.sqlite import SQLiteMigration, apply_sqlite_migrations
 from execution.account_guardian import (
     AccountGuardian,
     AccountGuardianLedger,
@@ -81,23 +84,43 @@ class AutonomousPaperPlan:
     source_snapshot_ids: tuple[str, ...]
     provenance: str
     max_spread_ratio: Decimal = Decimal("0.0025")
+    take_profit_1: Decimal | None = None
+    take_profit_2: Decimal | None = None
 
     def __post_init__(self) -> None:
         if not self.plan_id.strip():
             raise ValueError("autonomous Paper plan_id is required")
         if not self.symbol or self.symbol != self.symbol.strip().upper():
             raise ValueError("autonomous Paper symbol must be normalized uppercase")
-        for name, value in (
+        for name, price_value in (
             ("reference_price", self.reference_price),
             ("hard_stop", self.hard_stop),
             ("max_notional_fraction", self.max_notional_fraction),
             ("full_risk_fraction", self.full_risk_fraction),
             ("max_spread_ratio", self.max_spread_ratio),
         ):
-            if not value.is_finite() or value <= 0:
+            if not price_value.is_finite() or price_value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
+        for name, optional_price in (
+            ("take_profit_1", self.take_profit_1),
+            ("take_profit_2", self.take_profit_2),
+        ):
+            if optional_price is not None and (
+                not optional_price.is_finite() or optional_price <= 0
+            ):
+                raise ValueError(f"{name} must be finite and positive when available")
         if self.hard_stop >= self.reference_price:
             raise ValueError("hard_stop must be below reference_price for long-only plans")
+        if self.take_profit_1 is not None and self.take_profit_1 <= self.reference_price:
+            raise ValueError("take_profit_1 must be above reference_price")
+        if self.take_profit_2 is not None and self.take_profit_2 <= self.reference_price:
+            raise ValueError("take_profit_2 must be above reference_price")
+        if (
+            self.take_profit_1 is not None
+            and self.take_profit_2 is not None
+            and self.take_profit_2 < self.take_profit_1
+        ):
+            raise ValueError("take_profit_2 must not be below take_profit_1")
         if self.max_notional_fraction > Decimal("1"):
             raise ValueError("max_notional_fraction cannot exceed one")
         if self.full_risk_fraction > Decimal("0.0035"):
@@ -184,15 +207,11 @@ class AutonomousPaperBroker(Protocol):
 
     def cancel_order(self, order_id: str) -> bool: ...
 
-    def submit_close_order_idempotent(
-        self, request: PaperCloseRequest
-    ) -> BrokerOrder: ...
+    def submit_close_order_idempotent(self, request: PaperCloseRequest) -> BrokerOrder: ...
 
     def submit_order_idempotent(self, request: PaperOrderRequest) -> BrokerOrder: ...
 
-    def submit_stop_order_idempotent(
-        self, request: PaperStopRequest
-    ) -> BrokerOrder: ...
+    def submit_stop_order_idempotent(self, request: PaperStopRequest) -> BrokerOrder: ...
 
     def submit_extended_limit_idempotent(
         self, request: PaperExtendedLimitRequest
@@ -220,6 +239,53 @@ class _TailRuntimeState:
     order_flow_below_45_seconds: int
     last_observed_at_utc: datetime
     order_flow_below_active: bool
+
+
+@dataclass(frozen=True)
+class PaperPlanEvaluationSummary:
+    plan_id: str
+    symbol: str
+    trade_date: date
+    evaluation_count: int
+    observe_count: int
+    data_blocked_count: int
+    runtime_failure_count: int
+    submitted_order_count: int
+    first_observed_at_utc: datetime
+    last_observed_at_utc: datetime
+    last_action: str
+    last_reasons: tuple[str, ...]
+
+
+def _verify_autonomous_paper_schema(connection: sqlite3.Connection) -> None:
+    required = {
+        "paper_session_days",
+        "paper_session_commands",
+        "paper_premarket_entries",
+        "paper_position_lifecycle",
+        "paper_tail_runtime",
+        "paper_autopilot_audit_events",
+        "paper_plan_evaluation_summary",
+    }
+    present = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    missing = required - present
+    if missing:
+        raise RuntimeError(f"autonomous Paper schema is incomplete: {sorted(missing)}")
+
+
+AUTONOMOUS_PAPER_MIGRATIONS = (
+    SQLiteMigration(
+        version=1,
+        name="autonomous_paper_schema",
+        signature="autonomous_paper_schema.v1",
+        apply=_verify_autonomous_paper_schema,
+    ),
+)
 
 
 class PaperSessionLedger:
@@ -264,7 +330,39 @@ class PaperSessionLedger:
                     last_observed_at_utc TEXT NOT NULL,
                     order_flow_below_active INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS paper_autopilot_audit_events (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    occurred_at_utc TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    previous_hash TEXT NOT NULL,
+                    event_hash TEXT NOT NULL UNIQUE
+                );
+                CREATE INDEX IF NOT EXISTS idx_paper_autopilot_audit_run_sequence
+                    ON paper_autopilot_audit_events (run_id, sequence);
+                CREATE TABLE IF NOT EXISTS paper_plan_evaluation_summary (
+                    plan_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    evaluation_count INTEGER NOT NULL,
+                    observe_count INTEGER NOT NULL,
+                    data_blocked_count INTEGER NOT NULL,
+                    runtime_failure_count INTEGER NOT NULL,
+                    submitted_order_count INTEGER NOT NULL,
+                    first_observed_at_utc TEXT NOT NULL,
+                    last_observed_at_utc TEXT NOT NULL,
+                    last_action TEXT NOT NULL,
+                    last_reasons_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_paper_plan_evaluation_trade_date
+                    ON paper_plan_evaluation_summary (trade_date, symbol);
                 """
+            )
+            apply_sqlite_migrations(
+                connection,
+                owner="execution.autonomous_paper_session",
+                migrations=AUTONOMOUS_PAPER_MIGRATIONS,
             )
 
     def _connect(self) -> sqlite3.Connection:
@@ -300,6 +398,188 @@ class PaperSessionLedger:
                 """,
                 (trade_date.isoformat(), reason, at_utc.isoformat()),
             )
+
+    def record_plan_evaluation(
+        self,
+        plan: AutonomousPaperPlan,
+        *,
+        action: SessionAction,
+        reasons: tuple[str, ...],
+        degraded_reasons: tuple[str, ...],
+        submitted_order_ids: tuple[str, ...],
+        at_utc: datetime,
+    ) -> None:
+        """Aggregate runtime evidence without persisting per-second market facts."""
+
+        _require_utc(at_utc)
+        reason_values = tuple(dict.fromkeys((*reasons, *degraded_reasons)))
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO paper_plan_evaluation_summary (
+                    plan_id, symbol, trade_date, evaluation_count, observe_count,
+                    data_blocked_count, runtime_failure_count, submitted_order_count,
+                    first_observed_at_utc, last_observed_at_utc, last_action,
+                    last_reasons_json
+                ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(plan_id) DO UPDATE SET
+                    evaluation_count=evaluation_count + 1,
+                    observe_count=observe_count + excluded.observe_count,
+                    data_blocked_count=data_blocked_count + excluded.data_blocked_count,
+                    runtime_failure_count=(
+                        runtime_failure_count + excluded.runtime_failure_count
+                    ),
+                    submitted_order_count=(
+                        submitted_order_count + excluded.submitted_order_count
+                    ),
+                    last_observed_at_utc=excluded.last_observed_at_utc,
+                    last_action=excluded.last_action,
+                    last_reasons_json=excluded.last_reasons_json
+                """,
+                (
+                    plan.plan_id,
+                    plan.symbol,
+                    plan.trade_date.isoformat(),
+                    int(action is SessionAction.OBSERVE),
+                    int(action is SessionAction.DATA_BLOCKED),
+                    int(bool(degraded_reasons)),
+                    len(submitted_order_ids),
+                    at_utc.isoformat(),
+                    at_utc.isoformat(),
+                    action.value,
+                    json.dumps(reason_values, ensure_ascii=False),
+                ),
+            )
+
+    def plan_evaluation_summaries(self, trade_date: date) -> tuple[PaperPlanEvaluationSummary, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM paper_plan_evaluation_summary
+                WHERE trade_date=? ORDER BY symbol, plan_id
+                """,
+                (trade_date.isoformat(),),
+            ).fetchall()
+        return tuple(
+            PaperPlanEvaluationSummary(
+                plan_id=str(row["plan_id"]),
+                symbol=str(row["symbol"]),
+                trade_date=date.fromisoformat(str(row["trade_date"])),
+                evaluation_count=int(row["evaluation_count"]),
+                observe_count=int(row["observe_count"]),
+                data_blocked_count=int(row["data_blocked_count"]),
+                runtime_failure_count=int(row["runtime_failure_count"]),
+                submitted_order_count=int(row["submitted_order_count"]),
+                first_observed_at_utc=datetime.fromisoformat(str(row["first_observed_at_utc"])),
+                last_observed_at_utc=datetime.fromisoformat(str(row["last_observed_at_utc"])),
+                last_action=str(row["last_action"]),
+                last_reasons=tuple(json.loads(str(row["last_reasons_json"]))),
+            )
+            for row in rows
+        )
+
+    def record_audit_event(
+        self,
+        *,
+        run_id: str,
+        event_type: str,
+        at_utc: datetime,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        """Append one durable, secret-free event to the Paper audit chain."""
+
+        _require_utc(at_utc)
+        if not run_id.strip() or not event_type.strip():
+            raise ValueError("Paper audit identity is required")
+        _reject_audit_secrets(payload)
+        try:
+            payload_json = json.dumps(
+                _audit_json_safe(payload),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Paper audit payload is not JSON-safe") from exc
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            prior = connection.execute(
+                """
+                SELECT event_hash FROM paper_autopilot_audit_events
+                ORDER BY sequence DESC LIMIT 1
+                """
+            ).fetchone()
+            previous_hash = "GENESIS" if prior is None else str(prior["event_hash"])
+            event_hash = hashlib.sha256(
+                "|".join(
+                    (
+                        previous_hash,
+                        run_id,
+                        event_type,
+                        at_utc.isoformat(),
+                        payload_json,
+                    )
+                ).encode("utf-8")
+            ).hexdigest()
+            cursor = connection.execute(
+                """
+                INSERT INTO paper_autopilot_audit_events (
+                    run_id, event_type, occurred_at_utc, payload_json,
+                    previous_hash, event_hash
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    event_type,
+                    at_utc.isoformat(),
+                    payload_json,
+                    previous_hash,
+                    event_hash,
+                ),
+            )
+            if cursor.lastrowid is None:
+                raise RuntimeError("Paper audit insert did not return a sequence")
+            sequence = int(cursor.lastrowid)
+        return {
+            "sequence": sequence,
+            "run_id": run_id,
+            "event_type": event_type,
+            "occurred_at_utc": at_utc.isoformat(),
+            "payload": json.loads(payload_json),
+            "previous_hash": previous_hash,
+            "event_hash": event_hash,
+        }
+
+    def audit_events(self, *, run_id: str, limit: int = 1_000) -> tuple[dict[str, object], ...]:
+        if not run_id.strip():
+            raise ValueError("Paper audit run ID is required")
+        if limit < 1 or limit > 10_000:
+            raise ValueError("Paper audit limit must be in [1, 10000]")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT sequence, run_id, event_type, occurred_at_utc, payload_json,
+                       previous_hash, event_hash
+                FROM paper_autopilot_audit_events
+                WHERE run_id=?
+                ORDER BY sequence
+                LIMIT ?
+                """,
+                (run_id, limit),
+            ).fetchall()
+        return tuple(
+            {
+                "sequence": int(row["sequence"]),
+                "run_id": str(row["run_id"]),
+                "event_type": str(row["event_type"]),
+                "occurred_at_utc": str(row["occurred_at_utc"]),
+                "payload": json.loads(str(row["payload_json"])),
+                "previous_hash": str(row["previous_hash"]),
+                "event_hash": str(row["event_hash"]),
+            }
+            for row in rows
+        )
 
     def ensure_command(
         self,
@@ -344,9 +624,7 @@ class PaperSessionLedger:
         return _CommandRecord(
             command_id=command_id,
             broker_order_id=(
-                str(row["broker_order_id"])
-                if row["broker_order_id"] is not None
-                else None
+                str(row["broker_order_id"]) if row["broker_order_id"] is not None else None
             ),
             completed=bool(row["completed"]),
         )
@@ -535,9 +813,7 @@ class PaperSessionLedger:
                 maximum = current_r
                 seconds = 0
             else:
-                prior_observed = datetime.fromisoformat(
-                    str(row["last_observed_at_utc"])
-                )
+                prior_observed = datetime.fromisoformat(str(row["last_observed_at_utc"]))
                 if observed_at_utc < prior_observed:
                     raise ValueError("Paper tail observation cannot move backwards")
                 maximum = max(
@@ -545,11 +821,7 @@ class PaperSessionLedger:
                     current_r,
                 )
                 gap = int((observed_at_utc - prior_observed).total_seconds())
-                if (
-                    below_active
-                    and bool(row["order_flow_below_active"])
-                    and 0 <= gap <= 30
-                ):
+                if below_active and bool(row["order_flow_below_active"]) and 0 <= gap <= 30:
                     seconds = int(row["order_flow_below_45_seconds"]) + gap
                 else:
                     seconds = 0
@@ -595,9 +867,7 @@ class PaperSessionOrchestrator:
         owned_symbols: frozenset[str],
         policy: IntradayPolicy | None = None,
     ):
-        if not owned_symbols or any(
-            symbol != symbol.strip().upper() for symbol in owned_symbols
-        ):
+        if not owned_symbols or any(symbol != symbol.strip().upper() for symbol in owned_symbols):
             raise ValueError("owned Paper symbols must be normalized and non-empty")
         self.broker = broker
         self.ledger = ledger
@@ -636,21 +906,15 @@ class PaperSessionOrchestrator:
         account = self.broker.get_account()
         daily_return = _daily_return(account)
         positions = tuple(
-            item
-            for item in self.broker.list_positions()
-            if item.symbol == plan.symbol
+            item for item in self.broker.list_positions() if item.symbol == plan.symbol
         )
         if len(positions) > 1:
             raise RuntimeError("Paper broker returned duplicate symbol positions")
         if not positions:
             open_orders = tuple(
-                order
-                for order in self.broker.list_open_orders()
-                if order.symbol == plan.symbol
+                order for order in self.broker.list_open_orders() if order.symbol == plan.symbol
             )
-            if open_orders and (
-                not self.paper_authorized or not self.broker.writes_enabled
-            ):
+            if open_orders and (not self.paper_authorized or not self.broker.writes_enabled):
                 return PaperSessionResult(
                     action=SessionAction.WRITES_BLOCKED,
                     decision=None,
@@ -660,9 +924,7 @@ class PaperSessionOrchestrator:
                     cancelled_order_ids=(),
                     flatten_order_ids=(),
                     reasons=(reason, "paper_cancel_writes_not_authorized"),
-                    provenance=(
-                        "execution.autonomous_paper.runtime_failure_blocked.v1"
-                    ),
+                    provenance=("execution.autonomous_paper.runtime_failure_blocked.v1"),
                 )
             cancelled = tuple(
                 order.id
@@ -697,9 +959,7 @@ class PaperSessionOrchestrator:
                 provenance="execution.autonomous_paper.runtime_failure_blocked.v1",
             )
 
-        local_time = observed_at_utc.astimezone(
-            ZoneInfo("America/New_York")
-        ).time()
+        local_time = observed_at_utc.astimezone(ZoneInfo("America/New_York")).time()
         regular = time(9, 30) <= local_time < time(16)
         if not regular and not _fresh_exit_quote(
             observed_at_utc=observed_at_utc,
@@ -774,14 +1034,10 @@ class PaperSessionOrchestrator:
             day_locked=self.ledger.day_locked(plan.trade_date),
             new_entries_allowed=False,
             cancelled_order_ids=cancelled,
-            flatten_order_ids=(
-                (broker_order_id,) if broker_order_id is not None else ()
-            ),
+            flatten_order_ids=((broker_order_id,) if broker_order_id is not None else ()),
             reasons=(reason,),
             provenance="execution.autonomous_paper.runtime_failure_exit.v1",
-            submitted_order_ids=(
-                (broker_order_id,) if broker_order_id is not None else ()
-            ),
+            submitted_order_ids=((broker_order_id,) if broker_order_id is not None else ()),
         )
 
     def tick(
@@ -866,6 +1122,18 @@ class PaperSessionOrchestrator:
             account=account,
         )
         decision = self.policy.evaluate(snapshot.policy)
+        if (
+            snapshot.policy.has_position
+            and plan.take_profit_2 is not None
+            and snapshot.bid >= plan.take_profit_2
+        ):
+            decision = PolicyDecision(
+                action=PolicyAction.EXIT,
+                target_position_fraction=0.0,
+                max_account_risk_fraction=0.0,
+                reasons=("take_profit_2_reached",),
+                blockers=(),
+            )
         soft_loss_active = daily_return <= self._SOFT_DAILY_LOSS
         if soft_loss_active and decision.action in {
             PolicyAction.ENTER_PROBE,
@@ -892,8 +1160,7 @@ class PaperSessionOrchestrator:
                     new_entries_allowed=False,
                     cancelled_order_ids=(),
                     flatten_order_ids=(),
-                    reasons=decision.reasons
-                    + ("paper_exit_writes_not_authorized",),
+                    reasons=decision.reasons + ("paper_exit_writes_not_authorized",),
                     provenance="execution.autonomous_paper.exit_blocked.v1",
                 )
             cancelled, flattened = self._cancel_symbol_and_close(
@@ -912,11 +1179,9 @@ class PaperSessionOrchestrator:
                 reasons=decision.reasons,
                 provenance="execution.autonomous_paper.policy_exit.v1",
             )
-        protection_required, protective_order_id = (
-            self._ensure_premarket_regular_stop(
-                plan=plan,
-                snapshot=snapshot,
-            )
+        protection_required, protective_order_id = self._ensure_premarket_regular_stop(
+            plan=plan,
+            snapshot=snapshot,
         )
         if protection_required:
             return PaperSessionResult(
@@ -928,9 +1193,7 @@ class PaperSessionOrchestrator:
                 cancelled_order_ids=(),
                 flatten_order_ids=(),
                 reasons=("premarket_position_protection_not_authorized",),
-                provenance=(
-                    "execution.autonomous_paper.premarket_protection_blocked.v1"
-                ),
+                provenance=("execution.autonomous_paper.premarket_protection_blocked.v1"),
             )
         if protective_order_id is not None:
             return PaperSessionResult(
@@ -942,15 +1205,11 @@ class PaperSessionOrchestrator:
                 cancelled_order_ids=(),
                 flatten_order_ids=(),
                 reasons=("premarket_regular_stop_attached",),
-                provenance=(
-                    "execution.autonomous_paper.premarket_protection.v1"
-                ),
+                provenance=("execution.autonomous_paper.premarket_protection.v1"),
                 submitted_order_ids=(protective_order_id,),
             )
         if decision.action in {PolicyAction.ENTER_PROBE, PolicyAction.UPGRADE}:
-            quote_age = (
-                snapshot.policy.observed_at_utc - snapshot.quote_asof_utc
-            ).total_seconds()
+            quote_age = (snapshot.policy.observed_at_utc - snapshot.quote_asof_utc).total_seconds()
             if not 0 <= quote_age <= 30:
                 return PaperSessionResult(
                     action=SessionAction.DATA_BLOCKED,
@@ -972,8 +1231,7 @@ class PaperSessionOrchestrator:
                     new_entries_allowed=False,
                     cancelled_order_ids=(),
                     flatten_order_ids=(),
-                    reasons=decision.reasons
-                    + ("paper_entry_writes_not_authorized",),
+                    reasons=decision.reasons + ("paper_entry_writes_not_authorized",),
                     provenance="execution.autonomous_paper.entry_blocked.v1",
                 )
             broker_order_ids = self._submit_entry(
@@ -1008,8 +1266,7 @@ class PaperSessionOrchestrator:
                     new_entries_allowed=False,
                     cancelled_order_ids=(),
                     flatten_order_ids=(),
-                    reasons=decision.reasons
-                    + ("paper_reduction_writes_not_authorized",),
+                    reasons=decision.reasons + ("paper_reduction_writes_not_authorized",),
                     provenance="execution.autonomous_paper.reduction_blocked.v1",
                 )
             cancelled, broker_order_id = self._reduce_to_target(
@@ -1032,12 +1289,8 @@ class PaperSessionOrchestrator:
                     submitted_order_ids=(broker_order_id,),
                 )
         continued_entry_order_id: str | None = None
-        active_premarket = self.ledger.get_premarket(
-            f"{plan.plan_id}:premarket-probe"
-        )
-        local_time = snapshot.policy.observed_at_utc.astimezone(
-            ZoneInfo("America/New_York")
-        ).time()
+        active_premarket = self.ledger.get_premarket(f"{plan.plan_id}:premarket-probe")
+        local_time = snapshot.policy.observed_at_utc.astimezone(ZoneInfo("America/New_York")).time()
         if (
             active_premarket is not None
             and active_premarket.runtime.completed_at_utc is None
@@ -1108,10 +1361,7 @@ class PaperSessionOrchestrator:
     ) -> PaperSessionSnapshot:
         if not snapshot.policy.has_position:
             return snapshot
-        if (
-            snapshot.policy.main_profit_realized
-            or self.ledger.main_profit_realized(plan.plan_id)
-        ):
+        if snapshot.policy.main_profit_realized or self.ledger.main_profit_realized(plan.plan_id):
             enriched = replace(
                 snapshot,
                 policy=replace(
@@ -1128,13 +1378,9 @@ class PaperSessionOrchestrator:
         if not main_client_ids:
             return snapshot
         main_orders = tuple(
-            self.broker.get_order_by_client_id(client_id)
-            for client_id in main_client_ids
+            self.broker.get_order_by_client_id(client_id) for client_id in main_client_ids
         )
-        if any(
-            order is None or not _entry_order_filled(order)
-            for order in main_orders
-        ):
+        if any(order is None or not _entry_order_filled(order) for order in main_orders):
             return snapshot
         equity = _positive_decimal(account.equity, name="equity")
         tail_qty = _target_quantity(
@@ -1180,18 +1426,14 @@ class PaperSessionOrchestrator:
         risk_per_share = policy.average_entry_price - float(plan.hard_stop)
         if risk_per_share <= 0:
             raise RuntimeError("tail risk per share is not positive")
-        current_r = (
-            policy.last_price - policy.average_entry_price
-        ) / risk_per_share
+        current_r = (policy.last_price - policy.average_entry_price) / risk_per_share
         state = self.ledger.advance_tail_runtime(
             plan.plan_id,
             observed_at_utc=policy.observed_at_utc,
             current_r=current_r,
             order_flow_score=policy.order_flow.value,
         )
-        reduction_stage = int(
-            policy.position_fraction <= (initial_fraction / 2)
-        )
+        reduction_stage = int(policy.position_fraction <= (initial_fraction / 2))
         return replace(
             snapshot,
             policy=replace(
@@ -1200,20 +1442,12 @@ class PaperSessionOrchestrator:
                     mode=tail_mode,
                     initial_fraction=initial_fraction,
                     reduction_stage=reduction_stage,
-                    fifteen_minute_structure_valid=(
-                        policy.technical_structure_valid
-                    ),
-                    below_anchored_vwap_5m_bars=(
-                        snapshot.below_anchored_vwap_5m_bars
-                    ),
-                    order_flow_below_45_seconds=(
-                        state.order_flow_below_45_seconds
-                    ),
+                    fifteen_minute_structure_valid=(policy.technical_structure_valid),
+                    below_anchored_vwap_5m_bars=(snapshot.below_anchored_vwap_5m_bars),
+                    order_flow_below_45_seconds=(state.order_flow_below_45_seconds),
                     failed_reclaim=snapshot.failed_vwap_reclaim,
                     current_r=current_r,
-                    maximum_favorable_excursion_r=(
-                        state.maximum_favorable_excursion_r
-                    ),
+                    maximum_favorable_excursion_r=(state.maximum_favorable_excursion_r),
                     chandelier_stop_hit=snapshot.chandelier_stop_hit,
                     hard_breakdown=snapshot.tail_hard_breakdown,
                 ),
@@ -1230,9 +1464,7 @@ class PaperSessionOrchestrator:
         local_time = now_utc.astimezone(ZoneInfo("America/New_York")).time()
         if not time(9, 30) <= local_time < time(16):
             return False, None
-        premarket = self.ledger.get_premarket(
-            f"{plan.plan_id}:premarket-probe"
-        )
+        premarket = self.ledger.get_premarket(f"{plan.plan_id}:premarket-probe")
         if premarket is None:
             return False, None
         position_qty = _position_quantity(
@@ -1330,9 +1562,7 @@ class PaperSessionOrchestrator:
             )
             if record.completed:
                 continue
-            local_time = now_utc.astimezone(
-                ZoneInfo("America/New_York")
-            ).time()
+            local_time = now_utc.astimezone(ZoneInfo("America/New_York")).time()
             if time(9, 30) <= local_time < time(16):
                 broker_order = self.broker.submit_close_order_idempotent(
                     PaperCloseRequest(
@@ -1348,9 +1578,7 @@ class PaperSessionOrchestrator:
                         symbol=position.symbol,
                         qty=qty,
                         side="sell",
-                        limit_price=(
-                            f"{_marketable_exit_limit(snapshot.bid):.2f}"
-                        ),
+                        limit_price=(f"{_marketable_exit_limit(snapshot.bid):.2f}"),
                     )
                 )
             self.ledger.complete_command(
@@ -1388,9 +1616,7 @@ class PaperSessionOrchestrator:
                 cancelled.append(order.id)
 
         matching = [
-            position
-            for position in self.broker.list_positions()
-            if position.symbol == plan.symbol
+            position for position in self.broker.list_positions() if position.symbol == plan.symbol
         ]
         if len(matching) > 1:
             raise RuntimeError("Paper broker returned duplicate symbol positions")
@@ -1559,9 +1785,7 @@ class PaperSessionOrchestrator:
             ),
         )
         main_target_qty = desired_qty - tail_target_qty
-        prior_fraction = (
-            0.0 if decision.action is PolicyAction.ENTER_PROBE else 0.25
-        )
+        prior_fraction = 0.0 if decision.action is PolicyAction.ENTER_PROBE else 0.25
         prior_total_qty = _target_quantity(
             plan,
             equity=equity,
@@ -1570,9 +1794,9 @@ class PaperSessionOrchestrator:
         prior_tail_qty = min(
             prior_total_qty,
             int(
-                (
-                    Decimal(full_qty) * Decimal(str(tail_fraction))
-                ).to_integral_value(rounding=ROUND_FLOOR)
+                (Decimal(full_qty) * Decimal(str(tail_fraction))).to_integral_value(
+                    rounding=ROUND_FLOOR
+                )
             ),
         )
         prior_main_qty = prior_total_qty - prior_tail_qty
@@ -1581,11 +1805,11 @@ class PaperSessionOrchestrator:
             ("main", main_target_qty - prior_main_qty),
         )
         risk_per_share = snapshot.ask - plan.hard_stop
-        first_target_r = Decimal(
-            str(snapshot.policy.first_target_reward_r or 2.5)
-        )
+        first_target_r = Decimal(str(snapshot.policy.first_target_reward_r or 2.5))
         take_profit = (
-            snapshot.ask + (risk_per_share * first_target_r)
+            plan.take_profit_1
+            if plan.take_profit_1 is not None
+            else snapshot.ask + (risk_per_share * first_target_r)
         ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         submitted: list[str] = []
         for component, quantity in component_quantities:
@@ -1614,9 +1838,7 @@ class PaperSessionOrchestrator:
                     symbol=plan.symbol,
                     qty=quantity,
                     order_type="market",
-                    take_profit_price=(
-                        f"{take_profit:.2f}" if component == "main" else None
-                    ),
+                    take_profit_price=(f"{take_profit:.2f}" if component == "main" else None),
                     stop_loss_price=f"{plan.hard_stop:.2f}",
                 )
             )
@@ -1644,12 +1866,8 @@ class PaperSessionOrchestrator:
         position_qty = _position_quantity(plan.symbol, self.broker.list_positions())
         if position_qty <= 0:
             return None
-        premarket = self.ledger.get_premarket(
-            f"{plan.plan_id}:premarket-probe"
-        )
-        planned_qty = (
-            premarket.plan.target_qty if premarket is not None else position_qty
-        )
+        premarket = self.ledger.get_premarket(f"{plan.plan_id}:premarket-probe")
+        planned_qty = premarket.plan.target_qty if premarket is not None else position_qty
         result = self.synthetic_stop_controller.tick(
             SyntheticStopPlan(
                 plan_id=f"{plan.plan_id}:extended-stop",
@@ -1710,11 +1928,12 @@ class PaperSessionOrchestrator:
             if record.active_client_order_id is not None
             else None
         )
-        order_working = (
-            active_order is not None
-            and active_order.status.strip().lower()
-            in {"new", "accepted", "pending_new", "partially_filled"}
-        )
+        order_working = active_order is not None and active_order.status.strip().lower() in {
+            "new",
+            "accepted",
+            "pending_new",
+            "partially_filled",
+        }
         decision = self.premarket_entry_engine.evaluate(
             record.plan,
             record.runtime,
@@ -1730,11 +1949,15 @@ class PaperSessionOrchestrator:
                 broker_healthy=True,
             ),
         )
-        if decision.action in {
-            PremarketEntryAction.CANCEL_REPLACE,
-            PremarketEntryAction.CANCEL_REMAINDER,
-            PremarketEntryAction.ABANDON,
-        } and active_order is not None:
+        if (
+            decision.action
+            in {
+                PremarketEntryAction.CANCEL_REPLACE,
+                PremarketEntryAction.CANCEL_REMAINDER,
+                PremarketEntryAction.ABANDON,
+            }
+            and active_order is not None
+        ):
             self._cancel_order_once(
                 trade_date=plan.trade_date,
                 order=active_order,
@@ -1838,6 +2061,65 @@ def _positive_decimal(value: str, *, name: str) -> Decimal:
     if not parsed.is_finite() or parsed <= 0:
         raise ValueError(f"Paper account {name} must be finite and positive")
     return parsed
+
+
+def _reject_audit_secrets(value: object, *, key: str = "") -> None:
+    """Keep process evidence complete without persisting credentials."""
+
+    normalized_key = key.lower().replace("-", "_")
+    sensitive_fragments = (
+        "secret",
+        "password",
+        "token",
+        "api_key",
+        "apikey",
+        "authorization",
+        "credential",
+    )
+    if any(fragment in normalized_key for fragment in sensitive_fragments):
+        raise ValueError("Paper audit payload must not contain secrets")
+    if isinstance(value, Mapping):
+        for child_key, child_value in value.items():
+            if not isinstance(child_key, str):
+                raise ValueError("Paper audit payload keys must be strings")
+            _reject_audit_secrets(child_value, key=child_key)
+    elif isinstance(value, (list, tuple)):
+        for child_value in value:
+            _reject_audit_secrets(child_value, key=key)
+
+
+def _audit_json_safe(value: object) -> object:
+    """Normalize exact execution evidence into a deterministic JSON value."""
+
+    if value is None or isinstance(value, (bool, str, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("Paper audit float must be finite")
+        return value
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ValueError("Paper audit decimal must be finite")
+        return str(value)
+    if isinstance(value, datetime):
+        _require_utc(value)
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Enum):
+        return _audit_json_safe(value.value)
+    if isinstance(value, Mapping):
+        normalized: dict[str, object] = {}
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise ValueError("Paper audit payload keys must be strings")
+            normalized[key] = _audit_json_safe(child)
+        return normalized
+    if isinstance(value, (list, tuple)):
+        return [_audit_json_safe(child) for child in value]
+    raise ValueError("Paper audit payload contains an unsupported value")
 
 
 def _whole_long_quantity(position: PaperPosition) -> int:
@@ -1960,10 +2242,7 @@ def _premarket_protection_client_order_id(
 ) -> str:
     material = f"{plan.plan_id}:premarket-regular-stop:{qty}:{plan.hard_stop}"
     digest = hashlib.sha256(material.encode()).hexdigest()[:12]
-    return (
-        f"tsv2-{plan.trade_date:%Y%m%d}-{plan.symbol}-"
-        f"premarket-protect-{qty}-{digest}"
-    )
+    return f"tsv2-{plan.trade_date:%Y%m%d}-{plan.symbol}-premarket-protect-{qty}-{digest}"
 
 
 def _premarket_plan_json(plan: PremarketEntryPlan) -> str:
@@ -2014,13 +2293,9 @@ def _premarket_record(row: sqlite3.Row | None) -> _PremarketRecord:
         ),
         runtime=PremarketEntryRuntime(
             started_at_utc=_optional_datetime(runtime_payload["started_at_utc"]),
-            last_command_at_utc=_optional_datetime(
-                runtime_payload["last_command_at_utc"]
-            ),
+            last_command_at_utc=_optional_datetime(runtime_payload["last_command_at_utc"]),
             attempt=int(runtime_payload["attempt"]),
-            completed_at_utc=_optional_datetime(
-                runtime_payload["completed_at_utc"]
-            ),
+            completed_at_utc=_optional_datetime(runtime_payload["completed_at_utc"]),
         ),
         active_client_order_id=(
             str(row["active_client_order_id"])
@@ -2055,12 +2330,8 @@ def _target_quantity(
         return 0
     risk_budget = equity * plan.full_risk_fraction
     notional_budget = equity * plan.max_notional_fraction
-    by_risk = int(
-        (risk_budget / risk_per_share).to_integral_value(rounding=ROUND_FLOOR)
-    )
-    by_notional = int(
-        (notional_budget / entry_price).to_integral_value(rounding=ROUND_FLOOR)
-    )
+    by_risk = int((risk_budget / risk_per_share).to_integral_value(rounding=ROUND_FLOOR))
+    by_notional = int((notional_budget / entry_price).to_integral_value(rounding=ROUND_FLOOR))
     full_quantity = min(by_risk, by_notional)
     return int(
         (Decimal(full_quantity) * Decimal(str(target_fraction))).to_integral_value(

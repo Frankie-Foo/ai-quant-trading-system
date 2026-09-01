@@ -106,3 +106,20 @@ def test_only_global_emergency_stop_is_mutating_and_it_persists(
     assert activated.body["emergency_stop_active"] is True
     assert replay.body["emergency_stop_active"] is True
     assert order_attempt.status == 405
+
+
+def test_desk_endpoint_uses_injected_evidence_provider(tmp_path: Path) -> None:
+    app = AdaptiveClientApplication(
+        store=_store(tmp_path),
+        desk_provider=lambda: {
+            "schema_version": "trading_desk_evidence.v1",
+            "stage": "research_only",
+            "orders_authorized": False,
+        },
+    )
+
+    response = app.handle("GET", "/v1/desk", {})
+
+    assert response.status == 200
+    assert response.body["stage"] == "research_only"
+    assert response.body["orders_authorized"] is False

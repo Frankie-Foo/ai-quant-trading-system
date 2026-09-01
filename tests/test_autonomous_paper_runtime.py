@@ -170,6 +170,12 @@ class RecordingOrchestrator:
         return _result(SessionAction.DATA_BLOCKED, reason)
 
 
+class FailingSnapshotFactory:
+    def build(self, **kwargs: object) -> object:
+        del kwargs
+        raise ValueError("snapshot is invalid")
+
+
 def _result(action: SessionAction, reason: str) -> PaperSessionResult:
     return PaperSessionResult(
         action=action,
@@ -296,6 +302,23 @@ def test_market_failure_does_not_reuse_a_stale_cached_quote() -> None:
     assert orchestrator.failures[-1]["exit_bid"] is None
     assert orchestrator.failures[-1]["quote_asof_utc"] is None
     assert orchestrator.failures[-1]["quote_provenance"] is None
+
+
+def test_snapshot_failure_is_fail_closed_without_escaping_tick() -> None:
+    orchestrator = RecordingOrchestrator()
+    runtime = AutonomousPaperRuntime(
+        plans=(_bundle(),),
+        market=FakeRuntimeMarket(_facts()),
+        broker=FakeRuntimeBroker(_position()),
+        orchestrator=orchestrator,
+        envelope_loader=lambda path: _envelope(),
+        snapshot_factory=FailingSnapshotFactory(),  # type: ignore[arg-type]
+    )
+
+    outcomes = runtime.tick_once(observed_at_utc=OBSERVED)
+
+    assert outcomes[0].degraded_reasons == ("runtime_evaluation_failed",)
+    assert orchestrator.failures[-1]["reason"] == "runtime_evaluation_failed"
 
 
 def test_external_runtime_failure_reuses_current_quote_for_safe_exit() -> None:

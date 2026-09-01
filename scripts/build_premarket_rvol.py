@@ -3,13 +3,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+from collections.abc import Callable
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import polars as pl
-from dotenv import load_dotenv
+from pydantic import SecretStr
 
 from data_plane.calendar import build_xnys_schedule
 from data_plane.candidate_pools import load_premarket_pool
@@ -18,20 +20,36 @@ from data_plane.contracts import (
     DatasetSnapshot,
     QualitySeverity,
 )
-from data_plane.providers.alpaca import AlpacaStockFeed, fetch_bars, stock_data_policy_from_env
-from data_plane.quality import BAR_SCHEMA_VERSION, audit_minute_bars
+from data_plane.providers import massive
+from data_plane.providers.alpaca import (
+    AlpacaStockDataPolicy,
+    AlpacaStockFeed,
+    fetch_bars,
+    stock_data_policy_from_env,
+)
+from data_plane.providers.alpaca_direct import DirectAlpacaMarketDataClient
+from data_plane.providers.alpaca_proxy import fetch_alpaca_proxy_bars
+from data_plane.quality import BAR_SCHEMA_VERSION, audit_minute_bars, canonicalize_bars
 from data_plane.storage import persist_snapshot
 from kernel.config import load_config
 from kernel.features.momentum import premarket_window_utc, rvol
+from operations.local_env import load_project_env
 
 ROOT = Path(__file__).resolve().parents[1]
 BEIJING = ZoneInfo("Asia/Shanghai")
 NEW_YORK = ZoneInfo("America/New_York")
 HISTORY_SESSIONS = 20
 RAW_SOURCE = "alpaca.sip.premarket_1m"
+MASSIVE_RAW_SOURCE = "massive.sip.premarket_1m"
+PROXY_RAW_SOURCE = "alpaca_proxy.sip.premarket_1m"
+DIRECT_RAW_SOURCE = "alpaca_direct.sip.premarket_1m"
 FEATURE_SOURCE = "kernel.premarket.rvol_candidates"
 FACTOR_FEATURE_SOURCE = "kernel.premarket.factor_rvol_candidates"
+# Keep historical proxy requests below the upstream gateway's payload limit.
+# Alpaca accepts multi-symbol bar requests; larger bounded batches avoid a
+# needless one-request-per-25-symbol latency while keeping query URLs manageable.
 SYMBOL_BATCH_SIZE = 100
+BarFetcher = Callable[[tuple[str, ...], datetime, datetime], pl.DataFrame]
 
 
 def _parse_date(value: str) -> date:
@@ -105,9 +123,10 @@ def _query_provenance(
     end_utc: datetime,
     *,
     feed: AlpacaStockFeed,
+    raw_source: str = RAW_SOURCE,
 ) -> str:
     return (
-        f"{RAW_SOURCE}@{start_utc.isoformat()}..{end_utc.isoformat()}|"
+        f"{raw_source}@{start_utc.isoformat()}..{end_utc.isoformat()}|"
         f"symbols_sha256={_symbol_hash(symbols)}|feed={feed}|adjustment=split"
     )
 
@@ -116,9 +135,10 @@ def _load_cached_session(
     data_root: Path,
     *,
     query_provenance: str,
+    raw_source: str = RAW_SOURCE,
 ) -> tuple[pl.DataFrame, DatasetSnapshot] | None:
     matches: list[tuple[datetime, Path, DatasetSnapshot]] = []
-    for path in (data_root / "accepted").glob(f"{RAW_SOURCE}-*/data.parquet"):
+    for path in (data_root / "accepted").glob(f"{raw_source}-*/data.parquet"):
         snapshot = DatasetSnapshot.model_validate(_manifest(path.parent / "manifest.json"))
         if any(check.provenance == query_provenance for check in snapshot.checks):
             matches.append((snapshot.asof_utc, path, snapshot))
@@ -197,21 +217,32 @@ def _get_session(
     cutoff_et: time,
     locked_snapshot_id: str,
     feed: AlpacaStockFeed,
+    raw_source: str,
+    bar_fetcher: BarFetcher,
     refresh: bool,
 ) -> tuple[pl.DataFrame, DatasetSnapshot, bool]:
     start_utc, end_utc = premarket_window_utc(trade_date, cutoff_et)
-    provenance = _query_provenance(symbols, start_utc, end_utc, feed=feed)
+    provenance = _query_provenance(
+        symbols,
+        start_utc,
+        end_utc,
+        feed=feed,
+        raw_source=raw_source,
+    )
     if not refresh:
-        cached = _load_cached_session(data_root, query_provenance=provenance)
+        cached = _load_cached_session(
+            data_root,
+            query_provenance=provenance,
+            raw_source=raw_source,
+        )
         if cached is not None:
             return cached[0], cached[1], True
 
     batches = [
-        fetch_bars(
+        bar_fetcher(
             symbols[index : index + SYMBOL_BATCH_SIZE],
             start_utc,
             end_utc,
-            feed=feed,
         )
         for index in range(0, len(symbols), SYMBOL_BATCH_SIZE)
     ]
@@ -226,7 +257,7 @@ def _get_session(
     snapshot, _ = persist_snapshot(
         frame,
         root=data_root,
-        source=RAW_SOURCE,
+        source=raw_source,
         schema_version=BAR_SCHEMA_VERSION,
         checks=checks,
         parent_snapshot_ids=(locked_snapshot_id,),
@@ -345,7 +376,7 @@ def _counts(frame: pl.DataFrame, column: str) -> dict[str, int]:
 
 
 def main() -> None:
-    load_dotenv(ROOT / ".env")
+    load_project_env(ROOT)
     parser = argparse.ArgumentParser()
     parser.add_argument("--trade-date", type=_parse_date, required=True)
     parser.add_argument("--decision-asof", type=_parse_utc)
@@ -360,7 +391,73 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(ROOT / "config.yaml")
-    policy = stock_data_policy_from_env()
+    desktop_provider = os.getenv("DESKTOP_MARKET_DATA_PROVIDER", "").strip()
+    bar_fetcher: BarFetcher
+    if desktop_provider == "alpaca_proxy_rest":
+        policy = AlpacaStockDataPolicy(feed="sip", delay_minutes=0, is_realtime=True)
+        raw_source = PROXY_RAW_SOURCE
+        provider_name = "alpaca_proxy"
+        bar_fetcher = fetch_alpaca_proxy_bars
+    elif desktop_provider == "alpaca_direct":
+        policy = AlpacaStockDataPolicy(feed="sip", delay_minutes=0, is_realtime=True)
+        raw_source = DIRECT_RAW_SOURCE
+        provider_name = "alpaca_direct"
+        key_id = (
+            os.getenv("ALPACA_API_KEY_ID", "").strip()
+            or os.getenv("ALPACA_API_KEY", "").strip()
+        )
+        secret_key = (
+            os.getenv("ALPACA_API_SECRET_KEY", "").strip()
+            or os.getenv("ALPACA_SECRET_KEY", "").strip()
+        )
+        if not key_id or not secret_key:
+            raise RuntimeError("direct Alpaca credentials are missing")
+
+        def direct_bar_fetcher(
+            symbols: tuple[str, ...],
+            start_utc: datetime,
+            end_utc: datetime,
+        ) -> pl.DataFrame:
+            client = DirectAlpacaMarketDataClient(
+                key_id=SecretStr(key_id),
+                secret_key=SecretStr(secret_key),
+            )
+            try:
+                events = client.fetch_bars(
+                    symbols,
+                    start_utc=start_utc,
+                    end_utc=end_utc,
+                )
+            finally:
+                client.close()
+            rows = [event.model_dump(mode="python") for event in events]
+            for row in rows:
+                row["source"] = "alpaca.direct"
+                row["feed"] = policy.feed
+                row["adjustment"] = "split_adjusted"
+            frame = pl.DataFrame(rows) if rows else pl.DataFrame()
+            return canonicalize_bars(frame).filter(
+                (pl.col("ts_utc") >= start_utc) & (pl.col("ts_utc") < end_utc)
+            )
+
+        bar_fetcher = direct_bar_fetcher
+    elif desktop_provider == "local_massive":
+        policy = AlpacaStockDataPolicy(feed="sip", delay_minutes=0, is_realtime=True)
+        raw_source = MASSIVE_RAW_SOURCE
+        provider_name = "massive"
+        bar_fetcher = massive.fetch_bars
+    else:
+        policy = stock_data_policy_from_env()
+        raw_source = RAW_SOURCE
+        provider_name = "alpaca"
+
+        def cloud_bar_fetcher(
+            symbols: tuple[str, ...],
+            start_utc: datetime,
+            end_utc: datetime,
+        ) -> pl.DataFrame:
+            return fetch_bars(symbols, start_utc, end_utc, feed=policy.feed)
+        bar_fetcher = cloud_bar_fetcher
     decision_time_beijing = datetime.strptime(
         cfg.guardrails.selection_time_beijing, "%H:%M"
     ).time()
@@ -399,7 +496,7 @@ def main() -> None:
     frames: list[pl.DataFrame] = []
     raw_snapshots: list[DatasetSnapshot] = []
     cache_hits = 0
-    for session_date in requested_dates:
+    for session_index, session_date in enumerate(requested_dates, start=1):
         frame, snapshot, cached = _get_session(
             args.data_root,
             symbols=symbols,
@@ -407,11 +504,24 @@ def main() -> None:
             cutoff_et=cutoff_et,
             locked_snapshot_id=locked_snapshot.dataset_id,
             feed=policy.feed,
+            raw_source=raw_source,
+            bar_fetcher=bar_fetcher,
             refresh=args.refresh,
         )
         frames.append(frame)
         raw_snapshots.append(snapshot)
         cache_hits += int(cached)
+        print(
+            json.dumps(
+                {
+                    "progress": f"{session_index}/{len(requested_dates)}",
+                    "trade_date": session_date.isoformat(),
+                    "cached": cached,
+                    "rows": frame.height,
+                }
+            ),
+            flush=True,
+        )
 
     if not target_ready:
         result = {
@@ -444,7 +554,7 @@ def main() -> None:
         min_premarket_return=cfg.universe.min_premarket_return,
         min_premarket_close_location=cfg.universe.min_premarket_close_location,
         provenance=(
-            f"alpaca.{policy.feed}.split_adjusted[{len(raw_snapshots)}sessions]"
+            f"{provider_name}.{policy.feed}.split_adjusted[{len(raw_snapshots)}sessions]"
             f"@{data_cutoff_utc.isoformat()}"
         ),
     ).with_columns(
@@ -452,7 +562,7 @@ def main() -> None:
             "decision_asof_utc"
         ),
         pl.lit(policy.delay_minutes).alias("provider_delay_minutes"),
-        pl.lit(policy.feed).alias("market_data_feed"),
+        pl.lit(f"{provider_name}.{policy.feed}").alias("market_data_feed"),
         pl.lit(policy.is_realtime).alias("market_data_realtime"),
     )
     overlapping_feature_columns = [

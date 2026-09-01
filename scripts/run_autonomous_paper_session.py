@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
-from dotenv import load_dotenv
 from pydantic import SecretStr
 
 from execution.alpaca_paper import (
@@ -20,7 +20,10 @@ from execution.autonomous_paper_session import (
     AutonomousPaperBroker,
     PaperSessionLedger,
     PaperSessionOrchestrator,
+    SessionAction,
 )
+from execution.ibkr_paper_broker import IBKRPaperBroker
+from execution.ibkr_tws_adapter import OfficialIbapiPaperAdapter
 from execution.settings import ExecutionSettings
 from execution.sip_store import SipEventStore
 from operations.adaptive_plan_adapters import (
@@ -38,7 +41,10 @@ from operations.autonomous_paper_config import (
 )
 from operations.autonomous_paper_runtime import AutonomousPaperRuntime
 from operations.autonomous_policy_adapter import load_runtime_safety_envelope
-from operations.livermore_push import LivermorePushClient
+from operations.feishu_base import FeishuBaseEventClient
+from operations.livermore_push import LivermorePushClient, configured_identity
+from operations.local_env import alpaca_paper_credentials, load_project_env
+from operations.paper_runtime_policy import reject_retired_paper_runtime
 from schedule.runtime import JsonEventLogger, ProcessLock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,7 +55,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument(
         "--broker-mode",
-        choices=("direct", "cloud"),
+        choices=("direct", "cloud", "ibkr"),
         default="direct",
     )
     parser.add_argument(
@@ -100,45 +106,18 @@ def resolve_paper_authorization(
     if not arm_paper:
         return False
     if not broker_write_enabled:
-        raise RuntimeError(
-            "--arm-paper also requires BROKER_WRITE_ENABLED=true"
-        )
+        raise RuntimeError("--arm-paper also requires BROKER_WRITE_ENABLED=true")
     if trading_kill_switch:
-        raise RuntimeError(
-            "--arm-paper is blocked while the trading kill switch is active"
-        )
+        raise RuntimeError("--arm-paper is blocked while the trading kill switch is active")
     return True
 
 
 def direct_paper_credentials(
     environment: Mapping[str, str],
 ) -> tuple[SecretStr, SecretStr]:
-    key_id = _first_present(
-        environment,
-        "ALPACA_PAPER_KEY_ID",
-        "APCA_API_KEY_ID",
-        "ALPACA_API_KEY_ID",
-    )
-    secret_key = _first_present(
-        environment,
-        "ALPACA_PAPER_SECRET_KEY",
-        "APCA_API_SECRET_KEY",
-        "ALPACA_API_SECRET_KEY",
-    )
-    if key_id is None or secret_key is None:
-        raise RuntimeError("Alpaca Paper credentials are incomplete")
-    return SecretStr(key_id), SecretStr(secret_key)
+    """Compatibility wrapper for retired tests; active code imports local_env."""
 
-
-def _first_present(
-    environment: Mapping[str, str],
-    *names: str,
-) -> str | None:
-    for name in names:
-        value = environment.get(name, "").strip()
-        if value:
-            return value
-    return None
+    return alpaca_paper_credentials(environment)
 
 
 def _boolean_environment(name: str, *, default: bool) -> bool:
@@ -157,14 +136,29 @@ def _broker(
     *,
     mode: str,
     paper_authorized: bool,
+    state_db: Path,
+    environment: Mapping[str, str],
 ) -> AutonomousPaperBroker:
     if mode == "direct":
-        key_id, secret_key = direct_paper_credentials(os.environ)
+        key_id, secret_key = direct_paper_credentials(environment)
         return DirectAlpacaPaperBroker(
             key_id=key_id,
             secret_key=secret_key,
             writes_enabled=paper_authorized,
         )
+    if mode == "ibkr":
+        host, client_id, paper_account = ibkr_paper_profile(environment)
+        broker = IBKRPaperBroker(
+            path=state_db.with_name("ibkr-paper-orders.sqlite3"),
+            transport=OfficialIbapiPaperAdapter(
+                api_read_only=False,
+                expected_account_id=paper_account,
+            ),
+            paper_account=paper_account,
+            writes_enabled=paper_authorized,
+        )
+        broker.connect(host=host, client_id=client_id)
+        return broker
     settings = ExecutionSettings()  # type: ignore[call-arg]
     return CloudPaperBroker(
         base_url=settings.cloud_platform_base_url,
@@ -173,16 +167,41 @@ def _broker(
     )
 
 
+def ibkr_paper_profile(
+    environment: Mapping[str, str],
+) -> tuple[str, int, str]:
+    """Read only the non-secret 4002 connection profile for IBKR Paper."""
+
+    host = str(environment.get("IBKR_PAPER_HOST", "")).strip()
+    client_id_text = str(environment.get("IBKR_PAPER_CLIENT_ID", "")).strip()
+    account = str(environment.get("IBKR_PAPER_ACCOUNT", "")).strip().upper()
+    if not host or len(host) > 253 or re.fullmatch(r"[A-Za-z0-9.-]+", host) is None:
+        raise RuntimeError("IBKR Paper host is invalid")
+    if re.fullmatch(r"\d+", client_id_text) is None:
+        raise RuntimeError("IBKR Paper client id is invalid")
+    client_id = int(client_id_text)
+    if client_id > 2_147_483_647:
+        raise RuntimeError("IBKR Paper client id is invalid")
+    if re.fullmatch(r"DU[A-Z0-9-]{4,30}", account) is None:
+        raise RuntimeError("IBKR Paper account is invalid")
+    return host, client_id, account
+
+
 def _livermore_push(
     environment: Mapping[str, str],
 ) -> LivermorePushClient:
+    app_id, channel_id = configured_identity(environment)
     return LivermorePushClient(
-        app_id=environment.get("VPS_LIVERMORE_APP_ID", "").strip(),
-        app_secret=SecretStr(
-            environment.get("VPS_LIVERMORE_APP_SECRET", "")
-        ),
-        channel_id=environment.get("VPS_LIVERMORE_CHANNEL_ID", "").strip(),
+        app_id=app_id,
+        app_secret=SecretStr(environment.get("VPS_LIVERMORE_APP_SECRET", "")),
+        channel_id=channel_id,
     )
+
+
+def _feishu_base(
+    environment: Mapping[str, str],
+) -> FeishuBaseEventClient | None:
+    return FeishuBaseEventClient.from_environment(environment)
 
 
 def _market_adapter(
@@ -198,8 +217,7 @@ def _market_adapter(
             sector_symbol=bundle.sector_symbol,
             catalyst_score=None if catalyst is None else catalyst / 100.0,
             provenance=(
-                f"{bundle.market_context_provenance}|"
-                f"{bundle.evidence.catalyst.provenance}"
+                f"{bundle.market_context_provenance}|{bundle.evidence.catalyst.provenance}"
             ),
         )
     return SipStoreMarketFactsAdapter(
@@ -209,7 +227,8 @@ def _market_adapter(
 
 
 def main() -> int:
-    load_dotenv(ROOT / ".env")
+    reject_retired_paper_runtime("legacy-autonomous-paper")
+    load_project_env(ROOT)
     args = _parser().parse_args()
     if args.max_seconds is not None and args.max_seconds <= 0:
         raise ValueError("max-seconds must be positive")
@@ -228,15 +247,21 @@ def main() -> int:
     broker = _broker(
         mode=str(args.broker_mode),
         paper_authorized=paper_authorized,
+        state_db=args.state_db,
+        environment=os.environ,
     )
     push = _livermore_push(os.environ)
+    base = _feishu_base(os.environ)
     notifier = AutonomousPaperNotifier(
         push=push,
         ledger=AutonomousNotificationLedger(args.notification_db),
+        base=base,
+        broker_identity=str(getattr(broker, "broker_identity", "unknown")),
     )
+    session_ledger = PaperSessionLedger(args.state_db)
     orchestrator = PaperSessionOrchestrator(
         broker=broker,
-        ledger=PaperSessionLedger(args.state_db),
+        ledger=session_ledger,
         paper_authorized=paper_authorized,
         owned_symbols=frozenset(bundle.plan.symbol for bundle in config.plans),
     )
@@ -249,11 +274,7 @@ def main() -> int:
     )
     plans_by_id = {bundle.plan.plan_id: bundle.plan for bundle in config.plans}
     logger = JsonEventLogger(service="autonomous_paper_session")
-    deadline = (
-        None
-        if args.max_seconds is None
-        else time.monotonic() + float(args.max_seconds)
-    )
+    deadline = None if args.max_seconds is None else time.monotonic() + float(args.max_seconds)
     try:
         with ProcessLock(args.lock_file):
             while True:
@@ -264,6 +285,15 @@ def main() -> int:
                         observed_at_utc=observed_at,
                     )
                     for outcome in outcomes:
+                        plan = plans_by_id[outcome.plan_id]
+                        session_ledger.record_plan_evaluation(
+                            plan,
+                            action=outcome.result.action,
+                            reasons=outcome.result.reasons,
+                            degraded_reasons=outcome.degraded_reasons,
+                            submitted_order_ids=outcome.result.submitted_order_ids,
+                            at_utc=observed_at,
+                        )
                         logger.emit(
                             "autonomous_paper_plan_evaluated",
                             plan_id=outcome.plan_id,
@@ -271,13 +301,9 @@ def main() -> int:
                             action=outcome.result.action.value,
                             reasons=list(outcome.result.reasons),
                             degraded_reasons=list(outcome.degraded_reasons),
-                            daily_return_pct=str(
-                                outcome.result.daily_return * 100
-                            ),
+                            daily_return_pct=str(outcome.result.daily_return * 100),
                             day_locked=outcome.result.day_locked,
-                            submitted_order_ids=list(
-                                outcome.result.submitted_order_ids
-                            ),
+                            submitted_order_ids=list(outcome.result.submitted_order_ids),
                             paper_writes_authorized=paper_authorized,
                             live_trading_authorized=False,
                         )
@@ -306,13 +332,11 @@ def main() -> int:
                                 symbol=outcome.symbol,
                                 failure_reason=delivery.failure_reason,
                                 fallback_action=(
-                                    None
-                                    if fallback is None
-                                    else fallback.action.value
+                                    None if fallback is None else fallback.action.value
                                 ),
                                 live_trading_authorized=False,
                             )
-                except (KeyError, OSError, RuntimeError, ValueError) as exc:
+                except Exception as exc:
                     logger.emit(
                         "autonomous_paper_runtime_degraded",
                         level="error",
@@ -320,6 +344,39 @@ def main() -> int:
                         paper_writes_authorized=paper_authorized,
                         live_trading_authorized=False,
                     )
+                    for bundle in config.plans:
+                        session_ledger.record_plan_evaluation(
+                            bundle.plan,
+                            action=SessionAction.DATA_BLOCKED,
+                            reasons=("autonomous_runtime_failed",),
+                            degraded_reasons=("autonomous_runtime_failed",),
+                            submitted_order_ids=(),
+                            at_utc=observed_at,
+                        )
+                        try:
+                            fallback = runtime.fail_closed_plan(
+                                plan_id=bundle.plan.plan_id,
+                                observed_at_utc=observed_at,
+                                reason="autonomous_runtime_failed",
+                            )
+                        except Exception as fail_exc:
+                            logger.emit(
+                                "autonomous_paper_runtime_fail_closed_failed",
+                                level="critical",
+                                plan_id=bundle.plan.plan_id,
+                                error_type=type(fail_exc).__name__,
+                                paper_writes_authorized=paper_authorized,
+                                live_trading_authorized=False,
+                            )
+                        else:
+                            logger.emit(
+                                "autonomous_paper_runtime_failed_closed",
+                                level="critical",
+                                plan_id=bundle.plan.plan_id,
+                                fallback_action=fallback.action.value,
+                                paper_writes_authorized=paper_authorized,
+                                live_trading_authorized=False,
+                            )
                     if args.once:
                         return 1
                 if args.once:

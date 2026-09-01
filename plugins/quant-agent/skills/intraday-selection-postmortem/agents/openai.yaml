@@ -1,4 +1,4 @@
 interface:
-  display_name: "日内选股复盘"
-  short_description: "审计日内选股、催化剂与订单流漏选原因并生成受控沙盒研究假设"
-  default_prompt: "Use $intraday-selection-postmortem to review the latest completed session and propose evidence-bound sandbox hypotheses."
+  display_name: "复盘"
+  short_description: "以选股问题为主复盘选中、漏选、板块强弱与信号冲突；只生成证据约束的沙盒假设"
+  default_prompt: "Use $intraday-selection-postmortem to review the latest completed session selection-first: show what was selected correctly, what was selected incorrectly, which strong themes and movers were missed, and which signal caused each miss. Preserve LIVE/REPLAY/EXEC boundaries and keep infrastructure or execution issues in the internal audit unless they change selection attribution. Propose only evidence-bound sandbox hypotheses."
