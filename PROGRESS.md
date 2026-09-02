@@ -1,5 +1,24 @@
 # Progress
 
+## M90 Loop Platform governed daily-review integration - 2026-09-02
+
+Status: implemented locally; external Loop delivery and Paper activation remain disabled.
+
+- Added a provenance-bearing `ai_quant.loop_daily_review.v1` contract that maps the
+  accepted postmarket opportunity cohort to Loop `quant_daily_review` v5 without
+  expanding the six-symbol execution pool. Missing minute paths remain unavailable.
+- Added an idempotent WAL/FULL SQLite Outbox, Task/Run client, delayed 1d/5d/20d
+  Outcome contract, and optional non-blocking postmarket handoff.
+- Added read-only policy-candidate consumption. Only allowlisted `universe.min_rvol`
+  can become a local Shadow challenger; trading-policy changes, order authorization,
+  production eligibility and unsupported parameters fail closed.
+- Loop can never write the active policy or call a Broker. Existing hash-confirmed
+  human approval, same-pool Shadow evidence and rollback remain authoritative.
+- Verification: compileall and Ruff passed; strict Mypy passed for the ten touched
+  Python source files using the available Loop environment; a generated Task passed
+  Loop v5's real input-schema validator. Full pytest was blocked because this checkout
+  had no project environment and dependency downloads did not complete.
+
 ## Feishu investment flywheel repair - 2026-08-07
 
 Status: implemented and verified on the enterprise branch.

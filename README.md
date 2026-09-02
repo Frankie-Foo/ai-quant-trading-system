@@ -224,6 +224,11 @@ out-of-sample calibration approves it.
 
 ## Automatic postmarket learning loop
 
+The accepted daily review can also be sent to VERTU Loop as a governed
+`quant_daily_review` Task. Loop remains a PAPER-only advisory control plane; returned
+policy candidates can only be installed as non-executable local challengers. See
+[Loop Platform integration](docs/LOOP_PLATFORM_INTEGRATION.md).
+
 After a session is fully available, replay ORB-5, build a frozen Trading Episode, and
 build an immutable top-mover selection postmortem before running the read-only
 Research/Critic pair with:

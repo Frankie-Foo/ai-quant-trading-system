@@ -1,0 +1,198 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
+from urllib.parse import urlencode
+
+import httpx
+
+from .contracts import LoopBinding, LoopOutcomeEnvelope, LoopPolicyCandidate, QuantReviewEnvelope
+
+JsonRequest = Callable[[str, str, dict[str, Any] | None], Any]
+
+
+class LoopClient:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        timeout_seconds: float = 30,
+        request: JsonRequest | None = None,
+    ) -> None:
+        if not base_url.strip() or not api_key.strip():
+            raise ValueError("Loop base URL and API key are required")
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.timeout_seconds = timeout_seconds
+        self._request_override = request
+
+    def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
+        if self._request_override is not None:
+            return self._request_override(method, path, payload)
+        response = httpx.request(
+            method,
+            f"{self.base_url}{path}",
+            headers={
+                "X-Loop-API-Key": self.api_key,
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=self.timeout_seconds,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def submit_review(
+        self, envelope: QuantReviewEnvelope, binding: LoopBinding
+    ) -> tuple[str, str]:
+        task_payload = build_loop_task(envelope, binding)
+        task = self._request("POST", "/api/v1/tasks", task_payload)
+        if not isinstance(task, dict) or not str(task.get("id") or ""):
+            raise RuntimeError("Loop create-task response lacks task id")
+        task_id = str(task["id"])
+        run = self._request("POST", f"/api/v1/tasks/{task_id}/run", {"approve": False})
+        if not isinstance(run, dict) or not str(run.get("id") or ""):
+            raise RuntimeError("Loop run response lacks run id")
+        return task_id, str(run["id"])
+
+    def submit_outcome(self, outcome: LoopOutcomeEnvelope) -> str:
+        payload = outcome.model_dump(mode="json", exclude={"schema_version"})
+        result = self._request("POST", "/api/v1/knowledge/quant/outcomes", payload)
+        if not isinstance(result, dict) or not str(result.get("id") or ""):
+            raise RuntimeError("Loop outcome response lacks id")
+        return str(result["id"])
+
+    def list_policy_candidates(self, *, market_scope: str) -> tuple[LoopPolicyCandidate, ...]:
+        query = urlencode(
+            {
+                "artifact_type": "strategy_policy_candidate",
+                "market_scope": market_scope,
+                "status": "candidate",
+                "limit": 200,
+            }
+        )
+        path = f"/api/v1/knowledge/quant/control-artifacts?{query}"
+        result = self._request("GET", path, None)
+        if not isinstance(result, list):
+            raise RuntimeError("Loop policy-candidate response is not a list")
+        return tuple(LoopPolicyCandidate.model_validate(item) for item in result)
+
+
+def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict[str, Any]:
+    decisions = envelope.top10_decisions
+    primary = decisions[0]
+    market_regime = str(envelope.market_context.get("regime") or "UNKNOWN")
+    top10 = [
+        {
+            "instrument": item.instrument,
+            "verdict": item.verdict,
+            "reason": item.reason,
+            "one_minute_path": list(item.one_minute_path),
+            "trigger_results": item.trigger_results,
+            "risk_controls": list(item.risk_controls),
+            "risk_policy": envelope.risk_policy,
+            "conditions": item.features,
+            "invalidation_conditions": list(item.invalidation_conditions),
+            "source_snapshot_ids": list(item.source_snapshot_ids),
+        }
+        for item in decisions
+    ]
+    metadata = {
+        "source_system": envelope.provenance.source_system,
+        "synthetic": envelope.provenance.synthetic,
+        "not_real_market_data": envelope.provenance.not_real_market_data,
+        "code_commit": envelope.provenance.code_commit,
+        "config_sha256": envelope.provenance.config_sha256,
+        "source_snapshot_ids": list(envelope.provenance.source_snapshot_ids),
+        "strategy_id": envelope.strategy.strategy_id,
+        "strategy_version": envelope.strategy.strategy_version,
+        "active_policy_version": envelope.strategy.active_policy_version,
+        "active_policy_hash": envelope.strategy.active_policy_hash,
+        "payload_sha256": envelope.payload_sha256,
+        "market_regime": market_regime,
+    }
+    return {
+        "workflow_id": binding.workflow_id,
+        "workflow_version_id": binding.workflow_version_id,
+        "objective": (
+            f"Review {envelope.market_scope} {envelope.trading_date.isoformat()} "
+            f"{envelope.strategy.strategy_id} evidence"
+        ),
+        "source_system": envelope.provenance.source_system,
+        "source_external_id": envelope.event_id,
+        "constraints": {
+            "execution_mode": "PAPER_ONLY",
+            "allow_order_execution": False,
+            "synthetic": envelope.provenance.synthetic,
+            "not_real_market_data": envelope.provenance.not_real_market_data,
+            "source_system": envelope.provenance.source_system,
+        },
+        "success_criteria": [
+            "point-in-time evidence passes",
+            "Top10 adjudication is complete",
+            "Golden replay passes",
+            "order execution remains forbidden",
+        ],
+        "input_data": {
+            "market_scope": envelope.market_scope,
+            "as_of": envelope.as_of.isoformat(),
+            "signal_validation": {
+                "contract_id": binding.signal_contract_id,
+                "as_of": envelope.as_of.isoformat(),
+                "signal": {
+                    "instrument": primary.instrument,
+                    "signal_type": "long" if primary.verdict == "accept" else "watch",
+                    "event_time": primary.event_time.isoformat(),
+                    "available_at": primary.available_at.isoformat(),
+                    "features": primary.features,
+                    "metadata": metadata,
+                },
+            },
+            "dynamic_rescan": {
+                "market_scope": envelope.market_scope,
+                "as_of": envelope.as_of.isoformat(),
+                "available_at": envelope.as_of.isoformat(),
+                "trigger": "scheduled",
+                "trigger_evidence": {"review_event_id": envelope.event_id},
+                "universe": [item.instrument for item in decisions],
+                "ranked_candidates": [
+                    {"instrument": item.instrument, "rank": item.rank, **item.features}
+                    for item in decisions
+                ],
+                "top_n": 10,
+                "source_snapshot_ids": list(envelope.provenance.source_snapshot_ids),
+                "metadata": metadata,
+            },
+            "top10_adjudication": {"decisions": top10, "metadata": metadata},
+            "fsm_transition": {
+                "contract_id": binding.fsm_contract_id,
+                "market_scope": envelope.market_scope,
+                "instrument": primary.instrument,
+                "event_type": binding.fsm_review_event_type,
+                "event_time": primary.event_time.isoformat(),
+                "available_at": primary.available_at.isoformat(),
+                "as_of": envelope.as_of.isoformat(),
+                "guard_snapshot": envelope.execution_summary,
+                "reason": "daily_review_completed",
+                "metadata": metadata,
+            },
+            "golden_replay": {
+                "suite_id": binding.golden_suite_id,
+                "actual_results": binding.golden_actual_results,
+                "metadata": metadata,
+            },
+            "daily_review": {
+                "market_scope": envelope.market_scope,
+                "trading_date": envelope.trading_date.isoformat(),
+                "signal_contract_id": binding.signal_contract_id,
+                "fsm_contract_id": binding.fsm_contract_id,
+                "outcome_ids": [],
+                "top10_verdicts": top10,
+                "risk_policy": envelope.risk_policy,
+                "metrics": envelope.metrics,
+                "conclusions": list(envelope.conclusions),
+                "metadata": metadata,
+            },
+        },
+    }
