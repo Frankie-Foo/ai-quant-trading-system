@@ -26,7 +26,7 @@ python -m scripts.sync_loop_daily_review \
 环境变量：
 
 ```text
-LOOP_BASE_URL=https://loop.example/api/v1/loop
+LOOP_BASE_URL=https://aisales-v2.vertu.cn/api/v1/loop/machine
 LOOP_RUNTIME_API_KEY=<secret reference>
 AI_QUANT_LOOP_SYNC_ENABLED=true
 AI_QUANT_LOOP_BINDING_FILE=/secure/config/loop-quant-binding.json
