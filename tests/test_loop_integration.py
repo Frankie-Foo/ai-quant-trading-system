@@ -159,9 +159,49 @@ def test_review_builder_keeps_top10_separate_and_never_fabricates_paths(tmp_path
     assert all(item.one_minute_path == () for item in envelope.top10_decisions)
     assert envelope.execution_summary["orders_authorized"] is False
     task = build_loop_task(envelope, _binding())
-    assert task["workflow_version_id"] == "workflow-version-quant-daily-review-v5"
+    primary = envelope.top10_decisions[0]
+    assert task["workflow_version_id"] == "workflow-version-quant-daily-review-v6"
     assert len(task["input_data"]["dynamic_rescan"]["ranked_candidates"]) == 10
     assert task["input_data"]["daily_review"]["outcome_ids"] == []
+    review = task["input_data"]["daily_review"]
+    assert "top10_pnl" not in review["metrics"]
+    assert review["metrics"]["top10_close_return_sum"] == pytest.approx(0.155)
+    assert review["metrics"]["non_top10_close_return_sum"] == pytest.approx(0.019)
+    assert review["metrics"]["top10_positive_close_return_rate"] == 1.0
+    assert review["metrics"]["top10_close_return_sample_count"] == 10
+    assert review["metrics"]["non_top10_close_return_sample_count"] == 2
+    assert review["metric_semantics"] == {
+        "schema_version": "quant-review-metrics-v2",
+        "return_unit": "decimal_fraction",
+        "return_aggregation": "unweighted_sum_of_instrument_close_returns",
+        "positive_rate_denominator": "top10_instruments_with_close_return",
+        "portfolio_pnl_available": False,
+    }
+    fsm_transition = task["input_data"]["fsm_transition"]
+    assert {
+        key: fsm_transition[key]
+        for key in (
+            "contract_id",
+            "market_scope",
+            "instrument",
+            "event_type",
+            "event_time",
+            "available_at",
+            "as_of",
+            "reason",
+        )
+    } == {
+        "contract_id": "fsm-v1",
+        "market_scope": "US-equity",
+        "instrument": primary.instrument,
+        "event_type": "review_completed",
+        "event_time": primary.event_time.isoformat(),
+        "available_at": primary.available_at.isoformat(),
+        "as_of": envelope.as_of.isoformat(),
+        "reason": "daily_review_completed",
+    }
+    assert fsm_transition["guard_snapshot"]["orders_authorized"] is False
+    assert fsm_transition["metadata"]["source_system"] == "ai-quant-trading-system"
     assert task["constraints"]["allow_order_execution"] is False
 
 

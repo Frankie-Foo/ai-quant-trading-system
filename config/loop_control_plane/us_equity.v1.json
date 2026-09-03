@@ -2,7 +2,7 @@
   "schema_version": "ai_quant.loop_control_plane.v1",
   "version": "us-equity-control-v1",
   "market_scope": "US-equity",
-  "workflow_version_id": "workflow-version-quant-daily-review-v5",
+  "workflow_version_id": "workflow-version-quant-daily-review-v6",
   "fsm_review_event_type": "review_completed",
   "golden_actual_results": {
     "paper-only": {"verdict": "PAPER_ONLY"},

@@ -16,7 +16,7 @@ class FrozenModel(BaseModel):
 class LoopBinding(FrozenModel):
     schema_version: Literal["loop_quant_binding.v2"] = "loop_quant_binding.v2"
     workflow_id: Literal["quant_daily_review"] = "quant_daily_review"
-    workflow_version_id: str = Field(default="workflow-version-quant-daily-review-v5", min_length=1)
+    workflow_version_id: str = Field(default="workflow-version-quant-daily-review-v6", min_length=1)
     market_scope: str = Field(default="US-equity", min_length=1, max_length=128)
     signal_contract_id: str = Field(min_length=1, max_length=64)
     signal_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -105,7 +105,7 @@ class QuantReviewEnvelope(FrozenModel):
     top10_decisions: tuple[ReviewDecision, ...] = Field(min_length=10, max_length=10)
     execution_summary: dict[str, Any]
     risk_policy: dict[str, Any]
-    metrics: dict[str, float]
+    metrics: dict[str, int | float]
     conclusions: tuple[str, ...] = Field(min_length=1)
 
     @field_validator("as_of")

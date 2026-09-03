@@ -1,7 +1,7 @@
 {
   "schema_version": "loop_quant_binding.v2",
   "workflow_id": "quant_daily_review",
-  "workflow_version_id": "workflow-version-quant-daily-review-v5",
+  "workflow_version_id": "workflow-version-quant-daily-review-v6",
   "market_scope": "US-equity",
   "signal_contract_id": "replace-with-active-signal-contract-id",
   "signal_contract_sha256": "replace-with-64-character-config-sha256",

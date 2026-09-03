@@ -33,7 +33,7 @@
 本地 Loop Outbox
         │
         ▼
-Loop quant_daily_review v5
+Loop quant_daily_review v6
         │
         ├── Signal Contract 校验
         ├── Top10 强制裁决
@@ -53,7 +53,7 @@ Loop quant_daily_review v5
 | 项目 | 值 |
 |---|---|
 | Loop Workflow | `quant_daily_review` |
-| Workflow Version | `workflow-version-quant-daily-review-v5` |
+| Workflow Version | `workflow-version-quant-daily-review-v6` |
 | Market Scope | `US-equity` |
 | Signal Contract | `signal-contract-ai-quant-us-equity-v1` |
 | FSM Contract | `fsm-contract-ai-quant-us-equity-v1` |
@@ -77,7 +77,7 @@ Loop quant_daily_review v5
 - Loop Runtime Key 已在服务端生效；
 - 无 Key 和错误 Key 返回 401，正确 Key 返回 200；
 - 三个真实合同已经登记；
-- `workflow-version-quant-daily-review-v5` 已在 Loop 激活；
+- `workflow-version-quant-daily-review-v6` 已在 Loop 激活；
 - 所有验证仅使用 Paper 或只读接口。
 
 ## 5. 初始化本地环境
@@ -144,14 +144,17 @@ mkdir -p data/accepted runs/strategy/history runs/autonomous runs/logs
 
 ```json
 {
-  "schema_version": "loop_quant_binding.v1",
+  "schema_version": "loop_quant_binding.v2",
   "workflow_id": "quant_daily_review",
-  "workflow_version_id": "workflow-version-quant-daily-review-v5",
+  "workflow_version_id": "workflow-version-quant-daily-review-v6",
   "market_scope": "US-equity",
   "signal_contract_id": "signal-contract-ai-quant-us-equity-v1",
+  "signal_contract_sha256": "<64-character-config-sha256>",
   "fsm_contract_id": "fsm-contract-ai-quant-us-equity-v1",
+  "fsm_contract_sha256": "<64-character-config-sha256>",
   "fsm_review_event_type": "review_completed",
   "golden_suite_id": "golden-suite-ai-quant-us-equity-paper-v1",
+  "golden_suite_sha256": "<64-character-config-sha256>",
   "golden_actual_results": {
     "paper-only": {
       "verdict": "PAPER_ONLY"
@@ -382,13 +385,15 @@ curl --fail-with-body -sS \
 
 验收以下事实：
 
-- Workflow 为 `quant_daily_review` v5；
+- Workflow 为 `quant_daily_review` v6；
 - 来源为 `ai-quant-trading-system`；
 - `synthetic=false`；
 - `not_real_market_data=false`；
 - Top10 正好十只且排名连续；
 - Signal Contract 通过；
-- FSM 执行 `review_completed` 后仍是 `OBSERVING`；
+- FSM 合同显式执行 `OBSERVING.review_completed -> OBSERVING`，Run Trace 显示
+  `state_changed=false`、`transition_kind=self_transition`；这表示盘后事件已被审计接收，
+  不表示进入新的交易状态或取得下单授权；
 - Golden Replay 通过；
 - `orders_submitted=0`；
 - Run 失败时没有控制产物和状态副作用。
@@ -517,7 +522,7 @@ ARTIFACT_ID=<人工确认的候选ID>
 
 - [ ] 认证结果严格为 401/401/200；
 - [ ] 三个合同 ID 与 Binding 一致；
-- [ ] Workflow v5 已激活；
+- [ ] Workflow v6 已激活；
 - [ ] Task/Run ID 已记录；
 - [ ] Signal、Top10、FSM、Golden 全部通过；
 - [ ] provenance 与实际来源一致；
@@ -575,7 +580,7 @@ mv runs/strategy/challenger.json \
 | 找不到 accepted snapshot | 日期、数据根目录 | 先完成真实盘后复盘，不伪造文件 |
 | Top10 校验失败 | 候选数量和排名 | 确保十只唯一标的、排名 1..10 |
 | Signal 缺字段 | Signal Contract | 修复上游复盘字段，不降低合同 |
-| FSM transition invalid | Binding/FSM | 确认事件为 `review_completed` |
+| FSM transition invalid | Binding/FSM | 确认绑定事件为 `review_completed`，且冻结合同在当前状态显式声明该事件；不要为通过校验而虚构新状态 |
 | Golden Replay 失败 | actual/expected | 保持 PAPER_ONLY，不修改预期绕过失败 |
 | 候选被拒绝 | 参数白名单 | 只允许 `universe.min_rvol` |
 | 已有 Challenger 冲突 | 本地文件 | 完成现有候选评审后再安装新候选 |

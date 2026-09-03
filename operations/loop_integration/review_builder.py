@@ -160,9 +160,13 @@ def build_review_envelope(
                 source_snapshot_ids=(opportunity_snapshot.dataset_id,),
             )
         )
-    top_returns = [value for value in top["close_return"].to_list() if _finite(value) is not None]
+    top_returns = [
+        value for raw in top["close_return"].to_list() if (value := _finite(raw)) is not None
+    ]
     remaining_returns = [
-        value for value in frame.slice(10)["close_return"].to_list() if _finite(value) is not None
+        value
+        for raw in frame.slice(10)["close_return"].to_list()
+        if (value := _finite(raw)) is not None
     ]
     top_atr = sorted(
         value
@@ -234,13 +238,13 @@ def build_review_envelope(
         execution_summary={"orders_authorized": False, **(execution_summary or {})},
         risk_policy=risk_policy,
         metrics={
-            "top10_pnl": sum(float(value) for value in top_returns),
-            "non_top10_pnl": sum(float(value) for value in remaining_returns),
-            "ab_hit_rate": (
-                sum(float(value) > 0 for value in top_returns) / len(top_returns)
-                if top_returns
-                else 0.0
+            "top10_close_return_sum": sum(top_returns),
+            "non_top10_close_return_sum": sum(remaining_returns),
+            "top10_positive_close_return_rate": (
+                sum(value > 0 for value in top_returns) / len(top_returns) if top_returns else 0.0
             ),
+            "top10_close_return_sample_count": len(top_returns),
+            "non_top10_close_return_sample_count": len(remaining_returns),
         },
         conclusions=(
             "Daily review evidence was generated from accepted immutable snapshots.",

@@ -377,6 +377,13 @@ def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict
                 "top10_verdicts": top10,
                 "risk_policy": envelope.risk_policy,
                 "metrics": envelope.metrics,
+                "metric_semantics": {
+                    "schema_version": "quant-review-metrics-v2",
+                    "return_unit": "decimal_fraction",
+                    "return_aggregation": ("unweighted_sum_of_instrument_close_returns"),
+                    "positive_rate_denominator": ("top10_instruments_with_close_return"),
+                    "portfolio_pnl_available": False,
+                },
                 "conclusions": list(envelope.conclusions),
                 "metadata": metadata,
             },

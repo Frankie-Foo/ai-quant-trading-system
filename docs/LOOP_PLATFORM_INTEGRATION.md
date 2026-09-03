@@ -79,7 +79,13 @@ python -m scripts.sync_loop_policy_candidates \
 
 ## 运行验证
 
-- Loop 当前冻结合同为 `workflow-version-quant-daily-review-v5`；
+- Loop 当前冻结合同为 `workflow-version-quant-daily-review-v6`；v6 使用明确的收盘收益率
+  聚合字段，不再把标的收益率求和命名为 PnL。
+- `top10_close_return_sum` 与 `non_top10_close_return_sum` 的单位固定为小数收益率，
+  聚合方式固定为标的收盘收益率等权求和；`top10_positive_close_return_rate` 的分母是
+  有有效收盘收益率的 Top10 标的。它们都不是现金盈亏或组合收益。
+- 只有存在成交、仓位、成本和归因证据时，才可另报独立的组合 PnL 字段，并通过
+  `metric_semantics.portfolio_pnl_available=true` 指向该字段。
 - Task constraints 是 synthetic/真实来源的权威值；
 - Golden Replay 或任一步失败时，Loop 的 `QuantRunBuffer` 丢弃全部领域暂存写入；
 - Loop 同步事件始终记录 `orders_submitted=0`；

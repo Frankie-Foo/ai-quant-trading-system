@@ -1,5 +1,40 @@
 # Progress
 
+## M93 Loop daily-review metric and knowledge lineage v6 - 2026-09-03
+
+Status: producer changes are implemented locally; deploy Loop v6 before switching
+the producer binding.
+
+- Replaced ambiguous `top10_pnl`, `non_top10_pnl` and `ab_hit_rate` output with
+  explicit close-return aggregate/rate fields plus sample counts. The Task now
+  declares decimal-return aggregation and explicitly states that portfolio PnL is
+  unavailable when no fills, weights and costs exist.
+- Updated the pinned Workflow binding to `quant_daily_review` v6. Historical v5
+  payloads remain a Loop compatibility concern and are not rewritten by this repo.
+- The companion Loop runtime links generated ranking/regime IDs into the daily
+  review and does not turn `UNKNOWN` into a high-confidence market regime.
+- Verification: compileall, Ruff and `git diff --check` passed for the changed
+  producer files. The focused pytest remains environment-blocked because the local
+  virtualenv has no test/runtime dependencies and the isolated Polars runtime
+  download did not complete; this is not recorded as a test pass.
+
+## M92 Loop review event self-transition contract - 2026-09-03
+
+Status: producer contract and regression coverage updated locally; production retry requires the matching Loop backend deployment.
+
+- Kept the immutable `review_completed` contract semantics as
+  `OBSERVING -> OBSERVING`; a completed daily review records an auditable event and
+  does not fabricate a trading-state promotion.
+- Added payload regression coverage for the contract ID, review event, frozen
+  timestamps and no-order guard; documented Loop's `state_changed=false` and
+  `transition_kind=self_transition` trace contract.
+- No Broker/OMS path, Active Policy, production parameter or versioned v1 control
+  manifest was changed.
+- Verification: Python 3.12 compileall, Ruff 0.15.22 and `git diff --check`
+  passed. The focused pytest run is environment-blocked: the repository `.venv`
+  has no pytest, and an isolated install timed out downloading
+  `polars-runtime-32==1.42.1`; this is not recorded as a test pass.
+
 ## M91 Loop contract bootstrap and fail-closed delivery - 2026-09-03
 
 Status: implemented locally; production contract initialization remains an explicit operator action.
