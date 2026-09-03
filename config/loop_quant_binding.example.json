@@ -1,12 +1,15 @@
 {
-  "schema_version": "loop_quant_binding.v1",
+  "schema_version": "loop_quant_binding.v2",
   "workflow_id": "quant_daily_review",
   "workflow_version_id": "workflow-version-quant-daily-review-v5",
   "market_scope": "US-equity",
   "signal_contract_id": "replace-with-active-signal-contract-id",
+  "signal_contract_sha256": "replace-with-64-character-config-sha256",
   "fsm_contract_id": "replace-with-active-fsm-contract-id",
+  "fsm_contract_sha256": "replace-with-64-character-config-sha256",
   "fsm_review_event_type": "review_completed",
   "golden_suite_id": "replace-with-active-golden-suite-id",
+  "golden_suite_sha256": "replace-with-64-character-config-sha256",
   "golden_actual_results": {
     "paper-only": {
       "verdict": "PAPER_ONLY"

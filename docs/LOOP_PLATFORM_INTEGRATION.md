@@ -13,13 +13,23 @@ PAPER-only 学习与策略治理控制面。Loop 产物始终要求
 `scripts.sync_loop_daily_review`。适配器从日终机会复盘中保留独立的研究 Top10，不扩大
 最多六只的实际执行池；没有物化的一分钟路径保留空数组和 unavailable 状态，不能伪造。
 
-先复制并填写 `config/loop_quant_binding.example.json`。合同 ID、FSM 事件和 Golden
-结果必须对应 Loop 中已经激活的版本：
+控制面初始化不会随日终任务隐式执行。首次接入或升级合同版本时，研发必须显式运行版本化
+初始化器；同一清单重复运行只做一致性验证，不重复创建，已存在 ID 的内容发生变化则失败关闭：
+
+```bash
+python -m scripts.init_loop_control_plane \
+  --manifest config/loop_control_plane/us_equity.v1.json \
+  --binding-out runs/loop-control-plane/us_equity.binding.json
+```
+
+生成的 v2 binding 固定三份合同 ID 和各自配置 SHA-256。每日复盘创建远端 Task 前，会通过
+`control-artifacts` 逐一验证 ID、类型、active 状态、`US-equity` 范围、`PAPER_ONLY`、
+`allow_order_execution=false`、`production_eligible=false`、配置 Hash 和 `available_at`：
 
 ```bash
 python -m scripts.sync_loop_daily_review \
   --trade-date 2026-09-01 \
-  --binding /secure/config/loop-quant-binding.json \
+  --binding runs/loop-control-plane/us_equity.binding.json \
   --active-policy runs/strategy/active.json
 ```
 
@@ -34,8 +44,13 @@ AI_QUANT_ACTIVE_POLICY_FILE=/absolute/path/runs/strategy/active.json
 ```
 
 本地 Outbox 默认为 `runs/loop-integration.sqlite3`。来源身份固定为交易日、策略和 active
-policy hash；相同身份不同内容会失败关闭。Loop 暂时不可用时，本地复盘仍成功，事件保留
-为 failed/pending 供同一命令安全重试。
+policy hash；相同身份不同内容会失败关闭。合同缺失或不一致时事件标记为
+`blocked_precondition`，且不会创建远端 Task。复盘 `as_of` 早于任一合同 `available_at` 时仅标记
+`audit_only_backfill`，不会进入 Loop 策略治理样本。Loop 暂时不可用时，本地复盘仍成功，事件
+保留为 failed/pending 供同一命令安全重试。
+
+HTTP 2xx 只表示接口调用成功，不表示复盘成功。只有返回的 `Run.status=COMPLETED` 才会把
+Outbox 标记为 delivered；`FAILED` 会保留远端 Task ID、Run ID、失败节点和错误码供审计与重试。
 
 ## 延迟 Outcome
 

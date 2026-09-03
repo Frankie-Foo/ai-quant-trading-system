@@ -14,16 +14,17 @@ class FrozenModel(BaseModel):
 
 
 class LoopBinding(FrozenModel):
-    schema_version: Literal["loop_quant_binding.v1"] = "loop_quant_binding.v1"
+    schema_version: Literal["loop_quant_binding.v2"] = "loop_quant_binding.v2"
     workflow_id: Literal["quant_daily_review"] = "quant_daily_review"
-    workflow_version_id: str = Field(
-        default="workflow-version-quant-daily-review-v5", min_length=1
-    )
+    workflow_version_id: str = Field(default="workflow-version-quant-daily-review-v5", min_length=1)
     market_scope: str = Field(default="US-equity", min_length=1, max_length=128)
     signal_contract_id: str = Field(min_length=1, max_length=64)
+    signal_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     fsm_contract_id: str = Field(min_length=1, max_length=64)
+    fsm_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     fsm_review_event_type: str = Field(min_length=1, max_length=128)
     golden_suite_id: str = Field(min_length=1, max_length=64)
+    golden_suite_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     golden_actual_results: dict[str, dict[str, Any]] = Field(min_length=1)
 
 
@@ -93,9 +94,7 @@ class ReviewDecision(FrozenModel):
 
 
 class QuantReviewEnvelope(FrozenModel):
-    schema_version: Literal["ai_quant.loop_daily_review.v1"] = (
-        "ai_quant.loop_daily_review.v1"
-    )
+    schema_version: Literal["ai_quant.loop_daily_review.v1"] = "ai_quant.loop_daily_review.v1"
     event_id: str = Field(min_length=1, max_length=255)
     trading_date: date
     market_scope: str = Field(min_length=1, max_length=128)

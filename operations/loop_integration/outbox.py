@@ -18,6 +18,8 @@ class OutboxItem:
     attempts: int
     remote_task_id: str | None
     remote_run_id: str | None
+    failed_node: str | None
+    last_error_code: str | None
 
 
 class LoopOutbox:
@@ -42,6 +44,11 @@ class LoopOutbox:
                 )
                 """
             )
+            columns = {
+                str(row["name"]) for row in connection.execute("PRAGMA table_info(loop_outbox)")
+            }
+            if "failed_node" not in columns:
+                connection.execute("ALTER TABLE loop_outbox ADD COLUMN failed_node TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
@@ -117,13 +124,42 @@ class LoopOutbox:
             remote_run_id=remote_run_id,
         )
 
-    def mark_failed(self, event_id: str, *, error_code: str) -> None:
+    def mark_failed(
+        self,
+        event_id: str,
+        *,
+        error_code: str,
+        remote_task_id: str | None = None,
+        remote_run_id: str | None = None,
+        failed_node: str | None = None,
+    ) -> None:
         self._finish(
             event_id,
             status="failed",
             error_code=error_code[:128],
+            remote_task_id=remote_task_id,
+            remote_run_id=remote_run_id,
+            failed_node=failed_node,
+        )
+
+    def mark_blocked_precondition(self, event_id: str, *, error_code: str) -> None:
+        self._finish(
+            event_id,
+            status="blocked_precondition",
+            error_code=error_code[:128],
             remote_task_id=None,
             remote_run_id=None,
+            failed_node=None,
+        )
+
+    def mark_audit_only_backfill(self, event_id: str, *, error_code: str) -> None:
+        self._finish(
+            event_id,
+            status="audit_only_backfill",
+            error_code=error_code[:128],
+            remote_task_id=None,
+            remote_run_id=None,
+            failed_node=None,
         )
 
     def _finish(
@@ -134,19 +170,21 @@ class LoopOutbox:
         error_code: str | None,
         remote_task_id: str | None,
         remote_run_id: str | None,
+        failed_node: str | None = None,
     ) -> None:
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE loop_outbox
                 SET status=?, attempts=attempts+1, remote_task_id=COALESCE(?, remote_task_id),
-                    remote_run_id=COALESCE(?, remote_run_id), last_error_code=?,
+                    remote_run_id=COALESCE(?, remote_run_id), failed_node=?, last_error_code=?,
                     updated_at_utc=? WHERE event_id=?
                 """,
                 (
                     status,
                     remote_task_id,
                     remote_run_id,
+                    failed_node,
                     error_code,
                     datetime.now(UTC).isoformat(),
                     event_id,
@@ -167,10 +205,10 @@ class LoopOutbox:
             payload_sha256=str(row["payload_sha256"]),
             status=str(row["status"]),
             attempts=int(row["attempts"]),
-            remote_task_id=(
-                None if row["remote_task_id"] is None else str(row["remote_task_id"])
-            ),
-            remote_run_id=(
-                None if row["remote_run_id"] is None else str(row["remote_run_id"])
+            remote_task_id=(None if row["remote_task_id"] is None else str(row["remote_task_id"])),
+            remote_run_id=(None if row["remote_run_id"] is None else str(row["remote_run_id"])),
+            failed_node=(None if row["failed_node"] is None else str(row["failed_node"])),
+            last_error_code=(
+                None if row["last_error_code"] is None else str(row["last_error_code"])
             ),
         )

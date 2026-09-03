@@ -1,0 +1,85 @@
+{
+  "schema_version": "ai_quant.loop_control_plane.v1",
+  "version": "us-equity-control-v1",
+  "market_scope": "US-equity",
+  "workflow_version_id": "workflow-version-quant-daily-review-v5",
+  "fsm_review_event_type": "review_completed",
+  "golden_actual_results": {
+    "paper-only": {"verdict": "PAPER_ONLY"},
+    "orders-forbidden": {"allow_order_execution": false},
+    "production-ineligible": {"production_eligible": false}
+  },
+  "artifacts": [
+    {
+      "artifact_type": "signal_contract",
+      "payload": {
+        "id": "ai-quant-us-equity-signal-v1",
+        "market_scope": "US-equity",
+        "version": "v1",
+        "required_features": ["close_return", "dollar_volume", "atr_pct"],
+        "allowed_signal_types": ["long", "watch"],
+        "max_signal_age_seconds": 86400,
+        "top_n": 10,
+        "status": "active",
+        "mode": "PAPER_ONLY",
+        "effective_at": "2026-09-03T00:00:00Z",
+        "available_at": "2026-09-03T00:00:00Z",
+        "metadata": {
+          "initializer_version": "us-equity-control-v1",
+          "allow_order_execution": false,
+          "production_eligible": false
+        }
+      }
+    },
+    {
+      "artifact_type": "fsm_contract",
+      "payload": {
+        "id": "ai-quant-us-equity-fsm-v1",
+        "market_scope": "US-equity",
+        "version": "v1",
+        "initial_state": "OBSERVING",
+        "states": ["OBSERVING", "BLOCKED", "ARMED", "SCOUT_ACTIVE", "STOPPED_OUT", "RECHECK_PENDING"],
+        "transitions": {
+          "OBSERVING": {"risk_blocked": "BLOCKED", "setup_ready": "ARMED", "review_completed": "OBSERVING"},
+          "BLOCKED": {"block_released": "OBSERVING", "recheck_due": "RECHECK_PENDING"},
+          "ARMED": {"risk_blocked": "BLOCKED", "scout_entered": "SCOUT_ACTIVE"},
+          "SCOUT_ACTIVE": {"risk_blocked": "BLOCKED", "stop_triggered": "STOPPED_OUT"},
+          "STOPPED_OUT": {"recheck_due": "RECHECK_PENDING", "session_closed": "OBSERVING"},
+          "RECHECK_PENDING": {"risk_blocked": "BLOCKED", "setup_ready": "ARMED", "recheck_failed": "OBSERVING"}
+        },
+        "status": "active",
+        "mode": "PAPER_ONLY",
+        "effective_at": "2026-09-03T00:00:00Z",
+        "available_at": "2026-09-03T00:00:00Z",
+        "metadata": {
+          "initializer_version": "us-equity-control-v1",
+          "allow_order_execution": false,
+          "production_eligible": false
+        }
+      }
+    },
+    {
+      "artifact_type": "golden_case_suite",
+      "payload": {
+        "id": "ai-quant-us-equity-golden-v1",
+        "market_scope": "US-equity",
+        "name": "AI Quant US Equity PAPER_ONLY safety",
+        "version": "v1",
+        "cases": [
+          {"id": "paper-only", "expected": {"verdict": "PAPER_ONLY"}},
+          {"id": "orders-forbidden", "expected": {"allow_order_execution": false}},
+          {"id": "production-ineligible", "expected": {"production_eligible": false}}
+        ],
+        "status": "active",
+        "mode": "PAPER_ONLY",
+        "effective_at": "2026-09-03T00:00:00Z",
+        "available_at": "2026-09-03T00:00:00Z",
+        "metadata": {
+          "initializer_version": "us-equity-control-v1",
+          "allow_order_execution": false,
+          "production_eligible": false
+        }
+      }
+    }
+  ]
+}

@@ -10,12 +10,26 @@ import pytest
 from data_plane.contracts import DataQualityCheck, QualitySeverity
 from data_plane.storage import persist_snapshot
 from kernel.config import load_config
-from kernel.strategy_policy import build_strategy_policy, write_strategy_policy
-from operations.loop_integration.client import LoopClient, build_loop_task
+from kernel.strategy_policy import (
+    build_strategy_policy,
+    load_strategy_policy,
+    write_strategy_policy,
+)
+from operations.loop_integration.client import (
+    AuditOnlyBackfillRequired,
+    LoopClient,
+    LoopPreconditionError,
+    LoopRunFailedError,
+    build_loop_task,
+)
 from operations.loop_integration.contracts import (
     LoopBinding,
     LoopOutcomeEnvelope,
     LoopPolicyCandidate,
+)
+from operations.loop_integration.control_plane import (
+    LoopControlPlaneManifest,
+    config_sha256,
 )
 from operations.loop_integration.outbox import LoopOutbox
 from operations.loop_integration.policy_consumer import install_shadow_candidate
@@ -25,14 +39,54 @@ NOW = datetime(2026, 9, 1, 21, 0, tzinfo=UTC)
 TRADE_DATE = date(2026, 9, 1)
 
 
+def _control_payload(artifact_id: str) -> dict[str, object]:
+    return {
+        "id": artifact_id,
+        "market_scope": "US-equity",
+        "status": "active",
+        "mode": "PAPER_ONLY",
+        "metadata": {
+            "allow_order_execution": False,
+            "production_eligible": False,
+        },
+    }
+
+
+def _control_hash(artifact_id: str) -> str:
+    return config_sha256(_control_payload(artifact_id))
+
+
 def _binding() -> LoopBinding:
     return LoopBinding(
         signal_contract_id="signal-v1",
+        signal_contract_sha256=_control_hash("signal-v1"),
         fsm_contract_id="fsm-v1",
+        fsm_contract_sha256=_control_hash("fsm-v1"),
         fsm_review_event_type="review_completed",
         golden_suite_id="golden-v1",
+        golden_suite_sha256=_control_hash("golden-v1"),
         golden_actual_results={"paper-only": {"verdict": "PAPER_ONLY"}},
     )
+
+
+def _control_artifact(
+    artifact_id: str,
+    artifact_type: str,
+    *,
+    available_at: datetime = NOW,
+    config_hash: str | None = None,
+) -> dict[str, object]:
+    payload = _control_payload(artifact_id)
+    payload["metadata"]["config_sha256"] = config_hash or _control_hash(artifact_id)  # type: ignore[index]
+    return {
+        "id": artifact_id,
+        "artifact_type": artifact_type,
+        "market_scope": "US-equity",
+        "status": "active",
+        "effective_at": available_at.isoformat(),
+        "available_at": available_at.isoformat(),
+        "payload": payload,
+    }
 
 
 def _opportunity(tmp_path: Path) -> tuple[Path, object]:
@@ -116,14 +170,215 @@ def test_loop_client_creates_idempotent_task_then_runs_it(tmp_path: Path) -> Non
 
     def request(method: str, path: str, payload: object) -> object:
         calls.append((method, path, payload))
-        return {"id": "task-1"} if path == "/api/v1/tasks" else {"id": "run-1"}
+        if path.startswith("/api/v1/knowledge/quant/control-artifacts?"):
+            artifact_type = path.split("artifact_type=", 1)[1].split("&", 1)[0]
+            artifact_id = {
+                "signal_contract": "signal-v1",
+                "fsm_contract": "fsm-v1",
+                "golden_case_suite": "golden-v1",
+            }[artifact_type]
+            return [_control_artifact(artifact_id, artifact_type)]
+        if path == "/api/v1/tasks":
+            return {"id": "task-1"}
+        return {"id": "run-1", "status": "COMPLETED"}
 
     client = LoopClient(base_url="https://loop.invalid", api_key="secret", request=request)
     assert client.submit_review(_envelope(tmp_path), _binding()) == ("task-1", "run-1")
-    assert [item[1] for item in calls] == [
+    assert all(
+        item[1].startswith("/api/v1/knowledge/quant/control-artifacts?") for item in calls[:3]
+    )
+    assert [item[1] for item in calls[-2:]] == [
         "/api/v1/tasks",
         "/api/v1/tasks/task-1/run",
     ]
+
+
+def test_missing_contract_blocks_before_remote_task_creation(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def request(method: str, path: str, payload: object) -> object:
+        del method, payload
+        calls.append(path)
+        return []
+
+    client = LoopClient(base_url="https://loop.invalid", api_key="secret", request=request)
+    with pytest.raises(LoopPreconditionError) as caught:
+        client.submit_review(_envelope(tmp_path), _binding())
+    assert caught.value.code == "CONTRACT_NOT_FOUND"
+    assert not any(path == "/api/v1/tasks" for path in calls)
+    outbox = LoopOutbox(tmp_path / "blocked.sqlite3")
+    outbox.stage(
+        event_id="review-blocked",
+        event_type="daily_review",
+        payload={"safe": True},
+        payload_sha256=hashlib.sha256(b"blocked").hexdigest(),
+    )
+    outbox.mark_blocked_precondition("review-blocked", error_code=caught.value.code)
+    blocked = outbox.get("review-blocked")
+    assert blocked is not None
+    assert blocked.status == "blocked_precondition"
+    assert blocked.remote_task_id is None and blocked.remote_run_id is None
+
+
+def test_review_before_contract_available_at_is_audit_only(tmp_path: Path) -> None:
+    envelope = _envelope(tmp_path)
+    future = envelope.as_of.replace(year=envelope.as_of.year + 1)
+
+    def request(method: str, path: str, payload: object) -> object:
+        del method, payload
+        artifact_type = path.split("artifact_type=", 1)[1].split("&", 1)[0]
+        artifact_id = {
+            "signal_contract": "signal-v1",
+            "fsm_contract": "fsm-v1",
+            "golden_case_suite": "golden-v1",
+        }[artifact_type]
+        return [_control_artifact(artifact_id, artifact_type, available_at=future)]
+
+    client = LoopClient(base_url="https://loop.invalid", api_key="secret", request=request)
+    with pytest.raises(AuditOnlyBackfillRequired) as caught:
+        client.submit_review(envelope, _binding())
+    assert caught.value.code == "CONTRACT_NOT_AVAILABLE_AT_AS_OF"
+
+
+def test_http_200_failed_run_preserves_remote_failure_evidence(tmp_path: Path) -> None:
+    def request(method: str, path: str, payload: object) -> object:
+        del method, payload
+        if path.startswith("/api/v1/knowledge/quant/control-artifacts?"):
+            artifact_type = path.split("artifact_type=", 1)[1].split("&", 1)[0]
+            artifact_id = {
+                "signal_contract": "signal-v1",
+                "fsm_contract": "fsm-v1",
+                "golden_case_suite": "golden-v1",
+            }[artifact_type]
+            return [_control_artifact(artifact_id, artifact_type)]
+        if path == "/api/v1/tasks":
+            return {"id": "task-1"}
+        return {
+            "id": "run-1",
+            "status": "FAILED",
+            "events": [
+                {
+                    "event": "quant_step_failed",
+                    "step_id": "golden_replay",
+                    "error_type": "GoldenReplayMismatch",
+                }
+            ],
+        }
+
+    client = LoopClient(base_url="https://loop.invalid", api_key="secret", request=request)
+    with pytest.raises(LoopRunFailedError) as caught:
+        client.submit_review(_envelope(tmp_path), _binding())
+    outbox = LoopOutbox(tmp_path / "failed.sqlite3")
+    envelope = _envelope(tmp_path)
+    outbox.stage(
+        event_id=envelope.event_id,
+        event_type="daily_review",
+        payload=envelope.model_dump(mode="json"),
+        payload_sha256=envelope.payload_sha256,
+    )
+    failure = caught.value
+    outbox.mark_failed(
+        envelope.event_id,
+        error_code=failure.error_code,
+        remote_task_id=failure.task_id,
+        remote_run_id=failure.run_id,
+        failed_node=failure.failed_node,
+    )
+    item = outbox.get(envelope.event_id)
+    assert item is not None
+    assert (item.status, item.remote_task_id, item.remote_run_id) == (
+        "failed",
+        "task-1",
+        "run-1",
+    )
+    assert (item.failed_node, item.last_error_code) == (
+        "golden_replay",
+        "GoldenReplayMismatch",
+    )
+
+
+def test_explicit_control_plane_initialization_is_idempotent() -> None:
+    manifest_path = (
+        Path(__file__).resolve().parents[1] / "config/loop_control_plane/us_equity.v1.json"
+    )
+    manifest = LoopControlPlaneManifest.model_validate_json(
+        manifest_path.read_text(encoding="utf-8")
+    )
+    stored: dict[str, dict[str, object]] = {}
+    post_calls: list[str] = []
+
+    def request(method: str, path: str, payload: object) -> object:
+        if method == "GET":
+            artifact_type = path.split("artifact_type=", 1)[1].split("&", 1)[0]
+            return [item for item in stored.values() if item["artifact_type"] == artifact_type]
+        assert isinstance(payload, dict)
+        post_calls.append(path)
+        artifact_type = {
+            value: key
+            for key, value in {
+                "signal_contract": "/api/v1/knowledge/quant/signal-contracts",
+                "fsm_contract": "/api/v1/knowledge/quant/fsm-contracts",
+                "golden_case_suite": "/api/v1/knowledge/quant/golden-suites",
+            }.items()
+        }[path]
+        artifact = {
+            "id": payload["id"],
+            "artifact_type": artifact_type,
+            "market_scope": payload["market_scope"],
+            "status": payload["status"],
+            "effective_at": payload["effective_at"],
+            "available_at": payload["available_at"],
+            "payload": payload,
+        }
+        stored[str(payload["id"])] = artifact
+        return artifact
+
+    client = LoopClient(base_url="https://loop.invalid", api_key="secret", request=request)
+    first = client.initialize_control_plane(manifest)
+    second = client.initialize_control_plane(manifest)
+    assert first == second == manifest.binding()
+    assert len(post_calls) == 3
+
+
+def test_complete_review_keeps_active_policy_immutable_and_never_calls_broker(
+    tmp_path: Path,
+) -> None:
+    active_path = tmp_path / "active.json"
+    active = build_strategy_policy(
+        version="selection-v1",
+        status="active",
+        min_rvol=3.0,
+        created_at_utc=NOW,
+        approved_by="owner",
+        approved_at_utc=NOW,
+    )
+    write_strategy_policy(active_path, active)
+    before = hashlib.sha256(active_path.read_bytes()).hexdigest()
+    calls: list[str] = []
+
+    def request(method: str, path: str, payload: object) -> object:
+        del method, payload
+        calls.append(path)
+        if path.startswith("/api/v1/knowledge/quant/control-artifacts?"):
+            artifact_type = path.split("artifact_type=", 1)[1].split("&", 1)[0]
+            artifact_id = {
+                "signal_contract": "signal-v1",
+                "fsm_contract": "fsm-v1",
+                "golden_case_suite": "golden-v1",
+            }[artifact_type]
+            return [_control_artifact(artifact_id, artifact_type)]
+        if path == "/api/v1/tasks":
+            return {"id": "task-1"}
+        return {"id": "run-1", "status": "COMPLETED"}
+
+    result = LoopClient(
+        base_url="https://loop.invalid", api_key="secret", request=request
+    ).submit_review(_envelope(tmp_path), _binding())
+    after = hashlib.sha256(active_path.read_bytes()).hexdigest()
+    assert result == ("task-1", "run-1")
+    assert before == after
+    assert load_strategy_policy(active_path).policy_hash == active.policy_hash
+    assert not any("broker" in path.lower() or "oms" in path.lower() for path in calls)
 
 
 def test_outbox_rejects_identity_collision_and_tracks_remote_ids(tmp_path: Path) -> None:

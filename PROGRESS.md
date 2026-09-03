@@ -1,5 +1,19 @@
 # Progress
 
+## M91 Loop contract bootstrap and fail-closed delivery - 2026-09-03
+
+Status: implemented locally; production contract initialization remains an explicit operator action.
+
+- Added versioned `US-equity` Signal/FSM/Golden manifest and an explicit idempotent initializer.
+- Daily review now validates immutable contract identity, type, status, market, PAPER_ONLY flags,
+  config hash and availability before creating any remote Task.
+- Added `blocked_precondition` and `audit_only_backfill` Outbox terminal states; historical reviews
+  cannot enter strategy-governance samples.
+- HTTP success is no longer treated as business success: only COMPLETED Runs are delivered, while
+  FAILED Runs retain Task/Run IDs, failed node and error code.
+- Added regression coverage for missing contracts, temporal boundaries, HTTP 200 + FAILED,
+  idempotent initialization, full completion, active-policy immutability and zero Broker/OMS calls.
+
 ## M90 Loop Platform governed daily-review integration - 2026-09-02
 
 Status: implemented locally; external Loop delivery and Paper activation remain disabled.

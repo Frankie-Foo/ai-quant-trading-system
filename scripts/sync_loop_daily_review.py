@@ -9,7 +9,12 @@ from pathlib import Path
 from kernel.config import load_config
 from kernel.strategy_policy import load_strategy_policy
 from operations.local_env import load_project_env, project_data_root
-from operations.loop_integration.client import LoopClient
+from operations.loop_integration.client import (
+    AuditOnlyBackfillRequired,
+    LoopClient,
+    LoopPreconditionError,
+    LoopRunFailedError,
+)
 from operations.loop_integration.contracts import LoopBinding
 from operations.loop_integration.outbox import LoopOutbox
 from operations.loop_integration.review_builder import build_review_envelope, load_accepted_snapshot
@@ -75,6 +80,23 @@ def main() -> None:
     )
     try:
         task_id, run_id = client.submit_review(envelope, binding)
+    except AuditOnlyBackfillRequired as exc:
+        outbox.mark_audit_only_backfill(envelope.event_id, error_code=exc.code)
+        print(json.dumps({"status": "audit_only_backfill", "event_id": envelope.event_id}))
+        return
+    except LoopPreconditionError as exc:
+        outbox.mark_blocked_precondition(envelope.event_id, error_code=exc.code)
+        print(json.dumps({"status": "blocked_precondition", "event_id": envelope.event_id}))
+        return
+    except LoopRunFailedError as exc:
+        outbox.mark_failed(
+            envelope.event_id,
+            error_code=exc.error_code,
+            remote_task_id=exc.task_id,
+            remote_run_id=exc.run_id,
+            failed_node=exc.failed_node,
+        )
+        raise
     except Exception as exc:
         outbox.mark_failed(envelope.event_id, error_code=type(exc).__name__)
         raise
