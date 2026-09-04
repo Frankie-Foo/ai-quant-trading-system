@@ -1,5 +1,13 @@
 # Progress
 
+## M94 Deterministic Loop review provenance - 2026-09-05
+
+Status: implemented locally; Loop submission remains blocked pending machine-local binding,
+Active Policy and runtime credentials.
+
+- Daily-review provenance now uses immutable accepted-snapshot `as_of` time rather than wall-clock build time, preventing a repeated same-event submission from colliding with different payload content.
+- Verification: Python 3.12 focused `tests/test_loop_integration.py` passed (14 passed); Ruff and `git diff --check` passed.
+
 ## M93 Loop daily-review metric and knowledge lineage v6 - 2026-09-03
 
 Status: producer changes are implemented locally; deploy Loop v6 before switching
