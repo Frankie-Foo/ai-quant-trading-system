@@ -2166,3 +2166,19 @@ Status: installed for Alpaca Paper only; real trading remains forbidden.
   capacity-ranking rejection reasons. Independent review found no remaining
   Critical/Important issues. Full pytest passed `745` tests; Ruff, strict Mypy across
   `411` files and compileall passed.
+
+## M90 2026-09-04 governed delayed Outcome v2
+
+- Unified delayed Outcome governance lineage under `evidence`; legacy v1 metadata is
+  normalized only when non-conflicting, while v2 rejects misplaced or inconsistent
+  lineage.
+- Added Loop-provided revision/event assignments and a deterministic 1d/5d/20d XNYS
+  reporter. It verifies accepted snapshot hashes, never fills missing/halted bars,
+  requires an explicitly approved benchmark/cost model, and persists submissions in
+  the existing idempotent Outbox.
+- Postmarket integration is independently disabled by default and records zero orders.
+  Loop or data failures remain pending without changing the authoritative local review.
+- Verification: targeted Outcome and scheduler tests passed `7`; Ruff and compileall
+  passed. The full suite reached `758` passes; `30` unrelated tests remain blocked by
+  the intentionally absent local `runs/strategy/active.json`, so no active policy was
+  fabricated to make those tests pass.

@@ -433,16 +433,42 @@ set +a
 
 ## 12. 延迟 Outcome 回填
 
-Outcome 必须来自真实可用时间点，并包含：
+Outcome 必须来自真实可用时间点。默认使用 Loop 的待回填清单和交易系统的自动到期扫描器：
+
+```bash
+.venv/bin/python -m scripts.sync_loop_due_outcomes \
+  --as-of-trade-date 2026-09-01 \
+  --data-root "$AI_QUANT_DATA_ROOT" \
+  --config /secure/config/loop-outcome-reporter.json \
+  --outbox runs/loop-integration.sqlite3
+```
+
+扫描器必须满足：
 
 - `decision_event_id`；
 - `source_run_id`；
-- `strategy_revision_id`；
+- Loop 明确分配的 `strategy_revision_id`；
 - `evaluation_role` 为 `holdout`、`walk_forward` 或 `forward`；
 - `point_in_time_guard_passed=true`；
-- horizon 为 `1d`、`5d` 或 `20d`。
+- horizon 为 `1d`、`5d` 或 `20d`；
+- XNYS 交易日数量达到 horizon，且 `observed_at` 不早于到期日收盘；
+- 起点、路径和终点的标的/基准日线均存在于 hash 验证通过的 accepted 快照；
+- 收益为 split-adjusted close-to-close 小数，净超额收益扣除已批准成本和滑点。
 
-先暂存：
+配置必须显式给出 `benchmark_symbol`、往返成本 bps、往返滑点 bps、watch 中性区间、
+`cost_model_version`、`approved_by` 和 UTC `approved_at_utc`。不得用默认值替代审批。
+
+要接入盘后自动运行，先保持关闭完成一次人工核对，再设置：
+
+```text
+AI_QUANT_LOOP_OUTCOME_SYNC_ENABLED=true
+AI_QUANT_LOOP_OUTCOME_CONFIG_FILE=/secure/config/loop-outcome-reporter.json
+```
+
+缺交易日、缺行情或停牌不会补值，只在命令摘要中显示 pending。Loop 或网络失败进入 Outbox
+failed，使用同一命令安全续跑。本地盘后复盘不因此失败。
+
+人工/历史修正可以继续先暂存：
 
 ```bash
 .venv/bin/python -m scripts.sync_loop_outcomes \

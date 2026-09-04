@@ -134,8 +134,21 @@ class QuantReviewEnvelope(FrozenModel):
         return hashlib.sha256(encoded).hexdigest()
 
 
+OUTCOME_GOVERNANCE_KEYS = (
+    "strategy_revision_id",
+    "evaluation_role",
+    "point_in_time_guard_passed",
+)
+OUTCOME_HORIZON_SESSIONS = {"1d": 1, "5d": 5, "20d": 20}
+OUTCOME_EXCESS_FORMULA = (
+    "strategy_return-benchmark_return-transaction_cost-slippage"
+)
+
+
 class LoopOutcomeEnvelope(FrozenModel):
-    schema_version: Literal["ai_quant.loop_outcome.v1"] = "ai_quant.loop_outcome.v1"
+    schema_version: Literal[
+        "ai_quant.loop_outcome.v1", "ai_quant.loop_outcome.v2"
+    ] = "ai_quant.loop_outcome.v1"
     id: str = Field(min_length=1, max_length=64)
     decision_event_id: str = Field(min_length=1, max_length=64)
     source_run_id: str = Field(min_length=1, max_length=64)
@@ -145,33 +158,201 @@ class LoopOutcomeEnvelope(FrozenModel):
     observed_at: datetime
     strategy_return: float | None = None
     benchmark_return: float | None = None
+    excess_return: float | None = None
     max_drawdown: float | None = None
+    risk_adjusted_return: float | None = None
     transaction_cost: float | None = None
     slippage: float | None = None
     direction_correct: bool | None = None
+    status: str = Field(default="observed", min_length=1, max_length=64)
     evidence: dict[str, Any]
     metadata: dict[str, Any]
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_governance_location(cls, raw: Any) -> Any:
+        schema_version = (
+            raw.get("schema_version", "ai_quant.loop_outcome.v1")
+            if isinstance(raw, dict)
+            else ""
+        )
+        if not isinstance(raw, dict) or schema_version != "ai_quant.loop_outcome.v1":
+            return raw
+        payload = dict(raw)
+        evidence = dict(payload.get("evidence") or {})
+        metadata = dict(payload.get("metadata") or {})
+        for key in OUTCOME_GOVERNANCE_KEYS:
+            evidence_value = evidence.get(key)
+            metadata_value = metadata.get(key)
+            if (
+                evidence_value is not None
+                and metadata_value is not None
+                and evidence_value != metadata_value
+            ):
+                raise ValueError(f"outcome has conflicting governance lineage for {key}")
+            if evidence_value is None and metadata_value is not None:
+                evidence[key] = metadata_value
+        payload["evidence"] = evidence
+        return payload
 
     @field_validator("observed_at")
     @classmethod
     def observed_is_aware(cls, value: datetime) -> datetime:
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("observed_at must be timezone-aware")
+        if value.tzinfo is None or value.utcoffset() != UTC.utcoffset(value):
+            raise ValueError("observed_at must be timezone-aware UTC")
         return value
 
     @model_validator(mode="after")
     def require_point_in_time_lineage(self) -> Self:
-        if self.metadata.get("point_in_time_guard_passed") is not True:
+        if self.evidence.get("point_in_time_guard_passed") is not True:
             raise ValueError("outcome requires a passed point-in-time guard")
-        if self.metadata.get("evaluation_role") not in {
+        if self.evidence.get("evaluation_role") not in {
             "holdout",
             "walk_forward",
             "forward",
         }:
             raise ValueError("outcome evaluation_role is invalid")
-        if not str(self.metadata.get("strategy_revision_id") or "").strip():
+        if not str(self.evidence.get("strategy_revision_id") or "").strip():
             raise ValueError("outcome requires strategy_revision_id")
+        if self.schema_version == "ai_quant.loop_outcome.v2":
+            self._validate_v2()
         return self
+
+    def _validate_v2(self) -> None:
+        if any(key in self.metadata for key in OUTCOME_GOVERNANCE_KEYS):
+            raise ValueError("outcome v2 governance lineage belongs in evidence")
+        if self.evidence.get("schema_version") != "quant-outcome-evidence-v2":
+            raise ValueError("outcome v2 evidence schema is invalid")
+        try:
+            decision_date = date.fromisoformat(
+                str(self.evidence["decision_trading_date"])
+            )
+            horizon_date = date.fromisoformat(
+                str(self.evidence["horizon_end_trading_date"])
+            )
+            horizon_close = datetime.fromisoformat(
+                str(self.evidence["horizon_end_market_close_utc"]).replace(
+                    "Z", "+00:00"
+                )
+            )
+        except (KeyError, ValueError) as exc:
+            raise ValueError("outcome v2 requires valid horizon evidence") from exc
+        if (
+            horizon_close.tzinfo is None
+            or horizon_close.utcoffset() != UTC.utcoffset(horizon_close)
+        ):
+            raise ValueError("horizon close must be timezone-aware UTC")
+        if horizon_date <= decision_date:
+            raise ValueError("horizon trading date must follow decision trading date")
+        if self.observed_at < horizon_close:
+            raise ValueError("observed_at cannot precede horizon close")
+        raw_sessions = self.evidence.get("trading_session_dates")
+        if not isinstance(raw_sessions, list):
+            raise ValueError("outcome v2 requires trading_session_dates")
+        try:
+            sessions = [date.fromisoformat(str(value)) for value in raw_sessions]
+        except ValueError as exc:
+            raise ValueError("trading_session_dates must contain ISO dates") from exc
+        if (
+            len(sessions) != OUTCOME_HORIZON_SESSIONS[self.horizon]
+            or sessions != sorted(set(sessions))
+            or any(value <= decision_date for value in sessions)
+            or sessions[-1] != horizon_date
+        ):
+            raise ValueError("trading_session_dates do not match the declared horizon")
+        calendar = self.evidence.get("trading_calendar")
+        if not isinstance(calendar, dict) or any(
+            not str(calendar.get(key) or "").strip()
+            for key in ("name", "source", "version")
+        ):
+            raise ValueError("outcome v2 requires versioned trading_calendar evidence")
+        if not str(self.evidence.get("benchmark_id") or "").strip():
+            raise ValueError("outcome v2 requires benchmark_id")
+        snapshots = self.evidence.get("price_snapshot_ids")
+        if not isinstance(snapshots, list) or len(snapshots) < 2:
+            raise ValueError("outcome v2 requires start and horizon price snapshots")
+        semantics = self.evidence.get("return_semantics")
+        required_semantics = {
+            "unit": "decimal_fraction",
+            "method": "close_to_close_split_adjusted",
+            "strategy_return_basis": "gross_before_costs",
+            "excess_return_formula": OUTCOME_EXCESS_FORMULA,
+        }
+        if not isinstance(semantics, dict) or any(
+            semantics.get(key) != value for key, value in required_semantics.items()
+        ):
+            raise ValueError("outcome v2 return_semantics are invalid")
+        metrics = (
+            self.strategy_return,
+            self.benchmark_return,
+            self.excess_return,
+            self.max_drawdown,
+            self.transaction_cost,
+            self.slippage,
+        )
+        if any(value is None or not math.isfinite(float(value)) for value in metrics):
+            raise ValueError("outcome v2 requires finite metrics")
+        if float(self.transaction_cost or 0) < 0 or float(self.slippage or 0) < 0:
+            raise ValueError("outcome v2 costs and slippage must be non-negative")
+        if float(self.max_drawdown or 0) > 0:
+            raise ValueError("outcome v2 max_drawdown must be non-positive")
+        if self.direction_correct is None:
+            raise ValueError("outcome v2 requires direction_correct")
+        expected_excess = (
+            float(self.strategy_return or 0)
+            - float(self.benchmark_return or 0)
+            - float(self.transaction_cost or 0)
+            - float(self.slippage or 0)
+        )
+        if not math.isclose(
+            float(self.excess_return or 0),
+            expected_excess,
+            rel_tol=0.0,
+            abs_tol=1e-10,
+        ):
+            raise ValueError("outcome v2 excess_return formula mismatch")
+
+
+class LoopOutcomeAssignment(FrozenModel):
+    schema_version: Literal["quant-outcome-assignment-v1"] = (
+        "quant-outcome-assignment-v1"
+    )
+    strategy_revision_id: str = Field(min_length=1, max_length=128)
+    strategy_lineage_id: str = Field(min_length=1, max_length=128)
+    decision_event_id: str = Field(min_length=1, max_length=128)
+    source_run_id: str = Field(min_length=1, max_length=128)
+    market_scope: str = Field(min_length=1, max_length=128)
+    instrument: str = Field(pattern=r"^[A-Z][A-Z0-9.-]{0,15}$")
+    decision_trading_date: date
+    observed_verdict: Literal["accept", "watch", "reject", "block"]
+    target_verdict: Literal["accept", "watch", "reject", "block"]
+    evaluation_role: Literal["holdout", "walk_forward", "forward"]
+    outstanding_horizons: tuple[Literal["1d", "5d", "20d"], ...] = Field(
+        min_length=1
+    )
+
+
+class OutcomeReporterConfig(FrozenModel):
+    schema_version: Literal["ai_quant.loop_outcome_reporter.v1"] = (
+        "ai_quant.loop_outcome_reporter.v1"
+    )
+    market_scope: str = Field(default="US-equity", min_length=1, max_length=128)
+    benchmark_symbol: str = Field(pattern=r"^[A-Z][A-Z0-9.-]{0,15}$")
+    transaction_cost_bps_round_trip: float = Field(ge=0)
+    slippage_bps_round_trip: float = Field(ge=0)
+    watch_neutral_band_bps: float = Field(default=25.0, ge=0)
+    cost_model_version: str = Field(min_length=1, max_length=128)
+    approved_by: str = Field(min_length=1, max_length=128)
+    approved_at_utc: datetime
+    price_source: Literal["massive.grouped_daily"] = "massive.grouped_daily"
+    adjustment: Literal["split_adjusted"] = "split_adjusted"
+
+    @field_validator("approved_at_utc")
+    @classmethod
+    def approval_is_utc(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() != UTC.utcoffset(value):
+            raise ValueError("approved_at_utc must be timezone-aware UTC")
+        return value
 
 
 class LoopPolicyCandidate(FrozenModel):

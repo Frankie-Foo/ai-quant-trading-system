@@ -7,7 +7,13 @@ from urllib.parse import urlencode
 
 import httpx
 
-from .contracts import LoopBinding, LoopOutcomeEnvelope, LoopPolicyCandidate, QuantReviewEnvelope
+from .contracts import (
+    LoopBinding,
+    LoopOutcomeAssignment,
+    LoopOutcomeEnvelope,
+    LoopPolicyCandidate,
+    QuantReviewEnvelope,
+)
 from .control_plane import (
     ARTIFACT_ENDPOINTS,
     ControlArtifactSpec,
@@ -226,11 +232,27 @@ class LoopClient:
         )
 
     def submit_outcome(self, outcome: LoopOutcomeEnvelope) -> str:
-        payload = outcome.model_dump(mode="json", exclude={"schema_version"})
+        payload = outcome.model_dump(mode="json")
         result = self._request("POST", "/api/v1/knowledge/quant/outcomes", payload)
         if not isinstance(result, dict) or not str(result.get("id") or ""):
             raise RuntimeError("Loop outcome response lacks id")
         return str(result["id"])
+
+    def list_outcome_assignments(
+        self,
+        *,
+        market_scope: str,
+        limit: int = 5000,
+    ) -> tuple[LoopOutcomeAssignment, ...]:
+        query = urlencode({"market_scope": market_scope, "limit": limit})
+        result = self._request(
+            "GET",
+            f"/api/v1/knowledge/quant/outcome-assignments?{query}",
+            None,
+        )
+        if not isinstance(result, list):
+            raise RuntimeError("Loop outcome-assignment response is not a list")
+        return tuple(LoopOutcomeAssignment.model_validate(item) for item in result)
 
     def list_policy_candidates(self, *, market_scope: str) -> tuple[LoopPolicyCandidate, ...]:
         query = urlencode(

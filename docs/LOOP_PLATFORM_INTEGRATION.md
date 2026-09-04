@@ -41,6 +41,8 @@ LOOP_RUNTIME_API_KEY=<secret reference>
 AI_QUANT_LOOP_SYNC_ENABLED=true
 AI_QUANT_LOOP_BINDING_FILE=/secure/config/loop-quant-binding.json
 AI_QUANT_ACTIVE_POLICY_FILE=/absolute/path/runs/strategy/active.json
+AI_QUANT_LOOP_OUTCOME_SYNC_ENABLED=false
+AI_QUANT_LOOP_OUTCOME_CONFIG_FILE=/secure/config/loop-outcome-reporter.json
 ```
 
 本地 Outbox 默认为 `runs/loop-integration.sqlite3`。来源身份固定为交易日、策略和 active
@@ -54,13 +56,54 @@ Outbox 标记为 delivered；`FAILED` 会保留远端 Task ID、Run ID、失败�
 
 ## 延迟 Outcome
 
-1d、5d、20d Outcome 在真正可用后单独回填，不放入当天 Task。输入必须包含精确
-`decision_event_id`、`source_run_id`、`strategy_revision_id`、evaluation role 和通过的
-point-in-time guard：
+1d、5d、20d Outcome 在真正可用后单独回填，不放入当天 Task。Loop 通过
+`GET /api/v1/knowledge/quant/outcome-assignments` 给出精确的
+`strategy_revision_id + decision_event_id + outstanding_horizons`，避免交易系统猜测归属。
+
+推荐使用自动到期扫描器。它按 XNYS 交易日而不是自然日计算 horizon，只读取 hash 匹配且
+质量门禁通过的 `massive.grouped_daily` accepted 快照；任何交易日、标的或基准行情缺失时保留
+pending，禁止填充或提前上报：
+
+```bash
+python -m scripts.sync_loop_due_outcomes \
+  --as-of-trade-date 2026-09-01 \
+  --config /secure/config/loop-outcome-reporter.json
+```
+
+配置文件必须由风险负责人填写并批准，至少包含：
+
+```text
+schema_version=ai_quant.loop_outcome_reporter.v1
+market_scope=US-equity
+benchmark_symbol=<批准的基准代码>
+transaction_cost_bps_round_trip=<批准的往返成本 bps>
+slippage_bps_round_trip=<批准的往返滑点 bps>
+watch_neutral_band_bps=<批准的观察中性区间 bps>
+cost_model_version=<版本>
+approved_by=<负责人>
+approved_at_utc=<UTC 时间>
+```
+
+新上报固定使用 `ai_quant.loop_outcome.v2`。治理血缘只放在 `evidence`；收益单位固定为
+decimal fraction，方法固定为 split-adjusted close-to-close；`excess_return` 固定等于
+`strategy_return - benchmark_return - transaction_cost - slippage`。Loop 会再次验证
+horizon session 数、到期收盘时间、快照 ID、基准、公式和 point-in-time guard。
+
+历史或人工修正仍可使用文件上传器：
 
 ```bash
 python -m scripts.sync_loop_outcomes --file /secure/outcomes/2026-09-01-1d.json
 ```
+
+要随盘后任务自动执行，完成配置审批后才同时设置：
+
+```text
+AI_QUANT_LOOP_OUTCOME_SYNC_ENABLED=true
+AI_QUANT_LOOP_OUTCOME_CONFIG_FILE=/secure/config/loop-outcome-reporter.json
+```
+
+该开关与每日复盘上传开关相互独立；失败只记录
+`loop_outcome_sync_pending`，不改变本地复盘结果，且始终 `orders_submitted=0`。
 
 ## 下行策略候选
 
@@ -89,4 +132,4 @@ python -m scripts.sync_loop_policy_candidates \
 - Task constraints 是 synthetic/真实来源的权威值；
 - Golden Replay 或任一步失败时，Loop 的 `QuantRunBuffer` 丢弃全部领域暂存写入；
 - Loop 同步事件始终记录 `orders_submitted=0`；
-- 关闭 `AI_QUANT_LOOP_SYNC_ENABLED` 不改变原有日终和交易行为。
+- 关闭 `AI_QUANT_LOOP_SYNC_ENABLED` 或 `AI_QUANT_LOOP_OUTCOME_SYNC_ENABLED` 不改变原有日终和交易行为。

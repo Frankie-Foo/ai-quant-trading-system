@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
 import pytest
 
 from data_plane.contracts import DataQualityCheck, QualitySeverity
+from data_plane.daily import audit_daily_bars, canonicalize_daily_bars
 from data_plane.storage import persist_snapshot
 from kernel.config import load_config
 from kernel.strategy_policy import (
@@ -24,14 +25,17 @@ from operations.loop_integration.client import (
 )
 from operations.loop_integration.contracts import (
     LoopBinding,
+    LoopOutcomeAssignment,
     LoopOutcomeEnvelope,
     LoopPolicyCandidate,
+    OutcomeReporterConfig,
 )
 from operations.loop_integration.control_plane import (
     LoopControlPlaneManifest,
     config_sha256,
 )
 from operations.loop_integration.outbox import LoopOutbox
+from operations.loop_integration.outcome_reporter import sync_due_outcomes
 from operations.loop_integration.policy_consumer import install_shadow_candidate
 from operations.loop_integration.review_builder import build_review_envelope
 
@@ -516,3 +520,209 @@ def test_delayed_outcome_requires_revision_and_point_in_time_lineage() -> None:
                 "evaluation_role": "forward",
             },
         )
+
+
+def test_outcome_v1_moves_legacy_lineage_to_canonical_evidence() -> None:
+    outcome = LoopOutcomeEnvelope(
+        id="outcome-v1",
+        decision_event_id="event-1",
+        source_run_id="run-1",
+        market_scope="US-equity",
+        instrument="AAPL",
+        horizon="1d",
+        observed_at=NOW,
+        evidence={"snapshot_id": "snapshot-1"},
+        metadata={
+            "strategy_revision_id": "strategy-r1",
+            "evaluation_role": "forward",
+            "point_in_time_guard_passed": True,
+        },
+    )
+
+    assert outcome.evidence["strategy_revision_id"] == "strategy-r1"
+    assert outcome.evidence["evaluation_role"] == "forward"
+
+
+def test_outcome_v2_enforces_maturity_and_return_semantics() -> None:
+    evidence = {
+        "schema_version": "quant-outcome-evidence-v2",
+        "strategy_revision_id": "strategy-r1",
+        "evaluation_role": "holdout",
+        "point_in_time_guard_passed": True,
+        "decision_trading_date": "2026-08-31",
+        "horizon_end_trading_date": "2026-09-01",
+        "horizon_end_market_close_utc": "2026-09-01T20:00:00+00:00",
+        "trading_session_dates": ["2026-09-01"],
+        "trading_calendar": {
+            "name": "XNYS",
+            "source": "pandas_market_calendars.NYSE",
+            "version": "5.1.1",
+        },
+        "benchmark_id": "QQQ",
+        "price_snapshot_ids": ["snapshot-start", "snapshot-end"],
+        "return_semantics": {
+            "unit": "decimal_fraction",
+            "method": "close_to_close_split_adjusted",
+            "strategy_return_basis": "gross_before_costs",
+            "excess_return_formula": "strategy_return-benchmark_return-transaction_cost-slippage",
+        },
+    }
+    outcome = LoopOutcomeEnvelope(
+        schema_version="ai_quant.loop_outcome.v2",
+        id="outcome-v2",
+        decision_event_id="event-1",
+        source_run_id="run-1",
+        market_scope="US-equity",
+        instrument="AAPL",
+        horizon="1d",
+        observed_at=NOW,
+        strategy_return=0.03,
+        benchmark_return=0.01,
+        excess_return=0.018,
+        max_drawdown=-0.01,
+        transaction_cost=0.001,
+        slippage=0.001,
+        direction_correct=True,
+        evidence=evidence,
+        metadata={"source_system": "ai-quant-trading-system"},
+    )
+    assert outcome.excess_return == pytest.approx(0.018)
+
+    with pytest.raises(ValueError, match="cannot precede horizon close"):
+        LoopOutcomeEnvelope.model_validate(
+            {
+                **outcome.model_dump(mode="json"),
+                "id": "outcome-v2-early",
+                "observed_at": "2026-09-01T19:59:00+00:00",
+            }
+        )
+
+
+def test_outcome_assignment_and_reporter_config_are_fail_closed() -> None:
+    assignment = LoopOutcomeAssignment(
+        strategy_revision_id="strategy-r1",
+        strategy_lineage_id="strategy-lineage-1",
+        decision_event_id="event-1",
+        source_run_id="run-1",
+        market_scope="US-equity",
+        instrument="AAPL",
+        decision_trading_date=date(2026, 8, 31),
+        observed_verdict="watch",
+        target_verdict="accept",
+        evaluation_role="holdout",
+        outstanding_horizons=("1d", "5d", "20d"),
+    )
+    assert assignment.target_verdict == "accept"
+
+    with pytest.raises(ValueError, match="approved_by"):
+        OutcomeReporterConfig(
+            benchmark_symbol="QQQ",
+            transaction_cost_bps_round_trip=10,
+            slippage_bps_round_trip=5,
+            cost_model_version="cost-v1",
+            approved_by="",
+            approved_at_utc=NOW,
+        )
+
+
+def test_due_outcome_reporter_waits_for_sessions_then_submits_v2(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    for trade_date, aapl_close, qqq_close in (
+        (date(2026, 8, 31), 100.0, 200.0),
+        (date(2026, 9, 1), 104.0, 202.0),
+    ):
+        frame = canonicalize_daily_bars(
+            pl.DataFrame(
+                {
+                    "symbol": ["AAPL", "QQQ"],
+                    "trade_date": [trade_date, trade_date],
+                    "provider_ts_utc": [NOW, NOW],
+                    "open": [aapl_close - 1, qqq_close - 1],
+                    "high": [aapl_close + 1, qqq_close + 1],
+                    "low": [aapl_close - 2, qqq_close - 2],
+                    "close": [aapl_close, qqq_close],
+                    "volume": [1_000_000.0, 2_000_000.0],
+                    "trade_count": [10_000, 20_000],
+                    "vwap": [aapl_close, qqq_close],
+                    "source": ["massive.grouped_daily"] * 2,
+                    "feed": ["sip", "sip"],
+                    "adjustment": ["split_adjusted", "split_adjusted"],
+                }
+            )
+        )
+        persist_snapshot(
+            frame,
+            root=data_root,
+            source="massive.grouped_daily",
+            schema_version="bars_daily.v1",
+            checks=audit_daily_bars(
+                frame,
+                provenance="massive.grouped_daily",
+                expected_date=trade_date,
+            ),
+        )
+    requests: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def request(
+        method: str,
+        path: str,
+        payload: dict[str, object] | None,
+    ) -> object:
+        requests.append((method, path, payload))
+        if method == "GET":
+            return [
+                {
+                    "schema_version": "quant-outcome-assignment-v1",
+                    "strategy_revision_id": "strategy-r1",
+                    "strategy_lineage_id": "strategy-lineage-1",
+                    "decision_event_id": "event-1",
+                    "source_run_id": "run-1",
+                    "market_scope": "US-equity",
+                    "instrument": "AAPL",
+                    "decision_trading_date": "2026-08-31",
+                    "observed_verdict": "watch",
+                    "target_verdict": "accept",
+                    "evaluation_role": "holdout",
+                    "outstanding_horizons": ["1d", "5d"],
+                }
+            ]
+        assert payload is not None
+        return {"id": payload["id"]}
+
+    config = OutcomeReporterConfig(
+        benchmark_symbol="QQQ",
+        transaction_cost_bps_round_trip=10,
+        slippage_bps_round_trip=5,
+        watch_neutral_band_bps=25,
+        cost_model_version="approved-cost-v1",
+        approved_by="risk-owner",
+        approved_at_utc=NOW,
+    )
+    summary = sync_due_outcomes(
+        client=LoopClient(
+            base_url="https://loop.example",
+            api_key="test",
+            request=request,  # type: ignore[arg-type]
+        ),
+        outbox=LoopOutbox(tmp_path / "outbox.sqlite3"),
+        data_root=data_root,
+        as_of_date=date(2026, 9, 1),
+        observed_before=datetime.now(UTC) + timedelta(seconds=1),
+        config=config,
+    )
+
+    assert summary.assignments == 1
+    assert summary.due == 1
+    assert summary.staged == 1
+    assert summary.delivered == 1
+    assert summary.pending[0].horizon == "5d"
+    assert summary.pending[0].reason == "horizon_not_mature"
+    posted = next(payload for method, _, payload in requests if method == "POST")
+    assert posted is not None
+    assert posted["schema_version"] == "ai_quant.loop_outcome.v2"
+    assert posted["strategy_return"] == pytest.approx(0.04)
+    assert posted["benchmark_return"] == pytest.approx(0.01)
+    assert posted["excess_return"] == pytest.approx(0.0285)
+    assert posted["evidence"]["strategy_revision_id"] == "strategy-r1"  # type: ignore[index]

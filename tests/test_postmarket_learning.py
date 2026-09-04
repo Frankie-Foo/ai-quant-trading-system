@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import cast
+from unittest.mock import MagicMock
 
 import polars as pl
 import pytest
@@ -23,6 +24,7 @@ from research.program_review import (
     ReviewPolicy,
     build_program_review,
 )
+from schedule.child_process import ChildProcessResult
 from schedule.monthly_evolution import is_first_xnys_session
 from schedule.postmarket import postmarket_due
 from schedule.runtime import JsonEventLogger
@@ -386,6 +388,48 @@ def test_program_review_rejects_future_episode_history() -> None:
 def test_postmarket_time_gate_uses_exchange_close_and_provider_delay() -> None:
     assert postmarket_due(date(2026, 7, 20), datetime(2026, 7, 20, 20, 19, tzinfo=UTC)) is False
     assert postmarket_due(date(2026, 7, 20), datetime(2026, 7, 20, 20, 20, tzinfo=UTC)) is True
+
+
+def test_postmarket_outcome_sync_requires_approved_config_and_uses_safe_child(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    logger = MagicMock(spec=JsonEventLogger)
+    monkeypatch.setenv("AI_QUANT_LOOP_OUTCOME_SYNC_ENABLED", "true")
+    monkeypatch.delenv("AI_QUANT_LOOP_OUTCOME_CONFIG_FILE", raising=False)
+    postmarket_schedule._sync_loop_outcomes(
+        trade_date=date(2026, 7, 20),
+        data_root=tmp_path,
+        logger=logger,
+    )
+    assert logger.emit.call_args.kwargs["reason"] == "approved_outcome_config_missing"
+
+    commands: list[tuple[str, ...]] = []
+
+    def fake_run_child(
+        command: list[str],
+        *,
+        cwd: Path,
+        timeout_seconds: int,
+    ) -> ChildProcessResult:
+        del cwd, timeout_seconds
+        commands.append(tuple(command))
+        return ChildProcessResult(return_code=0, stdout="{}", stderr="", elapsed_ms=1)
+
+    monkeypatch.setenv(
+        "AI_QUANT_LOOP_OUTCOME_CONFIG_FILE",
+        "/secure/loop-outcome.json",
+    )
+    monkeypatch.setattr(postmarket_schedule, "run_child", fake_run_child)
+    postmarket_schedule._sync_loop_outcomes(
+        trade_date=date(2026, 7, 20),
+        data_root=tmp_path,
+        logger=logger,
+    )
+
+    assert "scripts.sync_loop_due_outcomes" in commands[0]
+    assert "/secure/loop-outcome.json" in commands[0]
+    assert logger.emit.call_args.kwargs["orders_submitted"] == 0
 
 
 def test_monthly_evolution_runs_only_on_first_xnys_session() -> None:
