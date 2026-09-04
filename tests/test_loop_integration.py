@@ -165,6 +165,7 @@ def _envelope(tmp_path: Path):
 
 def test_review_builder_keeps_top10_separate_and_never_fabricates_paths(tmp_path: Path) -> None:
     envelope = _envelope(tmp_path)
+    assert envelope.provenance.created_at_utc == envelope.as_of
     assert len(envelope.top10_decisions) == 10
     assert sum(item.verdict == "accept" for item in envelope.top10_decisions) == 3
     assert all(item.one_minute_path == () for item in envelope.top10_decisions)

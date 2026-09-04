@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 import subprocess
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -275,7 +275,7 @@ def build_review_envelope(
             source_snapshot_ids=source_ids,
             feature_schema_versions=(opportunity_snapshot.schema_version,),
             cost_model_version="kernel.quote_costs.v1",
-            created_at_utc=datetime.now(UTC),
+            created_at_utc=as_of,
         ),
         market_context={
             "market_regime": market_regime,
