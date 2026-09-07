@@ -2182,3 +2182,15 @@ Status: installed for Alpaca Paper only; real trading remains forbidden.
   passed. The full suite reached `758` passes; `30` unrelated tests remain blocked by
   the intentionally absent local `runs/strategy/active.json`, so no active policy was
   fabricated to make those tests pass.
+
+## M92 2026-09-07 raw event Outcome separation
+
+- Split delayed labels into strategy-independent `event_observation` facts and
+  revision-bound `strategy_evaluation` evidence. Every real instrument decision can
+  now receive deterministic 1d/5d/20d labels before a strategy Revision exists.
+- The same XNYS calendar, accepted snapshot hashes, benchmark, cost approval and
+  point-in-time checks apply to both layers. Event facts never enter strategy accuracy;
+  only explicit holdout/Walk-forward/forward assignments remain governance samples.
+- The postmarket scanner queries both assignment feeds and uses the existing idempotent
+  Outbox. Loop/Gateway/frontend changes expose the new feed and display event maturity
+  separately from strategy governance.

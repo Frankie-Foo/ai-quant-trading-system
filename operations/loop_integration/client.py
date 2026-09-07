@@ -9,6 +9,7 @@ import httpx
 
 from .contracts import (
     LoopBinding,
+    LoopEventOutcomeAssignment,
     LoopOutcomeAssignment,
     LoopOutcomeEnvelope,
     LoopPolicyCandidate,
@@ -253,6 +254,22 @@ class LoopClient:
         if not isinstance(result, list):
             raise RuntimeError("Loop outcome-assignment response is not a list")
         return tuple(LoopOutcomeAssignment.model_validate(item) for item in result)
+
+    def list_event_outcome_assignments(
+        self,
+        *,
+        market_scope: str,
+        limit: int = 5000,
+    ) -> tuple[LoopEventOutcomeAssignment, ...]:
+        query = urlencode({"market_scope": market_scope, "limit": limit})
+        result = self._request(
+            "GET",
+            f"/api/v1/knowledge/quant/event-outcome-assignments?{query}",
+            None,
+        )
+        if not isinstance(result, list):
+            raise RuntimeError("Loop event-outcome-assignment response is not a list")
+        return tuple(LoopEventOutcomeAssignment.model_validate(item) for item in result)
 
     def list_policy_candidates(self, *, market_scope: str) -> tuple[LoopPolicyCandidate, ...]:
         query = urlencode(

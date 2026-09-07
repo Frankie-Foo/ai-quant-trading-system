@@ -18,8 +18,10 @@ from data_plane.storage import sha256_file
 
 from .client import LoopClient
 from .contracts import (
+    EVENT_OUTCOME_EXCESS_FORMULA,
     OUTCOME_EXCESS_FORMULA,
     OUTCOME_HORIZON_SESSIONS,
+    LoopEventOutcomeAssignment,
     LoopOutcomeAssignment,
     LoopOutcomeEnvelope,
     OutcomeReporterConfig,
@@ -39,6 +41,8 @@ class PendingOutcome:
 @dataclass(frozen=True)
 class OutcomeSyncSummary:
     assignments: int
+    event_assignments: int
+    strategy_assignments: int
     due: int
     staged: int
     delivered: int
@@ -47,6 +51,8 @@ class OutcomeSyncSummary:
     def to_dict(self) -> dict[str, Any]:
         return {
             "assignments": self.assignments,
+            "event_assignments": self.event_assignments,
+            "strategy_assignments": self.strategy_assignments,
             "due": self.due,
             "staged": self.staged,
             "delivered": self.delivered,
@@ -68,9 +74,7 @@ def _load_daily_index(
     observed_before: datetime,
 ) -> dict[date, _DailySnapshot]:
     result: dict[date, _DailySnapshot] = {}
-    for path in (data_root / "accepted").glob(
-        f"{config.price_source}-*/data.parquet"
-    ):
+    for path in (data_root / "accepted").glob(f"{config.price_source}-*/data.parquet"):
         snapshot = DatasetSnapshot.model_validate_json(
             (path.parent / "manifest.json").read_text(encoding="utf-8")
         ).assert_usable()
@@ -83,21 +87,13 @@ def _load_daily_index(
         frame = pl.read_parquet(path)
         required = {"symbol", "trade_date", "close", "low", "adjustment"}
         if missing := required - set(frame.columns):
-            raise ValueError(
-                f"daily snapshot {snapshot.dataset_id} misses {sorted(missing)}"
-            )
+            raise ValueError(f"daily snapshot {snapshot.dataset_id} misses {sorted(missing)}")
         dates = frame.get_column("trade_date").cast(pl.Date).unique().to_list()
         if len(dates) != 1 or not isinstance(dates[0], date):
-            raise ValueError(
-                f"daily snapshot {snapshot.dataset_id} must contain one trading date"
-            )
-        adjustments = {
-            str(value) for value in frame.get_column("adjustment").unique().to_list()
-        }
+            raise ValueError(f"daily snapshot {snapshot.dataset_id} must contain one trading date")
+        adjustments = {str(value) for value in frame.get_column("adjustment").unique().to_list()}
         if adjustments != {config.adjustment}:
-            raise ValueError(
-                f"daily snapshot {snapshot.dataset_id} adjustment mismatch"
-            )
+            raise ValueError(f"daily snapshot {snapshot.dataset_id} adjustment mismatch")
         candidate = _DailySnapshot(snapshot=snapshot, path=path, frame=frame)
         previous = result.get(dates[0])
         if previous is None or previous.snapshot.asof_utc < snapshot.asof_utc:
@@ -151,6 +147,149 @@ def _outcome_id(
     return f"quant_outcome_v2_{digest[:40]}"
 
 
+def _event_outcome_id(
+    assignment: LoopEventOutcomeAssignment,
+    *,
+    horizon: Literal["1d", "5d", "20d"],
+    snapshot_ids: list[str],
+    config: OutcomeReporterConfig,
+) -> str:
+    identity = {
+        "decision_event_id": assignment.decision_event_id,
+        "horizon": horizon,
+        "snapshot_ids": snapshot_ids,
+        "cost_model_version": config.cost_model_version,
+        "return_semantics": "close_to_close_split_adjusted.event.v1",
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return f"quant_event_outcome_v1_{digest[:36]}"
+
+
+def build_due_event_outcome(
+    assignment: LoopEventOutcomeAssignment,
+    *,
+    horizon: Literal["1d", "5d", "20d"],
+    as_of_date: date,
+    daily_index: dict[date, _DailySnapshot],
+    config: OutcomeReporterConfig,
+) -> tuple[LoopOutcomeEnvelope | None, str]:
+    sessions = _session_rows(assignment.decision_trading_date, as_of_date)
+    session_count = OUTCOME_HORIZON_SESSIONS[horizon]
+    if len(sessions) < session_count:
+        return None, "horizon_not_mature"
+    selected_sessions = sessions[:session_count]
+    horizon_row = selected_sessions[-1]
+    horizon_date = horizon_row["trade_date"]
+    horizon_close = horizon_row["market_close_utc"]
+    if not isinstance(horizon_date, date) or not isinstance(horizon_close, datetime):
+        raise ValueError("XNYS calendar returned invalid horizon fields")
+    required_dates = [assignment.decision_trading_date] + [
+        row["trade_date"] for row in selected_sessions
+    ]
+    missing_dates = [value for value in required_dates if value not in daily_index]
+    if missing_dates:
+        return None, f"daily_snapshot_missing:{missing_dates[0].isoformat()}"
+    snapshots = [daily_index[value] for value in required_dates]
+    instrument_rows = [_price_row(snapshot, assignment.instrument) for snapshot in snapshots]
+    if any(row is None for row in instrument_rows):
+        return None, f"instrument_bar_missing_or_halted:{assignment.instrument}"
+    benchmark_rows = [_price_row(snapshot, config.benchmark_symbol) for snapshot in snapshots]
+    if any(row is None for row in benchmark_rows):
+        return None, f"benchmark_bar_missing:{config.benchmark_symbol}"
+    instrument = [row for row in instrument_rows if row is not None]
+    benchmark = [row for row in benchmark_rows if row is not None]
+    instrument_start = float(instrument[0]["close"])
+    benchmark_start = float(benchmark[0]["close"])
+    instrument_return = float(instrument[-1]["close"]) / instrument_start - 1.0
+    benchmark_return = float(benchmark[-1]["close"]) / benchmark_start - 1.0
+    counterfactual_drawdown = min(
+        0.0,
+        *(float(row["low"]) / instrument_start - 1.0 for row in instrument[1:]),
+    )
+    transaction_cost = config.transaction_cost_bps_round_trip / 10_000
+    slippage = config.slippage_bps_round_trip / 10_000
+    net_excess_return = instrument_return - benchmark_return - transaction_cost - slippage
+    if assignment.observed_verdict == "accept":
+        direction_correct = net_excess_return > 0
+        correctness_rule = "accept iff instrument net excess return is positive"
+    elif assignment.observed_verdict in {"reject", "block"}:
+        direction_correct = net_excess_return <= 0
+        correctness_rule = "reject/block iff avoided instrument net excess return is non-positive"
+    else:
+        neutral_band = config.watch_neutral_band_bps / 10_000
+        direction_correct = abs(net_excess_return) <= neutral_band
+        correctness_rule = "watch iff absolute instrument net excess return is within neutral band"
+    snapshot_ids = [item.snapshot.dataset_id for item in snapshots]
+    observed_at = max(
+        horizon_close.astimezone(UTC),
+        *(item.snapshot.asof_utc for item in snapshots),
+    )
+    evidence = {
+        "schema_version": "quant-event-outcome-evidence-v1",
+        "evaluation_role": "raw_event",
+        "point_in_time_guard_passed": True,
+        "decision_trading_date": assignment.decision_trading_date.isoformat(),
+        "horizon_end_trading_date": horizon_date.isoformat(),
+        "horizon_end_market_close_utc": horizon_close.astimezone(UTC).isoformat(),
+        "trading_session_dates": [row["trade_date"].isoformat() for row in selected_sessions],
+        "trading_calendar": {
+            "name": "XNYS",
+            "source": str(horizon_row["source"]),
+            "version": str(horizon_row["source_version"]),
+        },
+        "benchmark_id": config.benchmark_symbol,
+        "price_snapshot_ids": snapshot_ids,
+        "return_semantics": {
+            "unit": "decimal_fraction",
+            "method": "close_to_close_split_adjusted",
+            "return_basis": "observed_instrument",
+            "excess_return_formula": EVENT_OUTCOME_EXCESS_FORMULA,
+        },
+        "observed_verdict": assignment.observed_verdict,
+        "direction_correctness_rule": correctness_rule,
+        "watch_neutral_band_bps": config.watch_neutral_band_bps,
+        "cost_model_version": config.cost_model_version,
+        "cost_model_approved_by": config.approved_by,
+        "cost_model_approved_at_utc": config.approved_at_utc.isoformat(),
+        "synthetic": False,
+    }
+    return (
+        LoopOutcomeEnvelope(
+            schema_version="ai_quant.loop_event_outcome.v1",
+            id=_event_outcome_id(
+                assignment,
+                horizon=horizon,
+                snapshot_ids=snapshot_ids,
+                config=config,
+            ),
+            decision_event_id=assignment.decision_event_id,
+            source_run_id=assignment.source_run_id,
+            market_scope=assignment.market_scope,
+            instrument=assignment.instrument,
+            horizon=horizon,
+            outcome_kind="event_observation",
+            observed_at=observed_at,
+            instrument_return=instrument_return,
+            benchmark_return=benchmark_return,
+            excess_return=net_excess_return,
+            max_drawdown=counterfactual_drawdown,
+            transaction_cost=transaction_cost,
+            slippage=slippage,
+            direction_correct=direction_correct,
+            evidence=evidence,
+            metadata={
+                "source_system": "ai-quant-trading-system",
+                "synthetic": False,
+                "production_eligible": False,
+                "allow_order_execution": False,
+            },
+        ),
+        "ready",
+    )
+
+
 def build_due_outcome(
     assignment: LoopOutcomeAssignment,
     *,
@@ -176,14 +315,10 @@ def build_due_outcome(
     if missing_dates:
         return None, f"daily_snapshot_missing:{missing_dates[0].isoformat()}"
     snapshots = [daily_index[value] for value in required_dates]
-    instrument_rows = [
-        _price_row(snapshot, assignment.instrument) for snapshot in snapshots
-    ]
+    instrument_rows = [_price_row(snapshot, assignment.instrument) for snapshot in snapshots]
     if any(row is None for row in instrument_rows):
         return None, f"instrument_bar_missing_or_halted:{assignment.instrument}"
-    benchmark_rows = [
-        _price_row(snapshot, config.benchmark_symbol) for snapshot in snapshots
-    ]
+    benchmark_rows = [_price_row(snapshot, config.benchmark_symbol) for snapshot in snapshots]
     if any(row is None for row in benchmark_rows):
         return None, f"benchmark_bar_missing:{config.benchmark_symbol}"
     instrument = [row for row in instrument_rows if row is not None]
@@ -199,13 +334,9 @@ def build_due_outcome(
     target_verdict = assignment.target_verdict
     enters_position = target_verdict == "accept"
     strategy_return = instrument_return if enters_position else 0.0
-    transaction_cost = (
-        config.transaction_cost_bps_round_trip / 10_000 if enters_position else 0.0
-    )
+    transaction_cost = config.transaction_cost_bps_round_trip / 10_000 if enters_position else 0.0
     slippage = config.slippage_bps_round_trip / 10_000 if enters_position else 0.0
-    excess_return = (
-        strategy_return - benchmark_return - transaction_cost - slippage
-    )
+    excess_return = strategy_return - benchmark_return - transaction_cost - slippage
     counterfactual_net_alpha = (
         instrument_return
         - benchmark_return
@@ -238,9 +369,7 @@ def build_due_outcome(
         "decision_trading_date": assignment.decision_trading_date.isoformat(),
         "horizon_end_trading_date": horizon_date.isoformat(),
         "horizon_end_market_close_utc": horizon_close.astimezone(UTC).isoformat(),
-        "trading_session_dates": [
-            row["trade_date"].isoformat() for row in selected_sessions
-        ],
+        "trading_session_dates": [row["trade_date"].isoformat() for row in selected_sessions],
         "trading_calendar": {
             "name": "XNYS",
             "source": calendar_source,
@@ -308,15 +437,18 @@ def sync_due_outcomes(
     config: OutcomeReporterConfig,
     stage_only: bool = False,
 ) -> OutcomeSyncSummary:
-    if (
-        observed_before.tzinfo is None
-        or observed_before.utcoffset() != UTC.utcoffset(observed_before)
+    if observed_before.tzinfo is None or observed_before.utcoffset() != UTC.utcoffset(
+        observed_before
     ):
         raise ValueError("observed_before must be timezone-aware UTC")
     if config.approved_at_utc > observed_before:
         raise ValueError("Outcome cost-model approval cannot be in the future")
-    assignments = client.list_outcome_assignments(market_scope=config.market_scope)
-    if any(item.market_scope != config.market_scope for item in assignments):
+    event_assignments = client.list_event_outcome_assignments(market_scope=config.market_scope)
+    strategy_assignments = client.list_outcome_assignments(market_scope=config.market_scope)
+    if any(
+        item.market_scope != config.market_scope
+        for item in (*event_assignments, *strategy_assignments)
+    ):
         raise ValueError("Loop returned an Outcome assignment outside configured scope")
     daily_index = _load_daily_index(
         data_root,
@@ -325,7 +457,30 @@ def sync_due_outcomes(
     )
     due = staged = delivered = 0
     pending: list[PendingOutcome] = []
-    for assignment in assignments:
+    generated: list[LoopOutcomeEnvelope] = []
+    for assignment in event_assignments:
+        for horizon in assignment.outstanding_horizons:
+            outcome, reason = build_due_event_outcome(
+                assignment,
+                horizon=horizon,
+                as_of_date=as_of_date,
+                daily_index=daily_index,
+                config=config,
+            )
+            if reason != "horizon_not_mature":
+                due += 1
+            if outcome is None:
+                pending.append(
+                    PendingOutcome(
+                        decision_event_id=assignment.decision_event_id,
+                        strategy_revision_id="",
+                        horizon=horizon,
+                        reason=reason,
+                    )
+                )
+            else:
+                generated.append(outcome)
+    for assignment in strategy_assignments:
         for horizon in assignment.outstanding_horizons:
             outcome, reason = build_due_outcome(
                 assignment,
@@ -346,28 +501,32 @@ def sync_due_outcomes(
                     )
                 )
                 continue
-            payload = outcome.model_dump(mode="json")
-            item = outbox.stage(
-                event_id=outcome.id,
-                event_type="outcome",
-                payload=payload,
-                payload_sha256=envelope_sha256(payload),
-            )
-            staged += 1
-            if stage_only:
-                continue
-            if item.status == "delivered":
-                delivered += 1
-                continue
-            try:
-                client.submit_outcome(outcome)
-            except Exception as exc:
-                outbox.mark_failed(outcome.id, error_code=type(exc).__name__)
-                raise
-            outbox.mark_delivered(outcome.id)
+            generated.append(outcome)
+    for outcome in generated:
+        payload = outcome.model_dump(mode="json")
+        item = outbox.stage(
+            event_id=outcome.id,
+            event_type="outcome",
+            payload=payload,
+            payload_sha256=envelope_sha256(payload),
+        )
+        staged += 1
+        if stage_only:
+            continue
+        if item.status == "delivered":
             delivered += 1
+            continue
+        try:
+            client.submit_outcome(outcome)
+        except Exception as exc:
+            outbox.mark_failed(outcome.id, error_code=type(exc).__name__)
+            raise
+        outbox.mark_delivered(outcome.id)
+        delivered += 1
     return OutcomeSyncSummary(
-        assignments=len(assignments),
+        assignments=len(event_assignments) + len(strategy_assignments),
+        event_assignments=len(event_assignments),
+        strategy_assignments=len(strategy_assignments),
         due=due,
         staged=staged,
         delivered=delivered,

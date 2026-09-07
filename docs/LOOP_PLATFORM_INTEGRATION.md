@@ -56,7 +56,14 @@ Outbox 标记为 delivered；`FAILED` 会保留远端 Task ID、Run ID、失败�
 
 ## 延迟 Outcome
 
+Outcome 分为两层，不能混用统计口径：
+
+- `event_observation`：每条真实原始决策事件到期后的客观 1d/5d/20d 表现，不依赖策略 Revision，供复盘页面和后续提炼使用；
+- `strategy_evaluation`：精确绑定策略 Revision 的 holdout/Walk-forward/forward 评价，只有这一层参与策略准确度与晋级治理。
+
 1d、5d、20d Outcome 在真正可用后单独回填，不放入当天 Task。Loop 通过
+`GET /api/v1/knowledge/quant/event-outcome-assignments` 给出所有待观察的真实原始事件，
+并通过
 `GET /api/v1/knowledge/quant/outcome-assignments` 给出精确的
 `strategy_revision_id + decision_event_id + outstanding_horizons`，避免交易系统猜测归属。
 
@@ -84,7 +91,9 @@ approved_by=<负责人>
 approved_at_utc=<UTC 时间>
 ```
 
-新上报固定使用 `ai_quant.loop_outcome.v2`。治理血缘只放在 `evidence`；收益单位固定为
+事件事实固定使用 `ai_quant.loop_event_outcome.v1`，不允许携带
+`strategy_revision_id`；策略评价固定使用 `ai_quant.loop_outcome.v2`。治理血缘只放在
+`evidence`；收益单位固定为
 decimal fraction，方法固定为 split-adjusted close-to-close；`excess_return` 固定等于
 `strategy_return - benchmark_return - transaction_cost - slippage`。Loop 会再次验证
 horizon session 数、到期收盘时间、快照 ID、基准、公式和 point-in-time guard。

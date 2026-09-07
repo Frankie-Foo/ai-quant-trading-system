@@ -672,6 +672,8 @@ def test_due_outcome_reporter_waits_for_sessions_then_submits_v2(
     ) -> object:
         requests.append((method, path, payload))
         if method == "GET":
+            if "event-outcome-assignments" in path:
+                return []
             return [
                 {
                     "schema_version": "quant-outcome-assignment-v1",
@@ -714,6 +716,8 @@ def test_due_outcome_reporter_waits_for_sessions_then_submits_v2(
     )
 
     assert summary.assignments == 1
+    assert summary.event_assignments == 0
+    assert summary.strategy_assignments == 1
     assert summary.due == 1
     assert summary.staged == 1
     assert summary.delivered == 1
@@ -726,3 +730,103 @@ def test_due_outcome_reporter_waits_for_sessions_then_submits_v2(
     assert posted["benchmark_return"] == pytest.approx(0.01)
     assert posted["excess_return"] == pytest.approx(0.0285)
     assert posted["evidence"]["strategy_revision_id"] == "strategy-r1"  # type: ignore[index]
+
+
+def test_due_outcome_reporter_submits_event_observation_without_strategy(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    for trade_date, aapl_close, qqq_close in (
+        (date(2026, 9, 3), 100.0, 200.0),
+        (date(2026, 9, 4), 104.0, 202.0),
+    ):
+        frame = canonicalize_daily_bars(
+            pl.DataFrame(
+                {
+                    "symbol": ["AAPL", "QQQ"],
+                    "trade_date": [trade_date, trade_date],
+                    "provider_ts_utc": [NOW, NOW],
+                    "open": [aapl_close - 1, qqq_close - 1],
+                    "high": [aapl_close + 1, qqq_close + 1],
+                    "low": [aapl_close - 2, qqq_close - 2],
+                    "close": [aapl_close, qqq_close],
+                    "volume": [1_000_000.0, 2_000_000.0],
+                    "trade_count": [10_000, 20_000],
+                    "vwap": [aapl_close, qqq_close],
+                    "source": ["massive.grouped_daily"] * 2,
+                    "feed": ["sip", "sip"],
+                    "adjustment": ["split_adjusted", "split_adjusted"],
+                }
+            )
+        )
+        persist_snapshot(
+            frame,
+            root=data_root,
+            source="massive.grouped_daily",
+            schema_version="bars_daily.v1",
+            checks=audit_daily_bars(
+                frame,
+                provenance="massive.grouped_daily",
+                expected_date=trade_date,
+            ),
+        )
+    requests: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def request(
+        method: str,
+        path: str,
+        payload: dict[str, object] | None,
+    ) -> object:
+        requests.append((method, path, payload))
+        if method == "GET" and "event-outcome-assignments" in path:
+            return [
+                {
+                    "schema_version": "quant-event-outcome-assignment-v1",
+                    "decision_event_id": "event-raw-1",
+                    "source_run_id": "run-raw-1",
+                    "market_scope": "US-equity",
+                    "instrument": "AAPL",
+                    "decision_trading_date": "2026-09-03",
+                    "observed_verdict": "accept",
+                    "outstanding_horizons": ["1d", "5d"],
+                }
+            ]
+        if method == "GET":
+            return []
+        assert payload is not None
+        return {"id": payload["id"]}
+
+    config = OutcomeReporterConfig(
+        benchmark_symbol="QQQ",
+        transaction_cost_bps_round_trip=10,
+        slippage_bps_round_trip=5,
+        watch_neutral_band_bps=25,
+        cost_model_version="approved-cost-v1",
+        approved_by="risk-owner",
+        approved_at_utc=NOW,
+    )
+    summary = sync_due_outcomes(
+        client=LoopClient(
+            base_url="https://loop.example",
+            api_key="test",
+            request=request,  # type: ignore[arg-type]
+        ),
+        outbox=LoopOutbox(tmp_path / "outbox.sqlite3"),
+        data_root=data_root,
+        as_of_date=date(2026, 9, 4),
+        observed_before=datetime.now(UTC) + timedelta(seconds=1),
+        config=config,
+    )
+
+    assert summary.assignments == 1
+    assert summary.event_assignments == 1
+    assert summary.strategy_assignments == 0
+    assert summary.delivered == 1
+    assert summary.pending[0].horizon == "5d"
+    posted = next(payload for method, _, payload in requests if method == "POST")
+    assert posted is not None
+    assert posted["schema_version"] == "ai_quant.loop_event_outcome.v1"
+    assert posted["outcome_kind"] == "event_observation"
+    assert posted["instrument_return"] == pytest.approx(0.04)
+    assert posted["excess_return"] == pytest.approx(0.0285)
+    assert "strategy_revision_id" not in posted["evidence"]  # type: ignore[operator]
