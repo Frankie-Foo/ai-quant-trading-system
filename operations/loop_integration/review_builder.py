@@ -6,7 +6,7 @@ import math
 import subprocess
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import polars as pl
 
@@ -58,7 +58,10 @@ def load_accepted_snapshot(path: Path) -> tuple[DatasetSnapshot, pl.DataFrame]:
     return snapshot, pl.read_parquet(path)
 
 
-def _verdict(row: dict[str, Any]) -> str:
+DecisionAction = Literal["accept", "watch", "reject", "block"]
+
+
+def _verdict(row: dict[str, Any]) -> DecisionAction:
     root_cause = str(row.get("root_cause") or "")
     if row.get("selection_status") == "selected":
         return "accept"
@@ -98,6 +101,12 @@ def build_review_envelope(
         "root_cause",
         "root_cause_detail",
         "pattern_key",
+        "classification",
+        "classification_source",
+        "logging_policy_id",
+        "logged_action",
+        "logging_action_probability",
+        "reward_model_logged",
         "close_return",
         "mfe_from_previous_close",
         "mae_from_previous_close",
@@ -126,22 +135,57 @@ def build_review_envelope(
             "mae_from_previous_close": _finite(row.get("mae_from_previous_close")),
             "dollar_volume": _finite(row.get("dollar_volume")),
             "atr_pct": _finite(row.get("atr_pct")),
+            "rvol": _finite(row.get("rvol")),
             "selection_status": str(row.get("selection_status") or "unknown"),
             "root_cause": str(row.get("root_cause") or "unknown"),
             "path_status": "unavailable_not_materialized",
         }
         root_cause = str(row.get("root_cause") or "unknown")
+        classification = str(row.get("classification") or "").strip().upper()
+        classification_source = str(row.get("classification_source") or "").strip()
+        if not classification or not classification_source:
+            raise ValueError("opportunity review classification contract is incomplete")
+        verdict = _verdict(row)
+        logging_policy_id = str(row.get("logging_policy_id") or "").strip()
+        logged_action = str(row.get("logged_action") or "").strip().lower()
+        logging_action_probability = _finite(row.get("logging_action_probability"))
+        reward_model_logged = _finite(row.get("reward_model_logged"))
+        if (
+            not logging_policy_id
+            or logged_action not in {"accept", "watch", "reject", "block"}
+            or logging_action_probability is None
+            or not 0.0 < logging_action_probability <= 1.0
+            or reward_model_logged is None
+        ):
+            raise ValueError("opportunity review OPE contract is incomplete")
+        typed_logged_action = cast(DecisionAction, logged_action)
         decisions.append(
             ReviewDecision(
                 instrument=str(row["symbol"]).upper(),
                 rank=rank,
-                verdict=_verdict(row),  # type: ignore[arg-type]
+                market_regime=market_regime,
+                classification=classification,
+                classification_source=classification_source,
+                logging_policy_id=logging_policy_id,
+                logged_action=typed_logged_action,
+                logging_action_probability=logging_action_probability,
+                reward_model_logged=reward_model_logged,
+                verdict=verdict,
                 reason=str(row.get("root_cause_detail") or root_cause),
                 event_time=cutoff,
                 available_at=as_of,
                 features=features,
                 one_minute_path=(),
                 trigger_results={
+                    "classification": classification,
+                    "classification_source": classification_source,
+                    "logging_policy_id": logging_policy_id,
+                    "logged_action": logged_action,
+                    "logging_action_probability": logging_action_probability,
+                    "reward_model_logged": reward_model_logged,
+                    "reward_model_id": str(
+                        row.get("reward_model_id") or "zero_net_return_baseline.v1"
+                    ),
                     "pattern_key": str(row.get("pattern_key") or "unknown"),
                     "point_in_time_attribution": True,
                     "one_minute_path_available": False,
@@ -233,7 +277,11 @@ def build_review_envelope(
             cost_model_version="kernel.quote_costs.v1",
             created_at_utc=datetime.now(UTC),
         ),
-        market_context={"regime": market_regime},
+        market_context={
+            "market_regime": market_regime,
+            "classification": decisions[0].classification,
+            "classification_source": decisions[0].classification_source,
+        },
         top10_decisions=tuple(decisions),
         execution_summary={"orders_authorized": False, **(execution_summary or {})},
         risk_policy=risk_policy,

@@ -307,10 +307,17 @@ def _run_failure(run: dict[str, Any]) -> tuple[str, str]:
 def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict[str, Any]:
     decisions = envelope.top10_decisions
     primary = decisions[0]
-    market_regime = str(envelope.market_context.get("regime") or "UNKNOWN")
+    market_regime = str(envelope.market_context.get("market_regime") or "UNKNOWN")
     top10 = [
         {
             "instrument": item.instrument,
+            "market_regime": item.market_regime,
+            "classification": item.classification,
+            "classification_source": item.classification_source,
+            "logging_policy_id": item.logging_policy_id,
+            "logged_action": item.logged_action,
+            "logging_action_probability": item.logging_action_probability,
+            "reward_model_logged": item.reward_model_logged,
             "verdict": item.verdict,
             "reason": item.reason,
             "one_minute_path": list(item.one_minute_path),
@@ -382,7 +389,14 @@ def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict
                 "trigger_evidence": {"review_event_id": envelope.event_id},
                 "universe": [item.instrument for item in decisions],
                 "ranked_candidates": [
-                    {"instrument": item.instrument, "rank": item.rank, **item.features}
+                    {
+                        "instrument": item.instrument,
+                        "rank": item.rank,
+                        "market_regime": item.market_regime,
+                        "classification": item.classification,
+                        "classification_source": item.classification_source,
+                        **item.features,
+                    }
                     for item in decisions
                 ],
                 "top_n": 10,

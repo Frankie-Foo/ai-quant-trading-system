@@ -141,7 +141,12 @@ def test_build_intraday_selection_postmortem_creates_auditable_labels() -> None:
         news_complete=True,
     )
 
-    assert REVIEW_SCHEMA_VERSION == "intraday_selection_postmortem.v1"
+    assert REVIEW_SCHEMA_VERSION == "intraday_selection_postmortem.v2"
+    assert review.get_column("classification").null_count() == 0
+    assert review.get_column("classification_source").n_unique() == 1
+    assert review.get_column("logging_policy_id").null_count() == 0
+    assert review.get_column("logging_action_probability").to_list() == [1.0] * 3
+    assert review.get_column("reward_model_logged").to_list() == [0.0] * 3
     assert review.get_column("opportunity_rank").to_list() == [1, 2, 3]
     assert review.get_column("symbol").n_unique() == 3
     assert review.get_column("production_change_allowed").to_list() == [False] * 3

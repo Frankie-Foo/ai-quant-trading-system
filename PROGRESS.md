@@ -2194,3 +2194,21 @@ Status: installed for Alpaca Paper only; real trading remains forbidden.
 - The postmarket scanner queries both assignment feeds and uses the existing idempotent
   Outbox. Loop/Gateway/frontend changes expose the new feed and display event maturity
   separately from strategy governance.
+
+## M93 2026-09-07 Loop quant contract bridge v4
+
+- Added explicit event-level `market_regime`, `classification`, classifier lineage and
+  point-in-time OPE logging. The deterministic universe gate records a versioned policy
+  identity, actual action, propensity 1.0 and an explicit zero-return baseline; no score
+  is relabeled as a probability.
+- Added the shared `strategy_policy_candidate.v4` contract. The consumer reads only
+  `universe.min_rvol`, writes a lineage-bound Shadow Challenger and rejects attempted
+  production/order authority while ignoring execution fields.
+- Split Outcome meaning into realized policy return, counterfactual instrument return,
+  counterfactual net excess return and direction correctness. Reject/block counterfactual
+  costs are doubled. OPE now uses realized policy return, not direction correctness.
+- Verification: full pytest passed `793` tests when the optional active-policy override
+  was explicitly empty; the default local shell still points at the intentionally absent
+  `runs/strategy/active.json` and therefore reports the same 30 configuration failures.
+  Focused Loop bridge/selection/Outcome tests passed `37`; Ruff passed. Targeted strict
+  Mypy reports no new errors; three pre-existing errors remain in `control_plane.py`.

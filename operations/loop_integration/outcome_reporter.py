@@ -208,8 +208,13 @@ def build_due_event_outcome(
         0.0,
         *(float(row["low"]) / instrument_start - 1.0 for row in instrument[1:]),
     )
-    transaction_cost = config.transaction_cost_bps_round_trip / 10_000
-    slippage = config.slippage_bps_round_trip / 10_000
+    counterfactual_cost_multiplier = (
+        2.0 if assignment.observed_verdict in {"reject", "block"} else 1.0
+    )
+    transaction_cost = (
+        config.transaction_cost_bps_round_trip * counterfactual_cost_multiplier / 10_000
+    )
+    slippage = config.slippage_bps_round_trip * counterfactual_cost_multiplier / 10_000
     net_excess_return = instrument_return - benchmark_return - transaction_cost - slippage
     if assignment.observed_verdict == "accept":
         direction_correct = net_excess_return > 0
@@ -246,6 +251,8 @@ def build_due_event_outcome(
             "method": "close_to_close_split_adjusted",
             "return_basis": "observed_instrument",
             "excess_return_formula": EVENT_OUTCOME_EXCESS_FORMULA,
+            "realized_policy_return_basis": "no_linked_execution_zero",
+            "counterfactual_cost_multiplier": counterfactual_cost_multiplier,
         },
         "observed_verdict": assignment.observed_verdict,
         "direction_correctness_rule": correctness_rule,
@@ -272,6 +279,9 @@ def build_due_event_outcome(
             outcome_kind="event_observation",
             observed_at=observed_at,
             instrument_return=instrument_return,
+            realized_policy_return=0.0,
+            counterfactual_instrument_return=instrument_return,
+            counterfactual_net_excess_return=net_excess_return,
             benchmark_return=benchmark_return,
             excess_return=net_excess_return,
             max_drawdown=counterfactual_drawdown,
@@ -334,15 +344,13 @@ def build_due_outcome(
     target_verdict = assignment.target_verdict
     enters_position = target_verdict == "accept"
     strategy_return = instrument_return if enters_position else 0.0
-    transaction_cost = config.transaction_cost_bps_round_trip / 10_000 if enters_position else 0.0
-    slippage = config.slippage_bps_round_trip / 10_000 if enters_position else 0.0
-    excess_return = strategy_return - benchmark_return - transaction_cost - slippage
-    counterfactual_net_alpha = (
-        instrument_return
-        - benchmark_return
-        - config.transaction_cost_bps_round_trip / 10_000
-        - config.slippage_bps_round_trip / 10_000
+    counterfactual_cost_multiplier = 2.0 if target_verdict in {"reject", "block"} else 1.0
+    transaction_cost = (
+        config.transaction_cost_bps_round_trip * counterfactual_cost_multiplier / 10_000
     )
+    slippage = config.slippage_bps_round_trip * counterfactual_cost_multiplier / 10_000
+    excess_return = strategy_return - benchmark_return - transaction_cost - slippage
+    counterfactual_net_alpha = instrument_return - benchmark_return - transaction_cost - slippage
     if target_verdict == "accept":
         direction_correct = counterfactual_net_alpha > 0
         correctness_rule = "accept iff instrument net excess return is positive"
@@ -382,6 +390,9 @@ def build_due_outcome(
             "method": "close_to_close_split_adjusted",
             "strategy_return_basis": "gross_before_costs",
             "excess_return_formula": OUTCOME_EXCESS_FORMULA,
+            "counterfactual_excess_return_formula": EVENT_OUTCOME_EXCESS_FORMULA,
+            "realized_policy_return_basis": "no_linked_execution_zero",
+            "counterfactual_cost_multiplier": counterfactual_cost_multiplier,
         },
         "target_verdict": target_verdict,
         "observed_verdict": assignment.observed_verdict,
@@ -395,6 +406,30 @@ def build_due_outcome(
         "cost_model_approved_at_utc": config.approved_at_utc.isoformat(),
         "synthetic": False,
     }
+    if all(
+        value not in (None, "")
+        for value in (
+            assignment.logging_policy_id,
+            assignment.target_policy_id,
+            assignment.logging_action_probability,
+            assignment.target_probability_for_logged_action,
+            assignment.reward_model_logged,
+            assignment.reward_model_target,
+        )
+    ):
+        evidence["policy_evaluation"] = {
+            "logging_policy_id": assignment.logging_policy_id,
+            "logged_action": assignment.logged_action,
+            "target_policy_id": assignment.target_policy_id,
+            "logging_action_probability": assignment.logging_action_probability,
+            "target_probability_for_logged_action": (
+                assignment.target_probability_for_logged_action
+            ),
+            "reward_model_logged": assignment.reward_model_logged,
+            "reward_model_target": assignment.reward_model_target,
+            "observed_reward": 0.0,
+            "reward_semantics": "realized_policy_return_decimal_fraction",
+        }
     outcome = LoopOutcomeEnvelope(
         schema_version="ai_quant.loop_outcome.v2",
         id=_outcome_id(
@@ -409,7 +444,11 @@ def build_due_outcome(
         instrument=assignment.instrument,
         horizon=horizon,
         observed_at=observed_at,
+        instrument_return=instrument_return,
         strategy_return=strategy_return,
+        realized_policy_return=0.0,
+        counterfactual_instrument_return=instrument_return,
+        counterfactual_net_excess_return=counterfactual_net_alpha,
         benchmark_return=benchmark_return,
         excess_return=excess_return,
         max_drawdown=counterfactual_drawdown if enters_position else 0.0,
@@ -445,9 +484,8 @@ def sync_due_outcomes(
         raise ValueError("Outcome cost-model approval cannot be in the future")
     event_assignments = client.list_event_outcome_assignments(market_scope=config.market_scope)
     strategy_assignments = client.list_outcome_assignments(market_scope=config.market_scope)
-    if any(
-        item.market_scope != config.market_scope
-        for item in (*event_assignments, *strategy_assignments)
+    if any(item.market_scope != config.market_scope for item in event_assignments) or any(
+        item.market_scope != config.market_scope for item in strategy_assignments
     ):
         raise ValueError("Loop returned an Outcome assignment outside configured scope")
     daily_index = _load_daily_index(
@@ -458,10 +496,10 @@ def sync_due_outcomes(
     due = staged = delivered = 0
     pending: list[PendingOutcome] = []
     generated: list[LoopOutcomeEnvelope] = []
-    for assignment in event_assignments:
-        for horizon in assignment.outstanding_horizons:
+    for event_assignment in event_assignments:
+        for horizon in event_assignment.outstanding_horizons:
             outcome, reason = build_due_event_outcome(
-                assignment,
+                event_assignment,
                 horizon=horizon,
                 as_of_date=as_of_date,
                 daily_index=daily_index,
@@ -472,7 +510,7 @@ def sync_due_outcomes(
             if outcome is None:
                 pending.append(
                     PendingOutcome(
-                        decision_event_id=assignment.decision_event_id,
+                        decision_event_id=event_assignment.decision_event_id,
                         strategy_revision_id="",
                         horizon=horizon,
                         reason=reason,
@@ -480,10 +518,10 @@ def sync_due_outcomes(
                 )
             else:
                 generated.append(outcome)
-    for assignment in strategy_assignments:
-        for horizon in assignment.outstanding_horizons:
+    for strategy_assignment in strategy_assignments:
+        for horizon in strategy_assignment.outstanding_horizons:
             outcome, reason = build_due_outcome(
-                assignment,
+                strategy_assignment,
                 horizon=horizon,
                 as_of_date=as_of_date,
                 daily_index=daily_index,
@@ -494,8 +532,8 @@ def sync_due_outcomes(
             if outcome is None:
                 pending.append(
                     PendingOutcome(
-                        decision_event_id=assignment.decision_event_id,
-                        strategy_revision_id=assignment.strategy_revision_id,
+                        decision_event_id=strategy_assignment.decision_event_id,
+                        strategy_revision_id=strategy_assignment.strategy_revision_id,
                         horizon=horizon,
                         reason=reason,
                     )

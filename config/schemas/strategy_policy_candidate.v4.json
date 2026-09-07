@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vertu.cn/schemas/strategy_policy_candidate.v4.json",
+  "title": "StrategyPolicyCandidate v4",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "strategy_policy_candidate.v4"
+    },
+    "mode": {
+      "const": "PAPER_ONLY"
+    },
+    "strategy_revision_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "fingerprint": {
+      "type": "string",
+      "minLength": 1
+    },
+    "advisory_rule": {
+      "type": "object",
+      "description": "Read-only governance and research explanation; never executed."
+    },
+    "allowed_parameter_overrides": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "universe.min_rvol": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 10.0
+        }
+      },
+      "required": [
+        "universe.min_rvol"
+      ]
+    },
+    "forbidden_execution_fields": {
+      "type": "object",
+      "description": "Positions, stops, order authorization and broker settings retained only for audit."
+    },
+    "production_eligible": {
+      "const": false
+    },
+    "allow_order_execution": {
+      "const": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "mode",
+    "strategy_revision_id",
+    "fingerprint",
+    "advisory_rule",
+    "allowed_parameter_overrides",
+    "forbidden_execution_fields",
+    "production_eligible",
+    "allow_order_execution"
+  ]
+}

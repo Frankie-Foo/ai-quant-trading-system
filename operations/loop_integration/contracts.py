@@ -65,6 +65,13 @@ class StrategyIdentity(FrozenModel):
 class ReviewDecision(FrozenModel):
     instrument: str = Field(pattern=r"^[A-Z][A-Z0-9.-]{0,15}$")
     rank: int = Field(ge=1)
+    market_regime: str = Field(min_length=1, max_length=128)
+    classification: str = Field(min_length=1, max_length=128)
+    classification_source: str = Field(min_length=1, max_length=256)
+    logging_policy_id: str = Field(min_length=1, max_length=256)
+    logged_action: Literal["accept", "watch", "reject", "block"]
+    logging_action_probability: float = Field(gt=0.0, le=1.0)
+    reward_model_logged: float
     verdict: Literal["accept", "watch", "reject", "block"]
     reason: str = Field(min_length=1, max_length=6000)
     event_time: datetime
@@ -90,6 +97,8 @@ class ReviewDecision(FrozenModel):
         for value in self.features.values():
             if isinstance(value, float) and not math.isfinite(value):
                 raise ValueError("decision features must be finite or null")
+        if not math.isfinite(self.reward_model_logged):
+            raise ValueError("reward_model_logged must be finite")
         return self
 
 
@@ -125,6 +134,13 @@ class QuantReviewEnvelope(FrozenModel):
             raise ValueError("Top10 decisions must contain ten unique instruments")
         if any(item.available_at > self.as_of for item in self.top10_decisions):
             raise ValueError("review cannot consume information after as_of")
+        context_regime = str(self.market_context.get("market_regime") or "").strip()
+        if not context_regime:
+            raise ValueError("market_context requires market_regime")
+        if any(item.market_regime != context_regime for item in self.top10_decisions):
+            raise ValueError("decision market_regime must match review market_regime")
+        if not str(self.market_context.get("classification_source") or "").strip():
+            raise ValueError("market_context requires classification_source")
         return self
 
     @property
@@ -160,6 +176,9 @@ class LoopOutcomeEnvelope(FrozenModel):
     observed_at: datetime
     instrument_return: float | None = None
     strategy_return: float | None = None
+    realized_policy_return: float | None = None
+    counterfactual_instrument_return: float | None = None
+    counterfactual_net_excess_return: float | None = None
     benchmark_return: float | None = None
     excess_return: float | None = None
     max_drawdown: float | None = None
@@ -259,6 +278,20 @@ class LoopOutcomeEnvelope(FrozenModel):
             - float(self.transaction_cost or 0)
             - float(self.slippage or 0)
         )
+        if self.counterfactual_instrument_return is not None and not math.isclose(
+            float(self.counterfactual_instrument_return),
+            float(self.instrument_return or 0),
+            rel_tol=0.0,
+            abs_tol=1e-10,
+        ):
+            raise ValueError("event counterfactual instrument return mismatch")
+        if self.counterfactual_net_excess_return is not None and not math.isclose(
+            float(self.counterfactual_net_excess_return),
+            expected_excess,
+            rel_tol=0.0,
+            abs_tol=1e-10,
+        ):
+            raise ValueError("event counterfactual net excess return mismatch")
         if not math.isclose(
             float(self.excess_return or 0),
             expected_excess,
@@ -355,6 +388,30 @@ class LoopOutcomeEnvelope(FrozenModel):
             abs_tol=1e-10,
         ):
             raise ValueError("outcome v2 excess_return formula mismatch")
+        if self.counterfactual_instrument_return is not None:
+            if self.instrument_return is None or not math.isclose(
+                float(self.counterfactual_instrument_return),
+                float(self.instrument_return),
+                rel_tol=0.0,
+                abs_tol=1e-10,
+            ):
+                raise ValueError("outcome v2 counterfactual instrument return mismatch")
+        if self.counterfactual_net_excess_return is not None:
+            if self.instrument_return is None:
+                raise ValueError("outcome v2 counterfactual return requires instrument return")
+            expected_counterfactual = (
+                float(self.instrument_return)
+                - float(self.benchmark_return or 0)
+                - float(self.transaction_cost or 0)
+                - float(self.slippage or 0)
+            )
+            if not math.isclose(
+                float(self.counterfactual_net_excess_return),
+                expected_counterfactual,
+                rel_tol=0.0,
+                abs_tol=1e-10,
+            ):
+                raise ValueError("outcome v2 counterfactual net excess formula mismatch")
 
 
 class LoopOutcomeAssignment(FrozenModel):
@@ -369,6 +426,13 @@ class LoopOutcomeAssignment(FrozenModel):
     observed_verdict: Literal["accept", "watch", "reject", "block"]
     target_verdict: Literal["accept", "watch", "reject", "block"]
     evaluation_role: Literal["holdout", "walk_forward", "forward"]
+    logging_policy_id: str = ""
+    logged_action: str = ""
+    logging_action_probability: float | None = None
+    reward_model_logged: float | None = None
+    target_policy_id: str = ""
+    target_probability_for_logged_action: float | None = None
+    reward_model_target: float | None = None
     outstanding_horizons: tuple[Literal["1d", "5d", "20d"], ...] = Field(min_length=1)
 
 
@@ -431,8 +495,21 @@ class LoopPolicyCandidate(FrozenModel):
     def enforce_advisory_boundary(self) -> Self:
         if self.available_at < self.effective_at:
             raise ValueError("Loop candidate availability precedes its effective time")
-        if self.payload.get("schema_version") != "quant-strategy-policy-v3":
+        if self.payload.get("schema_version") != "strategy_policy_candidate.v4":
             raise ValueError("unsupported Loop strategy policy schema")
+        allowed_fields = {
+            "schema_version",
+            "mode",
+            "strategy_revision_id",
+            "fingerprint",
+            "advisory_rule",
+            "allowed_parameter_overrides",
+            "forbidden_execution_fields",
+            "production_eligible",
+            "allow_order_execution",
+        }
+        if set(self.payload) != allowed_fields:
+            raise ValueError("Loop candidate fields do not match the v4 schema")
         if self.payload.get("mode") != "PAPER_ONLY":
             raise ValueError("Loop candidate is not PAPER_ONLY")
         if self.payload.get("allow_order_execution") is not False:
@@ -441,6 +518,18 @@ class LoopPolicyCandidate(FrozenModel):
             raise ValueError("Loop candidate attempted to claim production eligibility")
         if not str(self.payload.get("strategy_revision_id") or "").strip():
             raise ValueError("Loop candidate lacks a strategy revision")
-        if not str(self.payload.get("strategy_fingerprint") or "").strip():
+        if not str(self.payload.get("fingerprint") or "").strip():
             raise ValueError("Loop candidate lacks a strategy fingerprint")
+        if not isinstance(self.payload.get("advisory_rule"), dict):
+            raise ValueError("Loop candidate advisory_rule must be an object")
+        if not isinstance(self.payload.get("forbidden_execution_fields"), dict):
+            raise ValueError("Loop candidate forbidden fields must be an object")
+        overrides = self.payload.get("allowed_parameter_overrides")
+        if not isinstance(overrides, dict) or set(overrides) != {"universe.min_rvol"}:
+            raise ValueError("Loop candidate override set is not allowlisted")
+        value = overrides["universe.min_rvol"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("Loop candidate min_rvol must be numeric")
+        if not math.isfinite(float(value)) or not 0.0 <= float(value) <= 10.0:
+            raise ValueError("Loop candidate min_rvol is outside schema bounds")
         return self
