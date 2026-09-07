@@ -2,7 +2,9 @@
 
 ## Normal flow
 
-- 08:00 ET: build at most ten names, market cap at least $1 billion; write the dedicated
+- First wave: the generic window starts 08:00 ET, but this Windows release waits
+  until 21:00 Beijing (09:00 ET in summer, 08:00 ET in winter). Build at most ten
+  names, market cap at least $1 billion; write the dedicated
   Investment Base and send one Chinese Livermore summary. No orders.
 - 09:25 ET: read only the frozen first pool, verify SIP price/volume, VWAP, spread and
   liquidity, retain zero to six, persist and notify. A price below premarket VWAP or a
@@ -21,6 +23,11 @@ spread and signal-to-ask slippage must each fit within 0.25%; total stop includi
 most 2%. Risk limits are 0.5% per symbol, 0.75% per sector and 1.5% portfolio. At a 1.5%
 daily loss no new entry is allowed; at 2% the runtime flattens and freezes. Attempts use
 60% then 40% of the symbol budget, at most twice.
+
+The owner-approved 2026-09-07 release permits up to $200,000 aggregate Paper notional,
+further limited by account equity and the risk limits above. All current positions
+and pending buy quantities consume the ceiling. A ceiling does not require full use;
+the account's leveraged buying power must not be substituted for equity.
 
 ## Alerts and recovery
 

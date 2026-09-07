@@ -34,7 +34,9 @@ Git worktree；评审通过后合并到 `main`，生产只部署明确记录的 
 `scripts.run_modern_funnel_stage` → `scripts.monitor_modern_momentum_paper`。
 它按纽约时间 08:00、09:25、09:35 运行三段漏斗，只有第三段的专用飞书 Base
 记录和利弗莫尔回执都成功后才生成不可变授权。默认保持冻结；Paper 启用还必须同时
-满足写入开关、关闭 kill switch、运行确认和不超过 100 美元的首次烟测上限。
+满足写入开关、关闭 kill switch、运行确认和经业主批准的名义金额上限。
+2026-09-07 发布额度为组合最多 20 万美元，同时不得超过账户净值和剩余风险预算；
+已持仓及未成交买单占用额度，不借用四倍购买力凑满。
 完整启动、停止、恢复和验收见[运行手册](docs/RUNBOOK.md)。
 
 The cloud multi-strategy service is a separate repository and deployment. This
