@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 import pytest
+from test_loop_execution import fill, fills_payload, native_plan_payload, pinned_json, plan_payload
 
-from data_plane.contracts import DataQualityCheck, QualitySeverity
+from data_plane.contracts import DataQualityCheck, DatasetSnapshot, QualitySeverity
 from data_plane.daily import audit_daily_bars, canonicalize_daily_bars
 from data_plane.storage import persist_snapshot
 from kernel.config import load_config
@@ -29,6 +33,7 @@ from operations.loop_integration.contracts import (
     LoopOutcomeEnvelope,
     LoopPolicyCandidate,
     OutcomeReporterConfig,
+    QuantReviewEnvelope,
 )
 from operations.loop_integration.control_plane import (
     LoopControlPlaneManifest,
@@ -93,7 +98,7 @@ def _control_artifact(
     }
 
 
-def _opportunity(tmp_path: Path) -> tuple[Path, object]:
+def _opportunity(tmp_path: Path) -> tuple[Path, DatasetSnapshot]:
     rows = []
     cutoff = datetime(2026, 9, 1, 13, 25, tzinfo=UTC)
     for index in range(12):
@@ -135,7 +140,11 @@ def _opportunity(tmp_path: Path) -> tuple[Path, object]:
     return path, snapshot
 
 
-def _envelope(tmp_path: Path):
+def _envelope(
+    tmp_path: Path, *, with_plan: bool = True, plan_overrides: dict[str, Any] | None = None,
+    fill_rows: list[dict[str, Any]] | None = None,
+    native_risk: bool = True,
+) -> QuantReviewEnvelope:
     path, snapshot = _opportunity(tmp_path)
     active = build_strategy_policy(
         version="selection-v1",
@@ -145,14 +154,40 @@ def _envelope(tmp_path: Path):
         approved_by="owner",
         approved_at_utc=NOW,
     )
+    plan_path = tmp_path / "effective-plan.json"
+    plan_data = {**plan_payload(active.policy_hash), **(plan_overrides or {})}
+    context_path = tmp_path / "context.json"
+    context_hash = None
+    plan_hash: str | None
+    if with_plan and native_risk:
+        native = native_plan_payload()
+        native.pop("loop_review")
+        plan_hash = pinned_json(plan_path, native)
+        plan_data["native_plan_sha256"] = plan_hash
+        context_hash = pinned_json(context_path, plan_data)
+    else:
+        plan_hash = pinned_json(plan_path, plan_data) if with_plan else None
+    fill_path = tmp_path / "fills.json"
+    fill_hash = None
+    if fill_rows is not None:
+        assert plan_hash is not None
+        evidence = fills_payload(plan_hash, fill_rows)
+        evidence["strategy_sha256"] = plan_data["strategy_sha256"]
+        fill_hash = pinned_json(fill_path, evidence)
     return build_review_envelope(
         project_root=Path(__file__).resolve().parents[1],
         trade_date=TRADE_DATE,
         opportunity_path=path,
-        opportunity_snapshot=snapshot,  # type: ignore[arg-type]
+        opportunity_snapshot=snapshot,
         artifact_ids=("episode-1", "review-1"),
         cfg=load_config(Path(__file__).resolve().parents[1] / "config.yaml"),
         active_policy=active,
+        effective_plan_path=plan_path if with_plan else None,
+        effective_plan_sha256=plan_hash,
+        fill_evidence_path=fill_path if fill_rows is not None else None,
+        fill_evidence_sha256=fill_hash,
+        review_context_path=context_path if context_hash else None,
+        review_context_sha256=context_hash,
     )
 
 
@@ -166,7 +201,8 @@ def test_review_builder_keeps_top10_separate_and_never_fabricates_paths(tmp_path
     task = build_loop_task(envelope, _binding())
     primary = envelope.top10_decisions[0]
     assert task["workflow_version_id"] == "workflow-version-quant-daily-review-v6"
-    assert len(task["input_data"]["dynamic_rescan"]["ranked_candidates"]) == 10
+    assert task["input_data"]["dynamic_rescan"]["universe"] == ["MORNING", "WATCH"]
+    assert len(task["input_data"]["dynamic_rescan"]["ranked_candidates"]) == 2
     assert task["input_data"]["daily_review"]["outcome_ids"] == []
     review = task["input_data"]["daily_review"]
     assert "top10_pnl" not in review["metrics"]
@@ -208,6 +244,166 @@ def test_review_builder_keeps_top10_separate_and_never_fabricates_paths(tmp_path
     assert fsm_transition["guard_snapshot"]["orders_authorized"] is False
     assert fsm_transition["metadata"]["source_system"] == "ai-quant-trading-system"
     assert task["constraints"]["allow_order_execution"] is False
+
+
+def test_review_without_effective_plan_does_not_invent_risk_or_execution(tmp_path: Path) -> None:
+    envelope = _envelope(tmp_path, with_plan=False)
+    assert envelope.risk_policy["status"] == "unavailable"
+    assert "stop_loss" not in envelope.risk_policy
+    assert envelope.execution_summary["status"] == "unavailable"
+    assert envelope.execution_summary["realized_net_pnl"] is None
+    assert envelope.market_context["frozen_candidate_pool"]["count"] is None
+    assert envelope.market_context["post_close_winners"]["count"] == 12
+
+    def no_request(method: str, path: str, payload: object) -> object:
+        pytest.fail("missing effective risk must block before any network request")
+
+    with pytest.raises(LoopPreconditionError) as caught:
+        client = LoopClient(base_url="https://loop.invalid", api_key="test", request=no_request)
+        client.submit_review(envelope, _binding())
+    assert caught.value.code == "EFFECTIVE_MODERN_PLAN_UNAVAILABLE"
+
+
+def test_review_uses_effective_modern_risk_and_separates_morning_pool(tmp_path: Path) -> None:
+    envelope = _envelope(tmp_path)
+    risk = envelope.risk_policy
+    assert risk["status"] == "available"
+    assert risk["position_limits"]["risk_per_trade_fraction"] == 0.005
+    assert risk["stop_loss"]["threshold_pct"] == 2.0
+    assert risk["exit_conditions"] == ["no_new_entry_et=15:00", "flatten_et=15:50"]
+    assert risk["attempt_weights"] == [0.6, 0.4]
+    assert risk["evidence"]["plan_sha256"] == hashlib.sha256(
+        (tmp_path / "effective-plan.json").read_bytes()
+    ).hexdigest()
+    assert "ATR" not in str(risk) and "15:55" not in str(risk)
+    assert envelope.market_context["frozen_candidate_pool"]["count"] == 2
+    task = build_loop_task(envelope, _binding())
+    review = task["input_data"]["daily_review"]
+    assert review["frozen_candidate_pool"]["candidates"][0]["symbol"] == "MORNING"
+    assert review["post_close_winners"]["count"] == 12
+    assert review["execution_summary"]["status"] == "unavailable"
+    assert "selected_return" not in review["metrics"]
+
+
+def test_review_carries_factual_summary_and_full_pool_without_winner_selection_bias(
+    tmp_path: Path,
+) -> None:
+    candidates = [{"symbol": f"POOL{index}", "verdict": "reject"} for index in range(15)]
+    candidates[0] = {"symbol": "MORNING", "verdict": "accept"}
+    envelope = _envelope(
+        tmp_path, plan_overrides={"candidates": candidates},
+        fill_rows=[fill("buy-1", "buy", "4", "100", 14),
+                   fill("sell-1", "sell", "4", "120", 15)],
+    )
+    task = build_loop_task(envelope, _binding())
+    review = task["input_data"]["daily_review"]
+    assert review["frozen_candidate_pool"]["count"] == 15
+    assert len(task["input_data"]["dynamic_rescan"]["ranked_candidates"]) == 15
+    assert review["execution_summary"]["realized_net_pnl"] == 78
+    assert review["execution_summary"]["strategy_sha256"] == (
+        review["risk_policy"]["evidence"]["strategy_sha256"]
+    )
+    assert review["metric_semantics"]["portfolio_pnl_available"] is False
+    assert review["metrics"]["top10_close_return_sum"] == pytest.approx(0.155)
+
+
+def test_missing_morning_pool_never_falls_back_to_winners(tmp_path: Path) -> None:
+    envelope = _envelope(tmp_path, plan_overrides={
+        "candidate_pool_complete": False, "candidates": None,
+    })
+    task = build_loop_task(envelope, _binding())
+    assert task["input_data"]["dynamic_rescan"]["universe"] == []
+    assert task["input_data"]["daily_review"]["frozen_candidate_pool"]["count"] is None
+    assert len(envelope.top10_decisions) == 10
+
+
+def test_review_rejects_active_strategy_config_mismatch(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="strategy/config"):
+        _envelope(tmp_path, plan_overrides=plan_payload("b" * 64))
+
+
+def test_review_sidecar_without_native_facts_is_risk_unavailable(tmp_path: Path) -> None:
+    envelope = _envelope(tmp_path, native_risk=False)
+    assert envelope.risk_policy["status"] == "unavailable"
+    assert "position_limits" not in envelope.risk_policy
+
+
+@pytest.mark.parametrize("with_risk", [False, True])
+@pytest.mark.parametrize("use_index", [False, True])
+def test_daily_review_cli_stages_native_plan_end_to_end_without_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    with_risk: bool, use_index: bool,
+) -> None:
+    from scripts import sync_loop_daily_review
+
+    _opportunity(tmp_path)
+    active = build_strategy_policy(
+        version="selection-v1", status="active", min_rvol=3.0,
+        created_at_utc=NOW, approved_by="owner", approved_at_utc=NOW,
+    )
+    active_path = tmp_path / "active.json"
+    write_strategy_policy(active_path, active)
+    binding_path = tmp_path / "binding.json"
+    pinned_json(binding_path, _binding().model_dump(mode="json"))
+    args = [
+        "sync_loop_daily_review", "--trade-date", "2026-09-01",
+        "--binding", str(binding_path), "--active-policy", str(active_path),
+        "--data-root", str(tmp_path / "data"), "--outbox", str(tmp_path / "outbox.sqlite3"),
+        "--stage-only",
+    ]
+    inputs: list[Path] = [active_path, binding_path]
+    if with_risk:
+        native = native_plan_payload()
+        native.pop("loop_review")
+        plan_path = tmp_path / "modern_h15_paper_plan.json"
+        plan_hash = pinned_json(plan_path, native)
+        context = plan_payload(active.policy_hash)
+        context.update(
+            effective_at_utc="2026-09-01T13:35:00Z", available_at_utc="2026-09-01T13:35:00Z",
+            native_plan_sha256=plan_hash,
+        )
+        context_path = tmp_path / "review-context.json"
+        context_hash = pinned_json(context_path, context)
+        evidence = fills_payload(plan_hash, [])
+        evidence["strategy_sha256"] = context["strategy_sha256"]
+        fill_path = tmp_path / "fills.json"
+        fill_hash = pinned_json(fill_path, evidence)
+        direct_args = [
+            "--effective-plan", str(plan_path), "--effective-plan-sha256", plan_hash,
+            "--review-context", str(context_path), "--review-context-sha256", context_hash,
+            "--fill-evidence", str(fill_path), "--fill-evidence-sha256", fill_hash,
+        ]
+        if use_index:
+            index_path = tmp_path / "execution-index.json"
+            index_hash = pinned_json(index_path, {"executions": [{
+                "trade_date": "2026-09-01", "strategy_sha256": context["strategy_sha256"],
+                "plan_path": str(plan_path), "plan_sha256": plan_hash,
+                "fills_path": str(fill_path), "fills_sha256": fill_hash,
+                "review_context_path": str(context_path), "review_context_sha256": context_hash,
+            }]})
+            args += ["--execution-index", str(index_path), "--execution-index-sha256", index_hash]
+            inputs.append(index_path)
+        else:
+            args += direct_args
+        inputs += [plan_path, context_path, fill_path]
+    before = {str(path): path.read_bytes() for path in inputs}
+    monkeypatch.setattr(sys, "argv", args)
+    monkeypatch.setattr(sync_loop_daily_review, "load_project_env", lambda root: None)
+    monkeypatch.setattr(
+        sync_loop_daily_review, "LoopClient",
+        lambda **kwargs: pytest.fail("stage-only must not initialize any remote client"),
+    )
+    sync_loop_daily_review.main()
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "staged"
+    item = LoopOutbox(tmp_path / "outbox.sqlite3").get(result["event_id"])
+    assert item is not None
+    assert item.payload["risk_policy"]["status"] == ("available" if with_risk else "unavailable")
+    if with_risk:
+        assert item.payload["execution_summary"]["status"] == "no_trade"
+        risk_evidence = item.payload["risk_policy"]["evidence"]
+        assert risk_evidence["available_at"] == "2026-09-01T13:35:00+00:00"
+    assert {str(path): path.read_bytes() for path in inputs} == before
 
 
 def test_loop_client_creates_idempotent_task_then_runs_it(tmp_path: Path) -> None:
@@ -626,8 +822,9 @@ def test_outcome_assignment_and_reporter_config_are_fail_closed() -> None:
         )
 
 
+@pytest.mark.parametrize("with_execution", [False, True])
 def test_due_outcome_reporter_waits_for_sessions_then_submits_v2(
-    tmp_path: Path,
+    tmp_path: Path, with_execution: bool,
 ) -> None:
     data_root = tmp_path / "data"
     for trade_date, aapl_close, qqq_close in (
@@ -664,6 +861,31 @@ def test_due_outcome_reporter_waits_for_sessions_then_submits_v2(
                 expected_date=trade_date,
             ),
         )
+    execution_args: dict[str, Any] = {}
+    if with_execution:
+        from test_loop_execution import fills_payload, pinned_json, plan_payload
+
+        plan = plan_payload()
+        plan["trade_date"] = "2026-08-31"
+        for key in ("effective_at_utc", "available_at_utc", "selection_cutoff_utc",
+                    "candidate_pool_available_at_utc"):
+            plan[key] = plan[key].replace("2026-09-01", "2026-08-31")
+        plan["candidates"] = [{"symbol": "AAPL", "verdict": "accept"}]
+        plan_path = tmp_path / "plan.json"
+        plan_hash = pinned_json(plan_path, plan)
+        fills = fills_payload(plan_hash, [])
+        fills["trade_date"] = "2026-08-31"
+        for key in ("coverage_start_utc", "coverage_end_utc"):
+            fills[key] = fills[key].replace("2026-09-01", "2026-08-31")
+        fills_path = tmp_path / "fills.json"
+        fills_hash = pinned_json(fills_path, fills)
+        index = tmp_path / "index.json"
+        index_hash = pinned_json(index, {"executions": [{
+            "trade_date": "2026-08-31", "strategy_sha256": plan["strategy_sha256"],
+            "plan_path": str(plan_path), "plan_sha256": plan_hash,
+            "fills_path": str(fills_path), "fills_sha256": fills_hash,
+        }]})
+        execution_args = {"execution_index_path": index, "execution_index_sha256": index_hash}
     requests: list[tuple[str, str, dict[str, object] | None]] = []
 
     def request(
@@ -677,6 +899,7 @@ def test_due_outcome_reporter_waits_for_sessions_then_submits_v2(
                 {
                     "schema_version": "quant-outcome-assignment-v1",
                     "strategy_revision_id": "strategy-r1",
+                    "strategy_sha256": plan["strategy_sha256"] if with_execution else None,
                     "strategy_lineage_id": "strategy-lineage-1",
                     "decision_event_id": "event-1",
                     "source_run_id": "run-1",
@@ -705,13 +928,14 @@ def test_due_outcome_reporter_waits_for_sessions_then_submits_v2(
         client=LoopClient(
             base_url="https://loop.example",
             api_key="test",
-            request=request,  # type: ignore[arg-type]
+            request=request,
         ),
         outbox=LoopOutbox(tmp_path / "outbox.sqlite3"),
         data_root=data_root,
         as_of_date=date(2026, 9, 1),
         observed_before=datetime.now(UTC) + timedelta(seconds=1),
         config=config,
+        **execution_args,
     )
 
     assert summary.assignments == 1
@@ -726,4 +950,21 @@ def test_due_outcome_reporter_waits_for_sessions_then_submits_v2(
     assert posted["strategy_return"] == pytest.approx(0.04)
     assert posted["benchmark_return"] == pytest.approx(0.01)
     assert posted["excess_return"] == pytest.approx(0.0285)
-    assert posted["evidence"]["strategy_revision_id"] == "strategy-r1"  # type: ignore[index]
+    evidence = posted["evidence"]
+    assert isinstance(evidence, dict)
+    assert evidence["strategy_revision_id"] == "strategy-r1"
+    assert evidence["return_semantics"]["performance_kind"] == "market_counterfactual"
+    assert evidence["return_semantics"]["is_realized_trade_pnl"] is False
+    assert evidence["counterfactual_selected_close_return"] == pytest.approx(0.04)
+    if with_execution:
+        assert evidence["factual_execution"]["status"] == "no_trade"
+        assert evidence["factual_execution"]["realized_gross_pnl"] is None
+        assert str(posted["id"]).startswith("quant_outcome_linked_")
+        return
+    assert evidence["factual_execution"] == {
+        "status": "unavailable",
+        "reason": "confirmed_fill_evidence_not_supplied",
+        "realized_gross_pnl": None,
+        "realized_net_pnl": None,
+        "fees": None,
+    }

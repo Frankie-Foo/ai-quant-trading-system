@@ -16,6 +16,7 @@ from operations.loop_integration.client import (
     LoopRunFailedError,
 )
 from operations.loop_integration.contracts import LoopBinding
+from operations.loop_integration.execution_summary import load_execution_index
 from operations.loop_integration.outbox import LoopOutbox
 from operations.loop_integration.review_builder import build_review_envelope, load_accepted_snapshot
 
@@ -44,12 +45,35 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--outbox", type=Path, default=ROOT / "runs/loop-integration.sqlite3")
     parser.add_argument("--artifact-id", action="append", default=[])
     parser.add_argument("--stage-only", action="store_true")
+    parser.add_argument("--effective-plan", type=Path)
+    parser.add_argument("--effective-plan-sha256")
+    parser.add_argument("--fill-evidence", type=Path)
+    parser.add_argument("--fill-evidence-sha256")
+    parser.add_argument("--review-context", type=Path)
+    parser.add_argument("--review-context-sha256")
+    parser.add_argument("--execution-index", type=Path)
+    parser.add_argument("--execution-index-sha256")
     return parser
 
 
 def main() -> None:
-    load_project_env(ROOT)
     args = _parser().parse_args()
+    if not args.stage_only:
+        load_project_env(ROOT)
+    entries = load_execution_index(args.execution_index, args.execution_index_sha256)
+    entry = None
+    if args.execution_index is not None:
+        if any((args.effective_plan, args.effective_plan_sha256, args.fill_evidence,
+                args.fill_evidence_sha256, args.review_context, args.review_context_sha256)):
+            raise ValueError("use execution index or direct evidence flags, not both")
+        matches = [row for row in entries if row.trade_date == args.trade_date]
+        if len(matches) != 1:
+            raise ValueError("review requires exactly one execution index entry for date")
+        entry = matches[0]
+        args.effective_plan, args.effective_plan_sha256 = entry.plan_path, entry.plan_sha256
+        args.fill_evidence, args.fill_evidence_sha256 = entry.fills_path, entry.fills_sha256
+        args.review_context = entry.review_context_path
+        args.review_context_sha256 = entry.review_context_sha256
     binding = LoopBinding.model_validate_json(args.binding.read_text(encoding="utf-8"))
     path = _latest(args.data_root, args.trade_date)
     snapshot, _ = load_accepted_snapshot(path)
@@ -63,16 +87,39 @@ def main() -> None:
         cfg=load_config(ROOT / "config.yaml"),
         active_policy=active,
         market_scope=binding.market_scope,
+        effective_plan_path=args.effective_plan,
+        effective_plan_sha256=args.effective_plan_sha256,
+        fill_evidence_path=args.fill_evidence,
+        fill_evidence_sha256=args.fill_evidence_sha256,
+        review_context_path=args.review_context,
+        review_context_sha256=args.review_context_sha256,
     )
+    if entry is not None and envelope.risk_policy.get("status") == "available":
+        if envelope.risk_policy["evidence"]["strategy_sha256"] != entry.strategy_sha256:
+            raise ValueError("execution index strategy mismatch")
     outbox = LoopOutbox(args.outbox)
-    outbox.stage(
+    staged = outbox.stage(
         event_id=envelope.event_id,
         event_type="daily_review",
         payload=envelope.model_dump(mode="json"),
         payload_sha256=envelope.payload_sha256,
     )
     if args.stage_only:
-        print(json.dumps({"status": "staged", "event_id": envelope.event_id}))
+        print(json.dumps({
+            "status": "staged", "event_id": envelope.event_id,
+            "risk_status": envelope.risk_policy.get("status"),
+            "submitted": False,
+        }))
+        return
+    if staged.status == "delivered":
+        print(json.dumps({"status": "delivered", "event_id": envelope.event_id,
+                          "task_id": staged.remote_task_id, "run_id": staged.remote_run_id}))
+        return
+    if envelope.risk_policy.get("status") != "available":
+        outbox.mark_blocked_precondition(
+            envelope.event_id, error_code="EFFECTIVE_MODERN_PLAN_UNAVAILABLE"
+        )
+        print(json.dumps({"status": "blocked_precondition", "event_id": envelope.event_id}))
         return
     client = LoopClient(
         base_url=os.environ.get("LOOP_BASE_URL", ""),

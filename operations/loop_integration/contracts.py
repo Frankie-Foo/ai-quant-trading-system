@@ -156,7 +156,10 @@ class LoopOutcomeEnvelope(FrozenModel):
     instrument: str = Field(pattern=r"^[A-Z][A-Z0-9.-]{0,15}$")
     horizon: Literal["1d", "5d", "20d"]
     observed_at: datetime
-    strategy_return: float | None = None
+    strategy_return: float | None = Field(
+        default=None,
+        description="Legacy research counterfactual close-return alias; not realized trade PnL.",
+    )
     benchmark_return: float | None = None
     excess_return: float | None = None
     max_drawdown: float | None = None
@@ -319,6 +322,7 @@ class LoopOutcomeAssignment(FrozenModel):
     )
     strategy_revision_id: str = Field(min_length=1, max_length=128)
     strategy_lineage_id: str = Field(min_length=1, max_length=128)
+    strategy_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     decision_event_id: str = Field(min_length=1, max_length=128)
     source_run_id: str = Field(min_length=1, max_length=128)
     market_scope: str = Field(min_length=1, max_length=128)

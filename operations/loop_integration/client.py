@@ -88,6 +88,11 @@ class LoopClient:
         return response.json()
 
     def submit_review(self, envelope: QuantReviewEnvelope, binding: LoopBinding) -> tuple[str, str]:
+        if envelope.risk_policy.get("status") != "available":
+            raise LoopPreconditionError(
+                "EFFECTIVE_MODERN_PLAN_UNAVAILABLE",
+                "review submission requires a hash-verified effective modern plan",
+            )
         self.validate_review_contracts(binding=binding, as_of=envelope.as_of)
         task_payload = build_loop_task(envelope, binding)
         task = self._request("POST", "/api/v1/tasks", task_payload)
@@ -289,6 +294,8 @@ def _run_failure(run: dict[str, Any]) -> tuple[str, str]:
 
 def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict[str, Any]:
     decisions = envelope.top10_decisions
+    frozen_pool = envelope.market_context.get("frozen_candidate_pool", {})
+    morning_candidates = frozen_pool.get("candidates") or []
     primary = decisions[0]
     market_regime = str(envelope.market_context.get("regime") or "UNKNOWN")
     top10 = [
@@ -317,6 +324,7 @@ def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict
         "strategy_version": envelope.strategy.strategy_version,
         "active_policy_version": envelope.strategy.active_policy_version,
         "active_policy_hash": envelope.strategy.active_policy_hash,
+        "strategy_sha256": envelope.risk_policy.get("evidence", {}).get("strategy_sha256"),
         "payload_sha256": envelope.payload_sha256,
         "market_regime": market_regime,
     }
@@ -363,10 +371,10 @@ def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict
                 "available_at": envelope.as_of.isoformat(),
                 "trigger": "scheduled",
                 "trigger_evidence": {"review_event_id": envelope.event_id},
-                "universe": [item.instrument for item in decisions],
+                "universe": [item["symbol"] for item in morning_candidates],
                 "ranked_candidates": [
-                    {"instrument": item.instrument, "rank": item.rank, **item.features}
-                    for item in decisions
+                    {**item, "instrument": item["symbol"], "rank": rank}
+                    for rank, item in enumerate(morning_candidates, start=1)
                 ],
                 "top_n": 10,
                 "source_snapshot_ids": list(envelope.provenance.source_snapshot_ids),
@@ -398,6 +406,9 @@ def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict
                 "outcome_ids": [],
                 "top10_verdicts": top10,
                 "risk_policy": envelope.risk_policy,
+                "frozen_candidate_pool": frozen_pool,
+                "post_close_winners": envelope.market_context.get("post_close_winners", {}),
+                "execution_summary": envelope.execution_summary,
                 "metrics": envelope.metrics,
                 "metric_semantics": {
                     "schema_version": "quant-review-metrics-v2",

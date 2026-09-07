@@ -36,6 +36,8 @@ def main() -> None:
         default=ROOT / "runs/loop-integration.sqlite3",
     )
     parser.add_argument("--stage-only", action="store_true")
+    parser.add_argument("--execution-index", type=Path)
+    parser.add_argument("--execution-index-sha256")
     args = parser.parse_args()
     config = OutcomeReporterConfig.model_validate_json(
         args.config.read_text(encoding="utf-8")
@@ -52,8 +54,13 @@ def main() -> None:
         observed_before=datetime.now(UTC),
         config=config,
         stage_only=args.stage_only,
+        execution_index_path=args.execution_index,
+        execution_index_sha256=args.execution_index_sha256,
     )
-    print(json.dumps(summary.to_dict(), ensure_ascii=False))
+    receipt = summary.to_dict()
+    if args.stage_only:
+        receipt["status"] = "staged"
+    print(json.dumps(receipt, ensure_ascii=False))
 
 
 if __name__ == "__main__":
