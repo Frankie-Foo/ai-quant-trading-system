@@ -65,6 +65,13 @@ class StrategyIdentity(FrozenModel):
 class ReviewDecision(FrozenModel):
     instrument: str = Field(pattern=r"^[A-Z][A-Z0-9.-]{0,15}$")
     rank: int = Field(ge=1)
+    market_regime: str = Field(min_length=1, max_length=128)
+    classification: str = Field(min_length=1, max_length=128)
+    classification_source: str = Field(min_length=1, max_length=256)
+    logging_policy_id: str = Field(min_length=1, max_length=256)
+    logged_action: Literal["accept", "watch", "reject", "block"]
+    logging_action_probability: float = Field(gt=0.0, le=1.0)
+    reward_model_logged: float
     verdict: Literal["accept", "watch", "reject", "block"]
     reason: str = Field(min_length=1, max_length=6000)
     event_time: datetime
@@ -90,6 +97,8 @@ class ReviewDecision(FrozenModel):
         for value in self.features.values():
             if isinstance(value, float) and not math.isfinite(value):
                 raise ValueError("decision features must be finite or null")
+        if not math.isfinite(self.reward_model_logged):
+            raise ValueError("reward_model_logged must be finite")
         return self
 
 
@@ -125,6 +134,13 @@ class QuantReviewEnvelope(FrozenModel):
             raise ValueError("Top10 decisions must contain ten unique instruments")
         if any(item.available_at > self.as_of for item in self.top10_decisions):
             raise ValueError("review cannot consume information after as_of")
+        context_regime = str(self.market_context.get("market_regime") or "").strip()
+        if not context_regime:
+            raise ValueError("market_context requires market_regime")
+        if any(item.market_regime != context_regime for item in self.top10_decisions):
+            raise ValueError("decision market_regime must match review market_regime")
+        if not str(self.market_context.get("classification_source") or "").strip():
+            raise ValueError("market_context requires classification_source")
         return self
 
     @property
@@ -140,14 +156,15 @@ OUTCOME_GOVERNANCE_KEYS = (
     "point_in_time_guard_passed",
 )
 OUTCOME_HORIZON_SESSIONS = {"1d": 1, "5d": 5, "20d": 20}
-OUTCOME_EXCESS_FORMULA = (
-    "strategy_return-benchmark_return-transaction_cost-slippage"
-)
+OUTCOME_EXCESS_FORMULA = "strategy_return-benchmark_return-transaction_cost-slippage"
+EVENT_OUTCOME_EXCESS_FORMULA = "instrument_return-benchmark_return-transaction_cost-slippage"
 
 
 class LoopOutcomeEnvelope(FrozenModel):
     schema_version: Literal[
-        "ai_quant.loop_outcome.v1", "ai_quant.loop_outcome.v2"
+        "ai_quant.loop_outcome.v1",
+        "ai_quant.loop_outcome.v2",
+        "ai_quant.loop_event_outcome.v1",
     ] = "ai_quant.loop_outcome.v1"
     id: str = Field(min_length=1, max_length=64)
     decision_event_id: str = Field(min_length=1, max_length=64)
@@ -155,11 +172,16 @@ class LoopOutcomeEnvelope(FrozenModel):
     market_scope: str = Field(min_length=1, max_length=128)
     instrument: str = Field(pattern=r"^[A-Z][A-Z0-9.-]{0,15}$")
     horizon: Literal["1d", "5d", "20d"]
+    outcome_kind: Literal["strategy_evaluation", "event_observation"] = "strategy_evaluation"
     observed_at: datetime
     strategy_return: float | None = Field(
         default=None,
         description="Legacy research counterfactual close-return alias; not realized trade PnL.",
     )
+    instrument_return: float | None = None
+    realized_policy_return: float | None = None
+    counterfactual_instrument_return: float | None = None
+    counterfactual_net_excess_return: float | None = None
     benchmark_return: float | None = None
     excess_return: float | None = None
     max_drawdown: float | None = None
@@ -175,9 +197,7 @@ class LoopOutcomeEnvelope(FrozenModel):
     @classmethod
     def normalize_legacy_governance_location(cls, raw: Any) -> Any:
         schema_version = (
-            raw.get("schema_version", "ai_quant.loop_outcome.v1")
-            if isinstance(raw, dict)
-            else ""
+            raw.get("schema_version", "ai_quant.loop_outcome.v1") if isinstance(raw, dict) else ""
         )
         if not isinstance(raw, dict) or schema_version != "ai_quant.loop_outcome.v1":
             return raw
@@ -209,6 +229,9 @@ class LoopOutcomeEnvelope(FrozenModel):
     def require_point_in_time_lineage(self) -> Self:
         if self.evidence.get("point_in_time_guard_passed") is not True:
             raise ValueError("outcome requires a passed point-in-time guard")
+        if self.schema_version == "ai_quant.loop_event_outcome.v1":
+            self._validate_event_v1()
+            return self
         if self.evidence.get("evaluation_role") not in {
             "holdout",
             "walk_forward",
@@ -221,28 +244,76 @@ class LoopOutcomeEnvelope(FrozenModel):
             self._validate_v2()
         return self
 
-    def _validate_v2(self) -> None:
-        if any(key in self.metadata for key in OUTCOME_GOVERNANCE_KEYS):
-            raise ValueError("outcome v2 governance lineage belongs in evidence")
-        if self.evidence.get("schema_version") != "quant-outcome-evidence-v2":
-            raise ValueError("outcome v2 evidence schema is invalid")
+    def _validate_event_v1(self) -> None:
+        if self.outcome_kind != "event_observation":
+            raise ValueError("event outcome requires event_observation outcome_kind")
+        if self.evidence.get("schema_version") != "quant-event-outcome-evidence-v1":
+            raise ValueError("event outcome evidence schema is invalid")
+        if self.evidence.get("evaluation_role") != "raw_event":
+            raise ValueError("event outcome evaluation_role must be raw_event")
+        if str(self.evidence.get("strategy_revision_id") or "").strip():
+            raise ValueError("event outcome must not declare strategy_revision_id")
+        self._validate_v2_timeline()
+        semantics = self.evidence.get("return_semantics")
+        expected_semantics = {
+            "unit": "decimal_fraction",
+            "method": "close_to_close_split_adjusted",
+            "return_basis": "observed_instrument",
+            "excess_return_formula": EVENT_OUTCOME_EXCESS_FORMULA,
+        }
+        if not isinstance(semantics, dict) or any(
+            semantics.get(key) != value for key, value in expected_semantics.items()
+        ):
+            raise ValueError("event outcome return_semantics are invalid")
+        metrics = (
+            self.instrument_return,
+            self.benchmark_return,
+            self.excess_return,
+            self.max_drawdown,
+            self.transaction_cost,
+            self.slippage,
+        )
+        if any(value is None or not math.isfinite(float(value)) for value in metrics):
+            raise ValueError("event outcome requires finite metrics")
+        expected_excess = (
+            float(self.instrument_return or 0)
+            - float(self.benchmark_return or 0)
+            - float(self.transaction_cost or 0)
+            - float(self.slippage or 0)
+        )
+        if self.counterfactual_instrument_return is not None and not math.isclose(
+            float(self.counterfactual_instrument_return),
+            float(self.instrument_return or 0),
+            rel_tol=0.0,
+            abs_tol=1e-10,
+        ):
+            raise ValueError("event counterfactual instrument return mismatch")
+        if self.counterfactual_net_excess_return is not None and not math.isclose(
+            float(self.counterfactual_net_excess_return),
+            expected_excess,
+            rel_tol=0.0,
+            abs_tol=1e-10,
+        ):
+            raise ValueError("event counterfactual net excess return mismatch")
+        if not math.isclose(
+            float(self.excess_return or 0),
+            expected_excess,
+            rel_tol=0.0,
+            abs_tol=1e-10,
+        ):
+            raise ValueError("event outcome excess_return formula mismatch")
+
+    def _validate_v2_timeline(self) -> None:
         try:
-            decision_date = date.fromisoformat(
-                str(self.evidence["decision_trading_date"])
-            )
-            horizon_date = date.fromisoformat(
-                str(self.evidence["horizon_end_trading_date"])
-            )
+            decision_date = date.fromisoformat(str(self.evidence["decision_trading_date"]))
+            horizon_date = date.fromisoformat(str(self.evidence["horizon_end_trading_date"]))
             horizon_close = datetime.fromisoformat(
-                str(self.evidence["horizon_end_market_close_utc"]).replace(
-                    "Z", "+00:00"
-                )
+                str(self.evidence["horizon_end_market_close_utc"]).replace("Z", "+00:00")
             )
         except (KeyError, ValueError) as exc:
-            raise ValueError("outcome v2 requires valid horizon evidence") from exc
-        if (
-            horizon_close.tzinfo is None
-            or horizon_close.utcoffset() != UTC.utcoffset(horizon_close)
+            raise ValueError("outcome requires valid horizon evidence") from exc
+        if horizon_close.tzinfo is None or horizon_close.utcoffset() != UTC.utcoffset(
+            horizon_close
         ):
             raise ValueError("horizon close must be timezone-aware UTC")
         if horizon_date <= decision_date:
@@ -251,7 +322,7 @@ class LoopOutcomeEnvelope(FrozenModel):
             raise ValueError("observed_at cannot precede horizon close")
         raw_sessions = self.evidence.get("trading_session_dates")
         if not isinstance(raw_sessions, list):
-            raise ValueError("outcome v2 requires trading_session_dates")
+            raise ValueError("outcome requires trading_session_dates")
         try:
             sessions = [date.fromisoformat(str(value)) for value in raw_sessions]
         except ValueError as exc:
@@ -265,15 +336,27 @@ class LoopOutcomeEnvelope(FrozenModel):
             raise ValueError("trading_session_dates do not match the declared horizon")
         calendar = self.evidence.get("trading_calendar")
         if not isinstance(calendar, dict) or any(
-            not str(calendar.get(key) or "").strip()
-            for key in ("name", "source", "version")
+            not str(calendar.get(key) or "").strip() for key in ("name", "source", "version")
         ):
-            raise ValueError("outcome v2 requires versioned trading_calendar evidence")
+            raise ValueError("outcome requires versioned trading_calendar evidence")
         if not str(self.evidence.get("benchmark_id") or "").strip():
-            raise ValueError("outcome v2 requires benchmark_id")
+            raise ValueError("outcome requires benchmark_id")
         snapshots = self.evidence.get("price_snapshot_ids")
         if not isinstance(snapshots, list) or len(snapshots) < 2:
-            raise ValueError("outcome v2 requires start and horizon price snapshots")
+            raise ValueError("outcome requires start and horizon price snapshots")
+        if float(self.transaction_cost or 0) < 0 or float(self.slippage or 0) < 0:
+            raise ValueError("outcome costs and slippage must be non-negative")
+        if float(self.max_drawdown or 0) > 0:
+            raise ValueError("outcome max_drawdown must be non-positive")
+        if self.direction_correct is None:
+            raise ValueError("outcome requires direction_correct")
+
+    def _validate_v2(self) -> None:
+        if any(key in self.metadata for key in OUTCOME_GOVERNANCE_KEYS):
+            raise ValueError("outcome v2 governance lineage belongs in evidence")
+        if self.evidence.get("schema_version") != "quant-outcome-evidence-v2":
+            raise ValueError("outcome v2 evidence schema is invalid")
+        self._validate_v2_timeline()
         semantics = self.evidence.get("return_semantics")
         required_semantics = {
             "unit": "decimal_fraction",
@@ -295,12 +378,6 @@ class LoopOutcomeEnvelope(FrozenModel):
         )
         if any(value is None or not math.isfinite(float(value)) for value in metrics):
             raise ValueError("outcome v2 requires finite metrics")
-        if float(self.transaction_cost or 0) < 0 or float(self.slippage or 0) < 0:
-            raise ValueError("outcome v2 costs and slippage must be non-negative")
-        if float(self.max_drawdown or 0) > 0:
-            raise ValueError("outcome v2 max_drawdown must be non-positive")
-        if self.direction_correct is None:
-            raise ValueError("outcome v2 requires direction_correct")
         expected_excess = (
             float(self.strategy_return or 0)
             - float(self.benchmark_return or 0)
@@ -314,12 +391,49 @@ class LoopOutcomeEnvelope(FrozenModel):
             abs_tol=1e-10,
         ):
             raise ValueError("outcome v2 excess_return formula mismatch")
+        if self.counterfactual_instrument_return is not None:
+            if self.instrument_return is None or not math.isclose(
+                float(self.counterfactual_instrument_return),
+                float(self.instrument_return),
+                rel_tol=0.0,
+                abs_tol=1e-10,
+            ):
+                raise ValueError("outcome v2 counterfactual instrument return mismatch")
+        if self.counterfactual_net_excess_return is not None:
+            if self.instrument_return is None:
+                raise ValueError("outcome v2 counterfactual return requires instrument return")
+            counterfactual_transaction_cost = self.evidence.get(
+                "counterfactual_transaction_cost",
+                self.transaction_cost,
+            )
+            counterfactual_slippage = self.evidence.get(
+                "counterfactual_slippage",
+                self.slippage,
+            )
+            if not all(
+                isinstance(value, (int, float)) and math.isfinite(float(value))
+                for value in (counterfactual_transaction_cost, counterfactual_slippage)
+            ):
+                raise ValueError("outcome v2 counterfactual costs must be finite")
+            assert isinstance(counterfactual_transaction_cost, (int, float))
+            assert isinstance(counterfactual_slippage, (int, float))
+            expected_counterfactual = (
+                float(self.instrument_return)
+                - float(self.benchmark_return or 0)
+                - float(counterfactual_transaction_cost)
+                - float(counterfactual_slippage)
+            )
+            if not math.isclose(
+                float(self.counterfactual_net_excess_return),
+                expected_counterfactual,
+                rel_tol=0.0,
+                abs_tol=1e-10,
+            ):
+                raise ValueError("outcome v2 counterfactual net excess formula mismatch")
 
 
 class LoopOutcomeAssignment(FrozenModel):
-    schema_version: Literal["quant-outcome-assignment-v1"] = (
-        "quant-outcome-assignment-v1"
-    )
+    schema_version: Literal["quant-outcome-assignment-v1"] = "quant-outcome-assignment-v1"
     strategy_revision_id: str = Field(min_length=1, max_length=128)
     strategy_lineage_id: str = Field(min_length=1, max_length=128)
     strategy_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
@@ -331,9 +445,27 @@ class LoopOutcomeAssignment(FrozenModel):
     observed_verdict: Literal["accept", "watch", "reject", "block"]
     target_verdict: Literal["accept", "watch", "reject", "block"]
     evaluation_role: Literal["holdout", "walk_forward", "forward"]
-    outstanding_horizons: tuple[Literal["1d", "5d", "20d"], ...] = Field(
-        min_length=1
+    logging_policy_id: str = ""
+    logged_action: str = ""
+    logging_action_probability: float | None = None
+    reward_model_logged: float | None = None
+    target_policy_id: str = ""
+    target_probability_for_logged_action: float | None = None
+    reward_model_target: float | None = None
+    outstanding_horizons: tuple[Literal["1d", "5d", "20d"], ...] = Field(min_length=1)
+
+
+class LoopEventOutcomeAssignment(FrozenModel):
+    schema_version: Literal["quant-event-outcome-assignment-v1"] = (
+        "quant-event-outcome-assignment-v1"
     )
+    decision_event_id: str = Field(min_length=1, max_length=128)
+    source_run_id: str = Field(min_length=1, max_length=128)
+    market_scope: str = Field(min_length=1, max_length=128)
+    instrument: str = Field(pattern=r"^[A-Z][A-Z0-9.-]{0,15}$")
+    decision_trading_date: date
+    observed_verdict: Literal["accept", "watch", "reject", "block"]
+    outstanding_horizons: tuple[Literal["1d", "5d", "20d"], ...] = Field(min_length=1)
 
 
 class OutcomeReporterConfig(FrozenModel):
@@ -382,8 +514,21 @@ class LoopPolicyCandidate(FrozenModel):
     def enforce_advisory_boundary(self) -> Self:
         if self.available_at < self.effective_at:
             raise ValueError("Loop candidate availability precedes its effective time")
-        if self.payload.get("schema_version") != "quant-strategy-policy-v3":
+        if self.payload.get("schema_version") != "strategy_policy_candidate.v4":
             raise ValueError("unsupported Loop strategy policy schema")
+        allowed_fields = {
+            "schema_version",
+            "mode",
+            "strategy_revision_id",
+            "fingerprint",
+            "advisory_rule",
+            "allowed_parameter_overrides",
+            "forbidden_execution_fields",
+            "production_eligible",
+            "allow_order_execution",
+        }
+        if set(self.payload) != allowed_fields:
+            raise ValueError("Loop candidate fields do not match the v4 schema")
         if self.payload.get("mode") != "PAPER_ONLY":
             raise ValueError("Loop candidate is not PAPER_ONLY")
         if self.payload.get("allow_order_execution") is not False:
@@ -392,6 +537,18 @@ class LoopPolicyCandidate(FrozenModel):
             raise ValueError("Loop candidate attempted to claim production eligibility")
         if not str(self.payload.get("strategy_revision_id") or "").strip():
             raise ValueError("Loop candidate lacks a strategy revision")
-        if not str(self.payload.get("strategy_fingerprint") or "").strip():
+        if not str(self.payload.get("fingerprint") or "").strip():
             raise ValueError("Loop candidate lacks a strategy fingerprint")
+        if not isinstance(self.payload.get("advisory_rule"), dict):
+            raise ValueError("Loop candidate advisory_rule must be an object")
+        if not isinstance(self.payload.get("forbidden_execution_fields"), dict):
+            raise ValueError("Loop candidate forbidden fields must be an object")
+        overrides = self.payload.get("allowed_parameter_overrides")
+        if not isinstance(overrides, dict) or set(overrides) != {"universe.min_rvol"}:
+            raise ValueError("Loop candidate override set is not allowlisted")
+        value = overrides["universe.min_rvol"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("Loop candidate min_rvol must be numeric")
+        if not math.isfinite(float(value)) or not 0.0 <= float(value) <= 10.0:
+            raise ValueError("Loop candidate min_rvol is outside schema bounds")
         return self

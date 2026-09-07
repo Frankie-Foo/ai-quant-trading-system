@@ -183,6 +183,13 @@ def test_selection_gates_are_fail_closed_and_rank_only_survivors() -> None:
     assert rows["LULD"]["reject_reason"] == "recent_luld_low_or_unknown_float"
     assert rows["LOWRV"]["reject_reason"] == "rvol_below_or_equal_min"
     assert rows["NOCAP"]["reject_reason"] == "missing_market_cap"
+    assert rows["PASS"]["logged_action"] == "accept"
+    assert rows["LOWRV"]["logged_action"] == "reject"
+    assert rows["PASS"]["logging_action_probability"] == 1.0
+    assert rows["PASS"]["reward_model_logged"] == 0.0
+    assert rows["PASS"]["logging_policy_id"].startswith(
+        "kernel.universe.selection_gates.v2@"
+    )
 
 
 def test_selection_gates_reject_market_caps_below_configured_floor() -> None:

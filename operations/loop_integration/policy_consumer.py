@@ -17,16 +17,10 @@ from .contracts import LoopPolicyCandidate
 
 
 def _min_rvol(payload: dict[str, Any]) -> float:
-    selection = payload.get("selection_policy")
-    if not isinstance(selection, dict):
-        raise ValueError("Loop selection_policy must be an object")
-    overrides = selection.get("parameter_overrides")
-    if isinstance(overrides, dict) and set(overrides) == {ALLOWED_PARAMETER}:
-        return float(overrides[ALLOWED_PARAMETER])
-    universe = selection.get("universe")
-    if isinstance(universe, dict) and set(universe) == {"min_rvol"}:
-        return float(universe["min_rvol"])
-    raise ValueError("Loop candidate contains unsupported or missing selection parameters")
+    overrides = payload.get("allowed_parameter_overrides")
+    if not isinstance(overrides, dict) or set(overrides) != {ALLOWED_PARAMETER}:
+        raise ValueError("Loop candidate contains unsupported or missing overrides")
+    return float(overrides[ALLOWED_PARAMETER])
 
 
 def install_shadow_candidate(
@@ -37,12 +31,9 @@ def install_shadow_candidate(
     installed_at_utc: datetime | None = None,
 ) -> StrategyPolicy:
     active = load_strategy_policy(active_path, required_status="active")
-    trading_policy = candidate.payload.get("trading_policy")
-    if trading_policy not in ({}, None):
-        raise ValueError("Loop candidate attempted to modify local trading policy")
     min_rvol = _min_rvol(candidate.payload)
     revision = str(candidate.payload["strategy_revision_id"])
-    fingerprint = str(candidate.payload["strategy_fingerprint"])
+    fingerprint = str(candidate.payload["fingerprint"])
     revision_slug = re.sub(r"[^a-z0-9._-]+", "-", revision.lower()).strip("-.")
     if not revision_slug:
         raise ValueError("Loop strategy revision cannot form a local policy version")

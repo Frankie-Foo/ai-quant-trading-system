@@ -9,7 +9,8 @@ from typing import Any
 
 import polars as pl
 
-REVIEW_SCHEMA_VERSION = "intraday_selection_postmortem.v1"
+REVIEW_SCHEMA_VERSION = "intraday_selection_postmortem.v2"
+CLASSIFICATION_SOURCE = "intraday_selection_postmortem.rule_classifier.v1"
 
 
 @dataclass(frozen=True)
@@ -198,6 +199,24 @@ def _decision_outcome(category: str) -> str:
     }[category]
 
 
+def _classification(category: str) -> str:
+    """Return the stable, ticker-free review classification.
+
+    This taxonomy describes why an opportunity was or was not captured. It is
+    deliberately separate from ``pattern_key`` so downstream governance never
+    has to infer a classification from free-form research text.
+    """
+
+    return {
+        "selected": "SELECTED",
+        "intentional_gate": "INTENTIONAL_GATE",
+        "late_catalyst": "LATE_CATALYST",
+        "data_or_classifier_gap": "DATA_OR_CLASSIFIER_GAP",
+        "factor_gap": "FACTOR_GAP",
+        "incomplete_evidence": "INCOMPLETE_EVIDENCE",
+    }[category]
+
+
 def _pattern_key(category: str, gate_row: dict[str, Any] | None) -> str:
     if category == "intentional_gate":
         reject_reason = str((gate_row or {}).get("reject_reason") or "unknown_gate")
@@ -261,9 +280,7 @@ def build_intraday_selection_postmortem(
     cutoff = gates.get_column("gate_asof_utc").max()
     if not isinstance(cutoff, datetime) or cutoff.tzinfo is None:
         raise ValueError("selection gate cutoff must be timezone-aware")
-    gate_rows = {
-        str(row["symbol"]).upper(): row for row in gates.iter_rows(named=True)
-    }
+    gate_rows = {str(row["symbol"]).upper(): row for row in gates.iter_rows(named=True)}
     news_map = _news_by_symbol(news)
 
     ordered = movers.sort("close_return", descending=True)
@@ -289,6 +306,14 @@ def build_intraday_selection_postmortem(
             else "rejected"
             if gate_row is not None
             else "not_seen"
+        )
+        logging_policy_id = str(
+            (gate_row or {}).get("logging_policy_id")
+            or "kernel.universe.selection_gates.v2@out_of_candidate_pool"
+        )
+        logged_action = str(
+            (gate_row or {}).get("logged_action")
+            or ("accept" if selection_status == "selected" else "reject")
         )
         rows.append(
             {
@@ -317,9 +342,21 @@ def build_intraday_selection_postmortem(
                     str(gate_row.get("reject_reason") or "") if gate_row is not None else None
                 ),
                 "decision_outcome": _decision_outcome(category),
+                "classification": _classification(category),
+                "classification_source": CLASSIFICATION_SOURCE,
+                "logging_policy_id": logging_policy_id,
+                "logged_action": logged_action,
+                "logging_action_probability": float(
+                    (gate_row or {}).get("logging_action_probability") or 1.0
+                ),
+                "reward_model_logged": float((gate_row or {}).get("reward_model_logged") or 0.0),
+                "reward_model_id": str(
+                    (gate_row or {}).get("reward_model_id") or "zero_net_return_baseline.v1"
+                ),
                 "root_cause": category,
                 "root_cause_detail": attribution.reason.detail,
                 "pattern_key": _pattern_key(category, gate_row),
+                "rvol": _number((gate_row or {}).get("rvol")),
                 "research_action": _research_action(category),
                 "research_eligible": category
                 in {"intentional_gate", "data_or_classifier_gap", "factor_gap"},
