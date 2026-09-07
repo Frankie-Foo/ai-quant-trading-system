@@ -1,4 +1,8 @@
-"""Deterministic, point-in-time delayed Outcome generation for Loop governance."""
+"""Delayed close-to-close market counterfactuals, never intraday execution PnL.
+
+The v2 wire fields strategy_return/excess_return/costs remain research aliases
+for compatibility. A target accept is a hypothetical long, not a broker fill.
+"""
 
 from __future__ import annotations
 
@@ -24,6 +28,11 @@ from .contracts import (
     LoopOutcomeEnvelope,
     OutcomeReporterConfig,
 )
+from .execution_summary import (
+    build_factual_execution_summary,
+    load_execution_index,
+    unavailable_execution,
+)
 from .outbox import LoopOutbox
 from .review_builder import envelope_sha256
 
@@ -46,6 +55,9 @@ class OutcomeSyncSummary:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "status": "completed" if self.due == self.delivered and all(
+                item.reason == "horizon_not_mature" for item in self.pending
+            ) else "pending",
             "assignments": self.assignments,
             "due": self.due,
             "staged": self.staged,
@@ -140,10 +152,11 @@ def _outcome_id(
     identity = {
         "decision_event_id": assignment.decision_event_id,
         "strategy_revision_id": assignment.strategy_revision_id,
+        "strategy_sha256": assignment.strategy_sha256,
         "horizon": horizon,
         "snapshot_ids": snapshot_ids,
         "cost_model_version": config.cost_model_version,
-        "return_semantics": "close_to_close_split_adjusted.v1",
+        "return_semantics": "market_counterfactual.close_to_close_split_adjusted.v2",
     }
     digest = hashlib.sha256(
         json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
@@ -197,14 +210,14 @@ def build_due_outcome(
         *(float(row["low"]) / instrument_start - 1.0 for row in instrument[1:]),
     )
     target_verdict = assignment.target_verdict
-    enters_position = target_verdict == "accept"
-    strategy_return = instrument_return if enters_position else 0.0
+    hypothetical_long = target_verdict == "accept"
+    counterfactual_selected_return = instrument_return if hypothetical_long else 0.0
     transaction_cost = (
-        config.transaction_cost_bps_round_trip / 10_000 if enters_position else 0.0
+        config.transaction_cost_bps_round_trip / 10_000 if hypothetical_long else 0.0
     )
-    slippage = config.slippage_bps_round_trip / 10_000 if enters_position else 0.0
+    slippage = config.slippage_bps_round_trip / 10_000 if hypothetical_long else 0.0
     excess_return = (
-        strategy_return - benchmark_return - transaction_cost - slippage
+        counterfactual_selected_return - benchmark_return - transaction_cost - slippage
     )
     counterfactual_net_alpha = (
         instrument_return
@@ -233,6 +246,7 @@ def build_due_outcome(
         "schema_version": "quant-outcome-evidence-v2",
         "strategy_revision_id": assignment.strategy_revision_id,
         "strategy_lineage_id": assignment.strategy_lineage_id,
+        "strategy_sha256": assignment.strategy_sha256,
         "evaluation_role": assignment.evaluation_role,
         "point_in_time_guard_passed": True,
         "decision_trading_date": assignment.decision_trading_date.isoformat(),
@@ -249,6 +263,11 @@ def build_due_outcome(
         "benchmark_id": config.benchmark_symbol,
         "price_snapshot_ids": snapshot_ids,
         "return_semantics": {
+            "performance_kind": "market_counterfactual",
+            "is_realized_trade_pnl": False,
+            "holding_period": "decision_close_to_horizon_close_1_5_20_sessions",
+            "cost_basis": "approved_research_assumptions_not_execution_fees",
+            "legacy_strategy_return_alias": "counterfactual_selected_close_return",
             "unit": "decimal_fraction",
             "method": "close_to_close_split_adjusted",
             "strategy_return_basis": "gross_before_costs",
@@ -257,6 +276,8 @@ def build_due_outcome(
         "target_verdict": target_verdict,
         "observed_verdict": assignment.observed_verdict,
         "instrument_return": instrument_return,
+        "counterfactual_selected_close_return": counterfactual_selected_return,
+        "factual_execution": unavailable_execution(),
         "counterfactual_net_excess_return": counterfactual_net_alpha,
         "counterfactual_max_drawdown": counterfactual_drawdown,
         "direction_correctness_rule": correctness_rule,
@@ -280,10 +301,10 @@ def build_due_outcome(
         instrument=assignment.instrument,
         horizon=horizon,
         observed_at=observed_at,
-        strategy_return=strategy_return,
+        strategy_return=counterfactual_selected_return,
         benchmark_return=benchmark_return,
         excess_return=excess_return,
-        max_drawdown=counterfactual_drawdown if enters_position else 0.0,
+        max_drawdown=counterfactual_drawdown if hypothetical_long else 0.0,
         transaction_cost=transaction_cost,
         slippage=slippage,
         direction_correct=direction_correct,
@@ -298,6 +319,47 @@ def build_due_outcome(
     return outcome, "ready"
 
 
+def attach_factual_execution(
+    outcome: LoopOutcomeEnvelope, *, plan_path: Path, plan_sha256: str,
+    fills_path: Path, fills_sha256: str,
+    review_context_path: Path | None = None, review_context_sha256: str | None = None,
+) -> LoopOutcomeEnvelope:
+    """Return a new artifact; never mutate a delivered Outcome or its research fields."""
+    trade_date = date.fromisoformat(str(outcome.evidence.get("decision_trading_date", "")))
+    summary = build_factual_execution_summary(
+        plan_path=plan_path, plan_sha256=plan_sha256, fills_path=fills_path,
+        fills_sha256=fills_sha256, trade_date=trade_date, as_of=outcome.observed_at,
+        review_context_path=review_context_path, review_context_sha256=review_context_sha256,
+    )
+    if outcome.evidence.get("strategy_sha256") != summary["strategy_sha256"]:
+        raise ValueError("Outcome and execution strategy hash mismatch or unavailable")
+    performance = summary.get("instruments", {}).get(outcome.instrument)
+    fills = [
+        item for item in summary["broker_evidence"]["fills"]
+        if item["symbol"] == outcome.instrument
+    ]
+    factual = {
+        **(performance or unavailable_execution()),
+        "trade_date": summary["trade_date"],
+        "strategy_sha256": summary["strategy_sha256"],
+        "plan_sha256": plan_sha256,
+        "fill_evidence_sha256": fills_sha256,
+        "review_context_sha256": review_context_sha256,
+        "fill_ids": [item["fill_id"] for item in fills],
+        "broker_evidence": summary["broker_evidence"],
+        "performance_kind": "factual_broker_execution",
+    }
+    if performance is None:
+        factual["reason"] = "instrument_execution_unavailable_or_incomplete"
+    evidence = {**outcome.evidence, "factual_execution": factual}
+    digest = envelope_sha256({"source_outcome_id": outcome.id, "evidence": evidence})
+    return LoopOutcomeEnvelope.model_validate({
+        **outcome.model_dump(mode="json"),
+        "id": f"quant_outcome_linked_{digest[:40]}",
+        "evidence": evidence,
+    })
+
+
 def sync_due_outcomes(
     *,
     client: LoopClient,
@@ -307,6 +369,8 @@ def sync_due_outcomes(
     observed_before: datetime,
     config: OutcomeReporterConfig,
     stage_only: bool = False,
+    execution_index_path: Path | None = None,
+    execution_index_sha256: str | None = None,
 ) -> OutcomeSyncSummary:
     if (
         observed_before.tzinfo is None
@@ -315,6 +379,7 @@ def sync_due_outcomes(
         raise ValueError("observed_before must be timezone-aware UTC")
     if config.approved_at_utc > observed_before:
         raise ValueError("Outcome cost-model approval cannot be in the future")
+    execution_inputs = load_execution_index(execution_index_path, execution_index_sha256)
     assignments = client.list_outcome_assignments(market_scope=config.market_scope)
     if any(item.market_scope != config.market_scope for item in assignments):
         raise ValueError("Loop returned an Outcome assignment outside configured scope")
@@ -346,6 +411,18 @@ def sync_due_outcomes(
                     )
                 )
                 continue
+            if execution_index_path is not None:
+                matches = [entry for entry in execution_inputs
+                           if entry.trade_date == assignment.decision_trading_date
+                           and entry.strategy_sha256 == assignment.strategy_sha256]
+                if not matches:
+                    pending.append(PendingOutcome(
+                        decision_event_id=assignment.decision_event_id,
+                        strategy_revision_id=assignment.strategy_revision_id,
+                        horizon=horizon, reason="execution_date_strategy_evidence_unavailable",
+                    ))
+                    continue
+                outcome = attach_factual_execution(outcome, **matches[0].attachment_args())
             payload = outcome.model_dump(mode="json")
             item = outbox.stage(
                 event_id=outcome.id,

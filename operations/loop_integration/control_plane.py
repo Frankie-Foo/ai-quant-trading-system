@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 from pydantic import Field, field_validator, model_validator
 
@@ -45,7 +45,7 @@ class ControlArtifactSpec(FrozenModel):
     payload: dict[str, Any]
 
     @model_validator(mode="after")
-    def validate_payload(self):
+    def validate_payload(self) -> Self:
         if not str(self.payload.get("id") or "").strip():
             raise ValueError("control artifact requires a deterministic id")
         if self.payload.get("market_scope") != "US-equity":
@@ -68,7 +68,7 @@ class ControlArtifactSpec(FrozenModel):
         return config_sha256(self.payload)
 
     def request_payload(self) -> dict[str, Any]:
-        payload = _hash_ready(self.payload)
+        payload: dict[str, Any] = _hash_ready(self.payload)
         payload["metadata"]["config_sha256"] = self.expected_sha256
         return payload
 
@@ -84,7 +84,9 @@ class LoopControlPlaneManifest(FrozenModel):
 
     @field_validator("artifacts")
     @classmethod
-    def unique_types(cls, value: tuple[ControlArtifactSpec, ...]):
+    def unique_types(
+        cls, value: tuple[ControlArtifactSpec, ...],
+    ) -> tuple[ControlArtifactSpec, ...]:
         if {item.artifact_type for item in value} != set(ARTIFACT_ENDPOINTS):
             raise ValueError("manifest requires one Signal, FSM and Golden contract")
         return value

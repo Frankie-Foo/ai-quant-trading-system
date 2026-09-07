@@ -21,6 +21,12 @@ from .contracts import (
     ReviewProvenance,
     StrategyIdentity,
 )
+from .execution_summary import (
+    RiskEvidenceUnavailable,
+    build_factual_execution_summary,
+    load_effective_plan,
+    unavailable_execution,
+)
 
 
 def _finite(value: object) -> float | None:
@@ -79,12 +85,22 @@ def build_review_envelope(
     cfg: Config,
     active_policy: StrategyPolicy,
     strategy_id: str = "modern-h15",
-    strategy_version: str = "modern-h15-v1",
+    strategy_version: str | None = None,
     market_scope: str = "US-equity",
     market_regime: str = "UNKNOWN",
     execution_summary: dict[str, Any] | None = None,
+    effective_plan_path: Path | None = None,
+    effective_plan_sha256: str | None = None,
+    fill_evidence_path: Path | None = None,
+    fill_evidence_sha256: str | None = None,
+    review_context_path: Path | None = None,
+    review_context_sha256: str | None = None,
     synthetic: bool = False,
 ) -> QuantReviewEnvelope:
+    # Generic kernel configuration is not evidence of the effective modern plan.
+    del cfg
+    if execution_summary is not None:
+        raise ValueError("execution summary requires frozen plan and confirmed fill evidence")
     opportunity_snapshot.assert_usable()
     if sha256_file(opportunity_path) != opportunity_snapshot.content_sha256:
         raise ValueError("opportunity review hash mismatch")
@@ -117,6 +133,86 @@ def build_review_envelope(
     if not isinstance(cutoff, datetime) or cutoff.tzinfo is None:
         raise ValueError("selection cutoff must be timezone-aware")
     as_of = opportunity_snapshot.asof_utc
+    risk_policy: dict[str, Any] = {
+        "status": "unavailable",
+        "reason": "effective_modern_plan_not_supplied",
+        "submission_allowed": False,
+    }
+    frozen_pool: dict[str, Any] = {
+        "status": "unavailable", "count": None, "candidates": None,
+        "semantics": "complete_frozen_morning_pool",
+    }
+    factual_execution = {"orders_authorized": False, **unavailable_execution()}
+    if (effective_plan_path is None) != (effective_plan_sha256 is None):
+        raise ValueError("effective plan path and pinned hash must be supplied together")
+    if effective_plan_path is None and (
+        fill_evidence_path or fill_evidence_sha256 or review_context_path or review_context_sha256
+    ):
+        raise ValueError("broker fill evidence requires a frozen effective plan")
+    plan = None
+    if effective_plan_path is not None and effective_plan_sha256 is not None:
+        try:
+            plan = load_effective_plan(
+                effective_plan_path, expected_sha256=effective_plan_sha256,
+                trade_date=trade_date, as_of=as_of, require_native_evidence=True,
+                review_context_path=review_context_path,
+                review_context_sha256=review_context_sha256,
+            )
+        except RiskEvidenceUnavailable as exc:
+            risk_policy["reason"] = str(exc)
+    if plan is not None and effective_plan_path is not None and effective_plan_sha256 is not None:
+        if (
+            plan.strategy.strategy_id != strategy_id
+            or (strategy_version is not None and plan.strategy.strategy_version != strategy_version)
+            or plan.strategy.active_policy_hash != active_policy.policy_hash
+            or plan.selection_cutoff_utc != cutoff
+        ):
+            raise ValueError("effective plan strategy/config/selection cutoff mismatch")
+        strategy_version = plan.strategy.strategy_version
+        risk = plan.strategy.risk_policy
+        risk_policy = {
+            "status": "available",
+            "submission_allowed": True,
+            "position_limits": {"risk_per_trade_fraction": risk.symbol_risk_fraction},
+            "stop_loss": {
+                "type": "maximum_all_in_stop",
+                "threshold_pct": risk.maximum_all_in_stop_pct * 100,
+            },
+            "exit_conditions": [
+                f"no_new_entry_et={risk.new_entry_cutoff_et}", f"flatten_et={risk.flatten_et}",
+            ],
+            "attempt_weights": list(risk.attempt_weights),
+            "liquidity_constraints": {
+                "maximum_entry_relative_spread": plan.strategy.parameters[
+                    "maximum_entry_relative_spread"
+                ],
+            },
+            "evidence": {
+                "source": str(effective_plan_path),
+                "plan_sha256": effective_plan_sha256,
+                "strategy_sha256": plan.strategy_sha256,
+                "review_context_sha256": review_context_sha256,
+                "authorization_strategy_version": plan.authorization_strategy_version,
+                "source_snapshot_ids": list(plan.source_snapshot_ids),
+                "effective_at": plan.effective_at_utc.isoformat(),
+                "available_at": plan.available_at_utc.isoformat(),
+            },
+        }
+        if plan.candidates is not None:
+            frozen_pool.update(
+                status="available", count=len(plan.candidates),
+                candidates=[item.model_dump(mode="json") for item in plan.candidates],
+                source_snapshot_ids=list(plan.source_snapshot_ids),
+                plan_sha256=effective_plan_sha256,
+                available_at=plan.candidate_pool_available_at_utc.isoformat()
+                if plan.candidate_pool_available_at_utc is not None else None,
+            )
+        factual_execution = build_factual_execution_summary(
+            plan_path=effective_plan_path, plan_sha256=effective_plan_sha256,
+            trade_date=trade_date, as_of=as_of,
+            fills_path=fill_evidence_path, fills_sha256=fill_evidence_sha256,
+            review_context_path=review_context_path, review_context_sha256=review_context_sha256,
+        )
     source_ids = tuple(dict.fromkeys((*artifact_ids, opportunity_snapshot.dataset_id)))
     decisions: list[ReviewDecision] = []
     for rank, row in enumerate(top.iter_rows(named=True), start=1):
@@ -149,8 +245,7 @@ def build_review_envelope(
                 risk_controls=(
                     "LONG_ONLY",
                     "PAPER_ONLY",
-                    f"daily_loss_limit={cfg.guardrails.daily_loss_limit}",
-                    f"max_gross_exposure={cfg.max_gross_exposure}",
+                    f"effective_modern_risk={risk_policy['status']}",
                 ),
                 invalidation_conditions=(
                     "source_snapshot_hash_mismatch",
@@ -168,58 +263,21 @@ def build_review_envelope(
         for raw in frame.slice(10)["close_return"].to_list()
         if (value := _finite(raw)) is not None
     ]
-    top_atr = sorted(
-        value
-        for raw in top["atr_pct"].to_list()
-        if (value := _finite(raw)) is not None and value > 0
-    )
-    if not top_atr:
-        raise ValueError("Top10 ATR evidence is unavailable")
-    median_atr_pct = top_atr[len(top_atr) // 2]
-    stop_threshold_pct = median_atr_pct * cfg.exits.k_sl * 100
     config_hash = hashlib.sha256((project_root / "config.yaml").read_bytes()).hexdigest()
-    risk_policy = {
-        "position_limits": {
-            "risk_per_trade_fraction": cfg.risk_per_trade,
-            "max_concurrent": float(cfg.max_concurrent),
-            "max_gross_exposure_fraction": cfg.max_gross_exposure,
-        },
-        "stop_loss": {
-            "type": "top10_median_atr_multiple",
-            "threshold_pct": stop_threshold_pct,
-            "reference": "median(top10.atr_pct) * kernel.exits.k_sl",
-        },
-        "exit_conditions": [
-            f"time_stop_et={cfg.exits.time_stop_et}",
-            "deterministic_stop_loss",
-        ],
-        "invalidation_conditions": [
-            "market_data_unhealthy",
-            "point_in_time_guard_failed",
-            "snapshot_quarantined",
-        ],
-        "blocking_conditions": ["kill_switch", "not_paper", "stale_sip_quote"],
-        "reentry_conditions": ["local_strategy_policy_only"],
-        "risk_budget": {"daily_loss_limit_fraction": cfg.guardrails.daily_loss_limit},
-        "liquidity_constraints": {"participation_cap": cfg.participation_cap},
-        "evidence": {
-            "source": "ai-quant-trading-system/config.yaml",
-            "effective_at": cutoff.isoformat(),
-            "available_at": as_of.isoformat(),
-            "config_sha256": config_hash,
-        },
-    }
     return QuantReviewEnvelope(
         event_id=(
             f"quant-review:{market_scope}:{trade_date.isoformat()}:"
-            f"{strategy_id}:{active_policy.policy_hash[:16]}"
+            f"{strategy_id}:{active_policy.policy_hash[:16]}:evidence-v2:"
+            f"{(effective_plan_sha256 or 'unavailable')[:16]}"
+            f":{(fill_evidence_sha256 or 'unavailable')[:16]}"
+            f":{(review_context_sha256 or 'none')[:16]}"
         ),
         trading_date=trade_date,
         market_scope=market_scope,
         as_of=as_of,
         strategy=StrategyIdentity(
             strategy_id=strategy_id,
-            strategy_version=strategy_version,
+            strategy_version=strategy_version or "unavailable",
             active_policy_version=active_policy.version,
             active_policy_hash=active_policy.policy_hash,
         ),
@@ -233,9 +291,19 @@ def build_review_envelope(
             cost_model_version="kernel.quote_costs.v1",
             created_at_utc=as_of,
         ),
-        market_context={"regime": market_regime},
+        market_context={
+            "regime": market_regime,
+            "frozen_candidate_pool": frozen_pool,
+            "post_close_winners": {
+                "status": "available",
+                "count": frame.height,
+                "symbols": frame["symbol"].to_list(),
+                "source_snapshot_id": opportunity_snapshot.dataset_id,
+                "semantics": "after_close_opportunity_ranking_not_morning_candidate_pool",
+            },
+        },
         top10_decisions=tuple(decisions),
-        execution_summary={"orders_authorized": False, **(execution_summary or {})},
+        execution_summary=factual_execution,
         risk_policy=risk_policy,
         metrics={
             "top10_close_return_sum": sum(top_returns),
