@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import polars as pl
+import pytest
 
 from research.modern_momentum import (
     ModernMomentumConfig,
@@ -103,10 +104,26 @@ def test_modern_momentum_allows_entry_spread_at_twenty_five_basis_points() -> No
     assert trade is not None
 
 
-def test_modern_momentum_reentry_waits_for_three_completed_five_minute_bars() -> None:
+@pytest.mark.parametrize(
+    "spread,cutoff,allowed",
+    [
+        (0.001, 330, True),
+        (0.0025, 330, True),
+        (0.0026, 330, False),
+        (0.001, 95, False),
+        (0.001, 94, False),
+    ],
+)
+@pytest.mark.parametrize("target_r", [3.0, 1_000.0])
+def test_modern_momentum_reentry_waits_for_three_completed_five_minute_bars(
+    spread: float,
+    cutoff: int,
+    allowed: bool,
+    target_r: float,
+) -> None:
     opened = datetime(2026, 8, 18, 13, 30, tzinfo=UTC)
     rows: list[dict[str, object]] = []
-    for minute in range(100):
+    for minute in range(390):
         close = 30.0
         low = 29.95
         high = 30.05
@@ -153,11 +170,18 @@ def test_modern_momentum_reentry_waits_for_three_completed_five_minute_bars() ->
         pl.DataFrame(rows),
         session_open_utc=opened,
         first_trade=first_trade,
-        config=ModernMomentumConfig(),
-        relative_spread=0.001,
+        config=ModernMomentumConfig(signal_cutoff_minutes=cutoff, target_r=target_r),
+        relative_spread=spread,
     )
 
+    if not allowed:
+        assert trade is None
+        return
     assert trade is not None
     assert trade.entry_ts_utc == opened + timedelta(minutes=95)
-    assert trade.exit_reason == "target_3r"
-    assert trade.all_in_stop_pct <= 0.02
+    if target_r == 3.0:
+        assert trade.exit_reason == "target_3r"
+    else:
+        assert trade.exit_reason == "time_exit"
+        assert trade.exit_ts_utc == opened + timedelta(minutes=380)
+    assert trade.all_in_stop_pct <= 0.02 + 1e-12

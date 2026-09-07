@@ -15,9 +15,10 @@ class PushPort(Protocol):
 
 
 class RuntimeAlertManager:
-    def __init__(self, path: Path, *, push: PushPort):
+    def __init__(self, path: Path, *, push: PushPort, defer_delivery: bool = False):
         self.path = path
         self.push = push
+        self.defer_delivery = defer_delivery
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript(
@@ -34,10 +35,21 @@ class RuntimeAlertManager:
                     event_key TEXT PRIMARY KEY,
                     status TEXT NOT NULL,
                     message_id TEXT,
+                    message_body TEXT NOT NULL DEFAULT '',
                     updated_at_utc TEXT NOT NULL
                 );
                 """
             )
+            connection.execute("BEGIN IMMEDIATE")
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(runtime_alert_delivery)")
+            }
+            if "message_body" not in columns:
+                connection.execute(
+                    "ALTER TABLE runtime_alert_delivery "
+                    "ADD COLUMN message_body TEXT NOT NULL DEFAULT ''"
+                )
+            connection.commit()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
@@ -146,6 +158,33 @@ class RuntimeAlertManager:
             ).fetchone()
         return row is not None and bool(row[0])
 
+    def flush_pending(self) -> int:
+        """Deliver a pending snapshot; call only from the caller's background worker.
+
+        Return the number sent. Delivery errors propagate and leave the event in
+        ``sending``: its outcome is ambiguous and it must not be retried automatically.
+        No SQLite transaction is held during a network call.
+        """
+        with self._connect() as connection:
+            pending = connection.execute(
+                "SELECT event_key, message_body FROM runtime_alert_delivery "
+                "WHERE status='pending' ORDER BY rowid"
+            ).fetchall()
+        sent = 0
+        for event_key, body in pending:
+            now = datetime.now(UTC)
+            with self._connect() as connection:
+                claimed = connection.execute(
+                    "UPDATE runtime_alert_delivery SET status='sending', updated_at_utc=? "
+                    "WHERE event_key=? AND status='pending'",
+                    (now.isoformat(), event_key),
+                ).rowcount
+            if claimed != 1:
+                continue
+            self._deliver(event_key, body, now)
+            sent += 1
+        return sent
+
     def _send_once(
         self,
         event_key: str,
@@ -158,13 +197,24 @@ class RuntimeAlertManager:
                 connection.execute(
                     """
                     INSERT INTO runtime_alert_delivery (
-                        event_key, status, updated_at_utc
-                    ) VALUES (?, 'sending', ?)
+                        event_key, status, message_body, updated_at_utc
+                    ) VALUES (?, ?, ?, ?)
                     """,
-                    (event_key, observed_at_utc.isoformat()),
+                    (
+                        event_key,
+                        "pending" if self.defer_delivery else "sending",
+                        body,
+                        observed_at_utc.isoformat(),
+                    ),
                 )
             except sqlite3.IntegrityError:
                 return
+        if self.defer_delivery:
+            return
+        self._deliver(event_key, body, observed_at_utc)
+
+    def _deliver(self, event_key: str, body: str, observed_at_utc: datetime) -> None:
+        _validate_utf8(body)
         message_id = self.push.push(body)
         if not message_id.strip():
             raise RuntimeError("runtime alert push returned no message ID")
