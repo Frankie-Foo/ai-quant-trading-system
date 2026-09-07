@@ -1,4 +1,4 @@
-"""Run today's modern H15 momentum strategy as a no-order forward shadow."""
+"""Observe today's current modern H15 signals without simulating fills or placing orders."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import time
+from dataclasses import asdict
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -13,15 +14,18 @@ import polars as pl
 from pydantic import SecretStr
 
 from data_plane.calendar import build_xnys_schedule
-from data_plane.providers.alpaca import fetch_bars
+from data_plane.providers.alpaca import fetch_bars, fetch_quotes
+from kernel.quote_costs import latest_nbbo_spread
 from operations.livermore_push import LivermorePushClient, configured_identity
 from operations.local_env import load_project_env, project_data_root
-from research.modern_momentum import ModernMomentumConfig, evaluate_modern_momentum
-from scripts.run_modern_momentum_backtest import _entry_spread, _quote_spreads
+from research.modern_momentum import (
+    ModernMomentumConfig,
+    latest_modern_momentum_signal,
+    modern_strategy_manifest,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = "research.modern_momentum.forward_pool"
-RISK_USD = 1_000.0
 
 
 def _latest_pool(data_root: Path, trade_date: date) -> pl.DataFrame:
@@ -62,8 +66,9 @@ def main() -> None:
     pool = _latest_pool(data_root, args.trade_date)
     session = build_xnys_schedule(args.trade_date, args.trade_date).row(0, named=True)
     opened = session["market_open_utc"]
+    config = ModernMomentumConfig()
     start_at = opened + timedelta(minutes=26)
-    stop_at = opened + timedelta(minutes=377)
+    stop_at = opened + timedelta(minutes=config.liquidation_minutes)
     symbols = tuple(pool.get_column("symbol").to_list())
     if args.check:
         print(
@@ -74,6 +79,7 @@ def main() -> None:
                     "start_at_utc": start_at,
                     "stop_at_utc": stop_at,
                     "orders_enabled": False,
+                    "strategy_manifest": modern_strategy_manifest(config),
                 },
                 default=str,
             )
@@ -86,13 +92,13 @@ def main() -> None:
     state: dict[str, object] = {
         "trade_date": args.trade_date.isoformat(),
         "symbols": symbols,
-        "positions": {},
+        "mode": "signal_observation_only",
+        "strategy_manifest": modern_strategy_manifest(config),
         "events": [],
         "message_ids": [],
         "orders_enabled": False,
         "status": "waiting",
     }
-    config = ModernMomentumConfig()
     prior_closes = {
         str(row["symbol"]): float(row["price"])
         for row in pool.iter_rows(named=True)
@@ -102,8 +108,6 @@ def main() -> None:
         str(row["symbol"]): float(row["forward_market_cap"]) for row in pool.iter_rows(named=True)
     }
     rvols = {str(row["symbol"]): float(row["rvol"]) for row in pool.iter_rows(named=True)}
-    positions: dict[str, dict[str, object]] = {}
-    completed: set[str] = set()
     events: list[dict[str, object]] = []
     message_ids: list[str] = []
     last_minute: datetime | None = None
@@ -121,92 +125,48 @@ def main() -> None:
                 continue
             last_minute = complete_minute
             bars = fetch_bars(symbols, opened, complete_minute)
+            quotes = fetch_quotes(
+                symbols, now - timedelta(seconds=30), now + timedelta(microseconds=1)
+            )
             for symbol in symbols:
-                if symbol in completed:
-                    continue
                 symbol_bars = bars.filter(pl.col("symbol") == symbol)
                 if symbol_bars.is_empty() or symbol not in prior_closes:
                     continue
-                preliminary = evaluate_modern_momentum(
+                quote = latest_nbbo_spread(quotes, symbol=symbol, at_utc=now)
+                if quote is None:
+                    continue
+                signal = latest_modern_momentum_signal(
                     symbol_bars,
                     session_open_utc=opened,
                     prior_close=prior_closes[symbol],
                     market_cap=market_caps[symbol],
                     premarket_rvol=rvols[symbol],
                     config=config,
+                    asof_utc=now,
+                    relative_spread=quote.relative_spread,
                 )
-                if preliminary is None:
+                if signal is None:
                     continue
-                spread = _entry_spread(symbol, preliminary)
-                trade = evaluate_modern_momentum(
-                    symbol_bars,
-                    session_open_utc=opened,
-                    prior_close=prior_closes[symbol],
-                    market_cap=market_caps[symbol],
-                    premarket_rvol=rvols[symbol],
-                    config=config,
-                    relative_spread=spread,
-                )
-                if trade is None:
-                    continue
-                if symbol not in positions:
-                    shares = int(RISK_USD / (trade.entry_px * trade.all_in_stop_pct))
-                    positions[symbol] = {
-                        "entry_ts_utc": trade.entry_ts_utc,
-                        "entry_px": trade.entry_px,
-                        "shares": shares,
-                        "stop_level": trade.stop_level,
-                        "target_level": trade.target_level,
-                    }
-                    event = {
-                        "type": "shadow_buy",
-                        "symbol": symbol,
-                        "ts_utc": trade.entry_ts_utc,
-                        "price": trade.entry_px,
-                        "shares": shares,
-                    }
-                    events.append(event)
-                    body = (
-                        f"【现代H15动量｜影子买入】{symbol}\n"
-                        f"模拟价：${trade.entry_px:.2f}；股数：{shares}；"
-                        f"止损：${trade.stop_level:.2f}；3R目标：${trade.target_level:.2f}。\n"
-                        "仅前向影子模拟，未提交Alpaca订单。"
-                    )
-                    message_ids.append(client.push(body))
-                if trade.exit_reason == "data_end":
-                    continue
-                position = positions[symbol]
-                position_shares = position["shares"]
-                position_entry = position["entry_px"]
-                if not isinstance(position_shares, int) or not isinstance(
-                    position_entry, (int, float)
-                ):
-                    raise ValueError("shadow position state is invalid")
-                _, exit_spread, _ = _quote_spreads(symbol, trade)
-                raw_exit = trade.exit_px / (1 - spread / 2 - config.market_impact_pct)
-                exit_px = raw_exit * (1 - exit_spread / 2 - config.market_impact_pct)
-                pnl = position_shares * (exit_px - float(position_entry))
                 event = {
-                    "type": "shadow_sell",
+                    "type": "shadow_signal",
                     "symbol": symbol,
-                    "ts_utc": trade.exit_ts_utc,
-                    "price": exit_px,
-                    "pnl": pnl,
-                    "reason": trade.exit_reason,
+                    **asdict(signal),
+                    "observed_at_utc": now,
+                    "quote_provenance": quote.provenance,
+                    "entry_relative_spread": quote.relative_spread,
+                    "orders_enabled": False,
                 }
                 events.append(event)
                 body = (
-                    f"【现代H15动量｜影子卖出】{symbol}\n"
-                    f"模拟价：${exit_px:.2f}；盈亏：${pnl:,.2f}；原因：{trade.exit_reason}。\n"
-                    "仅前向影子模拟，未提交Alpaca订单。"
+                    f"【现代H15动量｜当前信号】{symbol}\n"
+                    f"1分钟收盘参考价：${signal.entry_reference:.2f}；"
+                    f"止损参考：${signal.stop_level:.2f}；"
+                    f"含成本止损比例：{signal.all_in_stop_pct:.2%}。\n"
+                    "仅前向信号观察，无成交或盈亏认定，未提交Alpaca订单。"
                 )
                 message_ids.append(client.push(body))
-                positions.pop(symbol)
-                completed.add(symbol)
             state.update(
                 {
-                    "positions": positions,
-                    "completed_symbols": sorted(completed),
                     "events": events,
                     "message_ids": message_ids,
                     "status": "running",

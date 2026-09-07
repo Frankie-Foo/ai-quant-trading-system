@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import subprocess
+import traceback
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 
 from operations.feishu_base import (
     FeishuBaseDuplicateError,
+    FeishuBaseError,
     FeishuBaseEventClient,
     FeishuBaseSettings,
     FeishuTableSettings,
@@ -189,3 +191,87 @@ def test_subprocess_json_payload_uses_utf8_file_for_windows_cli(
         "exists_during_call": True,
         "payload": {"运行ID": "事件-1"},
     }
+
+
+@pytest.mark.parametrize("output", [
+    '{"ok":false,"error":{"type":"rate_limit","code":99991400,"message":"SECRET"}}',
+    '{"ok":false,"error":{"type":"SECRET","code":"SECRET"}}',
+    'SECRET not-json',
+    '["SECRET"]',
+    '[' * 2000 + '"SECRET"' + ']' * 2000,
+], ids=["rate-limit", "hostile-fields", "not-json", "not-object", "deep-json"])
+def test_cli_failures_are_structured_bounded_and_do_not_leak_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output: str,
+) -> None:
+    calls = 0
+
+    def fail(command: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(command, 1, output, "SECRET stderr")
+
+    monkeypatch.setattr(subprocess, "run", fail)
+    client = FeishuBaseEventClient(_settings(tmp_path), sleep=lambda _: None)
+    with pytest.raises(FeishuBaseError) as caught:
+        client.check_access()
+    message = str(caught.value)
+    assert "type=" in message and "code=" in message and "exit_code=1" in message
+    assert "SECRET" not in "".join(traceback.format_exception(caught.value))
+    assert 1 <= calls <= 3
+    if "rate_limit" in output:
+        assert "type=rate_limit" in message and "code=99991400" in message
+
+
+def test_readonly_cli_timeout_retries_are_bounded_and_redacted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def timeout(command: Sequence[str], **kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        raise subprocess.TimeoutExpired([*command, "SECRET"], 45, "SECRET", "SECRET")
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+    client = FeishuBaseEventClient(_settings(tmp_path), sleep=lambda _: None)
+    with pytest.raises(FeishuBaseError) as caught:
+        client.check_access()
+    assert calls == 3
+    assert "type=timeout" in str(caught.value)
+    assert "SECRET" not in "".join(traceback.format_exception(caught.value))
+
+
+def test_timed_out_write_is_reconciled_by_readback_without_second_upsert(tmp_path: Path) -> None:
+    class AcceptedButTimedOut(FakeLark):
+        def __call__(self, command: Sequence[str]) -> Mapping[str, object]:
+            response = super().__call__(command)
+            if "+record-upsert" in command:
+                raise subprocess.TimeoutExpired(["SECRET"], 45, "SECRET")
+            return response
+
+    runner = AcceptedButTimedOut()
+    client = FeishuBaseEventClient(_settings(tmp_path), runner=runner, sleep=lambda _: None)
+    assert client.record_event(
+        InvestmentTable.TRADE, "event-1", {"操作": "买入", "数量": 1},
+    ) == "rec-created"
+    assert sum("+record-upsert" in command for command in runner.commands) == 1
+
+
+def test_timed_out_json_write_removes_temporary_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    runner = FakeLark()
+
+    def timeout(command: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "+record-list" in command:
+            return subprocess.CompletedProcess(command, 0, json.dumps(runner(command)), "")
+        raise subprocess.TimeoutExpired(["SECRET"], 45, "SECRET")
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+    client = FeishuBaseEventClient(_settings(tmp_path), sleep=lambda _: None)
+    with pytest.raises(FeishuBaseError) as caught:
+        client.record_event(InvestmentTable.TRADE, "event-1", {"操作": "买入", "数量": 1})
+    assert "type=timeout" in str(caught.value)
+    assert "SECRET" not in "".join(traceback.format_exception(caught.value))
+    assert list(tmp_path.glob(".lark-json-*")) == []

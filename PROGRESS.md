@@ -1,5 +1,81 @@
 # Progress
 
+## M94 Deterministic Loop review provenance - 2026-09-05
+
+Status: implemented locally; Loop submission remains blocked pending machine-local binding,
+Active Policy and runtime credentials.
+
+- Daily-review provenance now uses immutable accepted-snapshot `as_of` time rather than wall-clock build time, preventing a repeated same-event submission from colliding with different payload content.
+- Verification: Python 3.12 focused `tests/test_loop_integration.py` passed (14 passed); Ruff and `git diff --check` passed.
+
+## M93 Loop daily-review metric and knowledge lineage v6 - 2026-09-03
+
+Status: producer changes are implemented locally; deploy Loop v6 before switching
+the producer binding.
+
+- Replaced ambiguous `top10_pnl`, `non_top10_pnl` and `ab_hit_rate` output with
+  explicit close-return aggregate/rate fields plus sample counts. The Task now
+  declares decimal-return aggregation and explicitly states that portfolio PnL is
+  unavailable when no fills, weights and costs exist.
+- Updated the pinned Workflow binding to `quant_daily_review` v6. Historical v5
+  payloads remain a Loop compatibility concern and are not rewritten by this repo.
+- The companion Loop runtime links generated ranking/regime IDs into the daily
+  review and does not turn `UNKNOWN` into a high-confidence market regime.
+- Verification: compileall, Ruff and `git diff --check` passed for the changed
+  producer files. The focused pytest remains environment-blocked because the local
+  virtualenv has no test/runtime dependencies and the isolated Polars runtime
+  download did not complete; this is not recorded as a test pass.
+
+## M92 Loop review event self-transition contract - 2026-09-03
+
+Status: producer contract and regression coverage updated locally; production retry requires the matching Loop backend deployment.
+
+- Kept the immutable `review_completed` contract semantics as
+  `OBSERVING -> OBSERVING`; a completed daily review records an auditable event and
+  does not fabricate a trading-state promotion.
+- Added payload regression coverage for the contract ID, review event, frozen
+  timestamps and no-order guard; documented Loop's `state_changed=false` and
+  `transition_kind=self_transition` trace contract.
+- No Broker/OMS path, Active Policy, production parameter or versioned v1 control
+  manifest was changed.
+- Verification: Python 3.12 compileall, Ruff 0.15.22 and `git diff --check`
+  passed. The focused pytest run is environment-blocked: the repository `.venv`
+  has no pytest, and an isolated install timed out downloading
+  `polars-runtime-32==1.42.1`; this is not recorded as a test pass.
+
+## M91 Loop contract bootstrap and fail-closed delivery - 2026-09-03
+
+Status: implemented locally; production contract initialization remains an explicit operator action.
+
+- Added versioned `US-equity` Signal/FSM/Golden manifest and an explicit idempotent initializer.
+- Daily review now validates immutable contract identity, type, status, market, PAPER_ONLY flags,
+  config hash and availability before creating any remote Task.
+- Added `blocked_precondition` and `audit_only_backfill` Outbox terminal states; historical reviews
+  cannot enter strategy-governance samples.
+- HTTP success is no longer treated as business success: only COMPLETED Runs are delivered, while
+  FAILED Runs retain Task/Run IDs, failed node and error code.
+- Added regression coverage for missing contracts, temporal boundaries, HTTP 200 + FAILED,
+  idempotent initialization, full completion, active-policy immutability and zero Broker/OMS calls.
+
+## M90 Loop Platform governed daily-review integration - 2026-09-02
+
+Status: implemented locally; external Loop delivery and Paper activation remain disabled.
+
+- Added a provenance-bearing `ai_quant.loop_daily_review.v1` contract that maps the
+  accepted postmarket opportunity cohort to Loop `quant_daily_review` v5 without
+  expanding the six-symbol execution pool. Missing minute paths remain unavailable.
+- Added an idempotent WAL/FULL SQLite Outbox, Task/Run client, delayed 1d/5d/20d
+  Outcome contract, and optional non-blocking postmarket handoff.
+- Added read-only policy-candidate consumption. Only allowlisted `universe.min_rvol`
+  can become a local Shadow challenger; trading-policy changes, order authorization,
+  production eligibility and unsupported parameters fail closed.
+- Loop can never write the active policy or call a Broker. Existing hash-confirmed
+  human approval, same-pool Shadow evidence and rollback remain authoritative.
+- Verification: compileall and Ruff passed; strict Mypy passed for the ten touched
+  Python source files using the available Loop environment; a generated Task passed
+  Loop v5's real input-schema validator. Full pytest was blocked because this checkout
+  had no project environment and dependency downloads did not complete.
+
 ## Feishu investment flywheel repair - 2026-08-07
 
 Status: implemented and verified on the enterprise branch.
@@ -2098,3 +2174,143 @@ Status: installed for Alpaca Paper only; real trading remains forbidden.
   capacity-ranking rejection reasons. Independent review found no remaining
   Critical/Important issues. Full pytest passed `745` tests; Ruff, strict Mypy across
   `411` files and compileall passed.
+
+## M90 2026-09-04 governed delayed Outcome v2
+
+- Unified delayed Outcome governance lineage under `evidence`; legacy v1 metadata is
+  normalized only when non-conflicting, while v2 rejects misplaced or inconsistent
+  lineage.
+- Added Loop-provided revision/event assignments and a deterministic 1d/5d/20d XNYS
+  reporter. It verifies accepted snapshot hashes, never fills missing/halted bars,
+  requires an explicitly approved benchmark/cost model, and persists submissions in
+  the existing idempotent Outbox.
+- Postmarket integration is independently disabled by default and records zero orders.
+  Loop or data failures remain pending without changing the authoritative local review.
+- Verification: targeted Outcome and scheduler tests passed `7`; Ruff and compileall
+  passed. The full suite reached `758` passes; `30` unrelated tests remain blocked by
+  the intentionally absent local `runs/strategy/active.json`, so no active policy was
+  fabricated to make those tests pass.
+
+## M90 2026-09-07 review remediation in isolated branches
+
+Status: offline implementation and verification; no production activation.
+
+- Runtime branch `codex/review-fixes-20260907` starts at `7a6feec`; separate Loop
+  branch `codex/loop-review-fixes-20260907` starts at `990f896`. Existing production
+  changes, task definitions, credentials, freeze state and historical artifacts
+  were not modified. No broker requests, Base writes, notifications or Loop uploads
+  were performed against external services during this repair.
+- Split publication success from Paper handoff/monitoring; preserve receipts and
+  same-day authorization on recovery. Feishu diagnostics are redacted and bounded;
+  ambiguous delivery is not blindly resent. A per-symbol funding/risk refusal no
+  longer becomes a global runtime failure. The $100 smoke release cap remains
+  mandatory at both launcher and direct Paper entrypoints.
+- Reconcile actual entry/exit quantities, partial fills, cancellation races and
+  terminal states. Preserve live exit orders; persist bounded residual-exit retry
+  IDs; never replay an old unsubmitted buy. Keep protection intact on inconsistent
+  inventory. Persist cumulative fill observations through restart and distinguish
+  them explicitly from incremental executions.
+- Added explicit, exit-only, prior-day recovery in an isolated ledger. Verify all
+  imported sources, order identities and filled inventory before broker writes;
+  refuse live historical leases and unknown exposure. Recovery does not authorize
+  new entries or auto-unfreeze. Network notification delivery runs outside the
+  broker-management loop, retaining durable delivery state and real receipts.
+- Separated current completed-bar signals from historical trade simulation and
+  actual-position exits. The modern manifest records effective parameters/hash;
+  legacy RVOL policy is lineage, not a claim that Modern H15 uses its parameters.
+  Mismatched approved manifest blocks entries while retaining protective management.
+  First/reentry eligibility share the 15:00 ET cutoff and 0.25% spread ceiling.
+- Read-only audit invalidated the existing 168-attempt cost-filtered backtest for
+  the current strategy: three late reentries, one over-limit spread, and 17 old
+  time exits requiring replay. No corrected performance or new blind-test return
+  is claimed. Full hash and acceptance boundaries are in
+  `docs/REVIEW_REMEDIATION_2026-09-07.md`.
+- Loop now distinguishes frozen morning candidates, post-close opportunity ranks,
+  market-counterfactual outcomes and confirmed execution performance. Native
+  manifest/risk evidence must agree with hash-pinned context. Unknown fees remain
+  unknown; missing fills cannot become realized PnL. Production evidence export,
+  fill adapters, scheduled factual Outcome joins and remote compatibility remain
+  unimplemented/unverified; these are not covered by local unit-test success.
+- Final verification: runtime full pytest passed `911` tests in `123.74s`; Ruff
+  passed across the repository; strict mypy passed across `444` files; compileall
+  and `git diff --check` passed. Loop full pytest passed `826` tests in `46.09s`,
+  with Ruff and strict mypy for its entire integration directory plus related
+  scripts/tests (`13` files); compileall passed. Three pre-existing
+  `control_plane.py` mypy findings were fixed with type annotations only.
+- Independent review regressions additionally cover blocked notification delivery,
+  uncertain position responses, partial fill corrections, previously imported
+  recovery states, bound broker identities and child-order ownership. Caller-supplied
+  verified entry parents now prove independently returned protection children at
+  both ordinary startup gates without accepting foreign orders. Expired leases
+  cannot replace a still-live monitor; monitor supervision extends to session close
+  without changing the new-entry cutoff. Missing recovery authorization preserves
+  the original failure instead of retrying after its execution window.
+- Release and research gates remain: review/integrate the branches, explicitly
+  approve bounded Paper smoke acceptance, then validate corrected costs and signal
+  behavior on new time windows. The 09:35 exclusion/afternoon watch-pool design is
+  not loosened without a same-pool causal comparison. No commit or push this turn.
+
+## M91 — Owner-approved Paper 200,000 USD release preparation (2026-09-07)
+
+- The owner explicitly approved replacing the USD 100 smoke ceiling with a
+  USD 200,000 aggregate Paper notional ceiling. The effective ceiling is still
+  bounded by account equity; holdings, active buy remainders and unresolved
+  intents consume it. Account buying power does not authorize leverage.
+- Rounded entry prices are checked against the 0.25% slippage ceiling and the
+  rounded all-in 2% stop budget. A final pre-POST callback revalidates time,
+  quote freshness and safety gates after the client-order-id lookup. Known
+  pre-POST rejections are distinct from ambiguous submission failures.
+- The local first-wave scheduler is gated until 21:00 Asia/Shanghai, matching
+  permission for the supplemental SIP credential file. XNYS session gates and
+  point-in-time data cutoffs remain intact. No synthetic market facts are used.
+- Content-addressed startup evidence records account identity when available,
+  broker positions/orders, observation times and plan/confirmation hashes.
+  It does not declare opening inventory flat or daily reconciliation complete.
+- Read-only external preflight found the Paper account active and flat, with
+  equity USD 100,574.93; dedicated Feishu table reads, the configured Livermore
+  channel and three US-equity Loop control contracts were reachable. The primary
+  SIP credential returned HTTP 403. The supplemental credential was not loaded
+  before 21:00. These are connection checks, not fill acceptance.
+- Before-deployment snapshots preserve the four Windows task XML definitions
+  and all three existing dirty files in the former production checkout.
+  Production tasks have not yet been switched at this preparation milestone.
+- Real 2026-09-04 accepted review data passed local stage-only construction with
+  risk status unavailable because native plan evidence is missing. It was not
+  submitted to Loop and no historical authorization was manufactured.
+- The final merged release, independent review, CI and deployment receipts are
+  separate gates. Earlier runtime 971-test and 27-test broker/startup runs are
+  intermediate evidence only; additional rejection-recovery changes require
+  fresh final verification. Dependency audit reported no known vulnerabilities.
+
+## M92 — Integrated release candidate verification (2026-09-07)
+
+- Integrated owner/main baseline, hardening, Loop v6, runtime repair `5138693`
+  and Loop evidence repair `5c0b053` into one release candidate. The sole merge
+  conflict was append-only progress history; both histories were retained.
+- Final integrated Python 3.12 run: **1102 passed in 78.40s**. Whole-repository
+  Ruff passed; strict mypy passed **459 source files**; compileall passed.
+  Electron tests **33 passed**, UI tests **12 passed**, Vite production build
+  passed. `pip-audit` reported no known vulnerabilities. No credentials matched
+  the staged-tree secret-pattern check; local environment files were not staged.
+- Independent review closed final-price rounding, post-lookup stale quotes,
+  known-pre-POST rollback and mixed historical recovery defects. A local
+  `aborted` intent is not a broker order status; bound/ambiguous orders retain
+  fail-closed handling. Startup evidence failures block entries, not protection.
+- Native daily Loop discovery now freezes the ledger through SQLite backup,
+  verifies startup identity, fetches Paper account activities and owned orders,
+  reconciles final inventory and retains historical execution indexes. Scheduled
+  delivery checks business receipts and retries independently of local review.
+  Missing plans, unowned activity, adjustments and incomplete broker evidence
+  remain blocked. Fees are not fabricated; unknown net PnL stays unavailable.
+- Four existing Codex fallback automations were found pointing to old worktrees.
+  Their definitions were backed up; deployment must move their prompts to the
+  same released scheduler, preserving Terra models and the existing schedules.
+- GitHub CI, main merge, task cutover, authorized evening SIP check and the next
+  real session's fill-to-Loop acceptance remain separate release gates at this
+  candidate checkpoint. No real trading is authorized or enabled.
+- First GitHub run passed tests, Ruff, dependency audit and client checks but
+  found two Linux mypy errors in the Windows liveness branch. Reproduced with
+  `mypy --platform linux --no-incremental scripts/run_modern_funnel_stage.py`.
+  Replacing its runtime platform guard with the type-checker-recognized
+  `sys.platform == "win32"` passed both Linux and Windows mypy targets; all
+  **41** funnel-stage regression tests passed. No type-ignore was introduced.

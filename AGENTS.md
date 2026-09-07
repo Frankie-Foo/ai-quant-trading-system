@@ -29,8 +29,10 @@
 17. Never read or write a disconnected legacy Feishu Base. The Investment Base uses
     four explicit, distinct table IDs and stores transitions, not polling ticks.
 18. Paper is frozen by default. Unfreeze requires owner confirmation and complete
-    reconciliation. This release enforces a notional cap no greater than $100; raising
-    it requires a separate reviewed release and owner approval.
+    reconciliation. The 2026-09-07 owner-approved release allows at most $200,000
+    aggregate Paper notional, further capped by account equity and remaining risk.
+    Existing positions and pending buys consume this cap; it is not a leverage target.
+    Raising it again requires a separate reviewed release and owner approval.
 
 ## Intraday monitoring operating order
 

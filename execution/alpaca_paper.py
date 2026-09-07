@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
@@ -27,6 +28,8 @@ class FrozenModel(BaseModel):
 
 
 class PaperAccount(FrozenModel):
+    id: str | None = None
+    currency: str | None = None
     status: str
     account_blocked: bool
     trading_blocked: bool
@@ -57,8 +60,10 @@ class BrokerOrder(FrozenModel):
     filled_qty: str
     status: str
     filled_avg_price: str | None = None
+    filled_at: datetime | None = None
     side: str | None = None
     order_type: str | None = Field(default=None, alias="type")
+    limit_price: str | None = None
     legs: tuple[BrokerOrder, ...] = ()
 
     @field_validator("legs", mode="before")
@@ -213,7 +218,13 @@ def build_protected_entry(
         raise ValueError("all-in stop exceeds 2%")
     limit_price = _price_text(quote.ask, rounding=ROUND_CEILING)
     stop_price = _price_text(structural_stop, rounding=ROUND_FLOOR)
-    target = quote.ask + target_r * (quote.ask - structural_stop)
+    rounded_entry, rounded_stop = Decimal(limit_price), Decimal(stop_price)
+    if rounded_entry > signal_reference * (Decimal(1) + maximum_spread_or_slippage):
+        raise ValueError(f"rounded limit slippage exceeds {spread_limit}")
+    rounded_risk = (rounded_entry - rounded_stop) / rounded_entry + stop_slippage_reserve
+    if rounded_stop <= 0 or rounded_risk > maximum_all_in_stop:
+        raise ValueError("rounded all-in stop exceeds 2%")
+    target = rounded_entry + target_r * (rounded_entry - rounded_stop)
     target_price = _price_text(target, rounding=ROUND_CEILING)
     return ProtectedPaperEntryRequest(
         client_order_id=client_order_id,
@@ -381,9 +392,13 @@ class CloudPaperBroker:
     def submit_protected_entry_idempotent(
         self,
         request: ProtectedPaperEntryRequest,
+        *,
+        before_submit: Callable[[], None] | None = None,
     ) -> BrokerOrder:
         if not self.writes_enabled:
             raise BrokerWritesDisabledError("paper broker writes are disabled")
+        if before_submit is not None:
+            before_submit()
         payload = self._request(
             "POST",
             f"/{PLATFORM_API_VERSION}/paper/orders",
@@ -535,10 +550,13 @@ class DirectAlpacaPaperBroker:
     def submit_protected_entry_idempotent(
         self,
         request: ProtectedPaperEntryRequest,
+        *,
+        before_submit: Callable[[], None] | None = None,
     ) -> BrokerOrder:
         return self._submit_idempotent(
             client_order_id=request.client_order_id,
             payload=request.broker_payload(),
+            before_submit=before_submit,
         )
 
     def submit_close_order_idempotent(
@@ -573,11 +591,15 @@ class DirectAlpacaPaperBroker:
         *,
         client_order_id: str,
         payload: dict[str, object],
+        before_submit: Callable[[], None] | None = None,
     ) -> BrokerOrder:
         self._require_writes_enabled()
         existing = self.get_order_by_client_id(client_order_id)
         if existing is not None:
             return existing
+        if before_submit is not None:
+            before_submit()
+        self._require_writes_enabled()
         response = self._request_raw(
             "POST",
             "/v2/orders",

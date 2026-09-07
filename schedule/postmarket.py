@@ -20,11 +20,11 @@ from operations.feishu_investment_events import record_postmarket_review
 from operations.local_env import load_project_env, project_data_root
 from schedule.child_process import run_child
 from schedule.runtime import JsonEventLogger, LockUnavailableError, ProcessLock
-from schedule.state import JobLedger
+from schedule.state import JobLedger, JobStatus
 
 ROOT = Path(__file__).resolve().parents[1]
 JOB_NAME = "postmarket_review"
-JOB_VERSION = "postmarket_review.v9"
+JOB_VERSION = "postmarket_review.v10"
 
 
 def _truthy(value: str | None) -> bool:
@@ -159,6 +159,207 @@ def _run_module(
         elapsed_ms=result.elapsed_ms,
     )
     return result.stdout
+
+
+def _sync_loop_review(
+    *,
+    trade_date: date,
+    data_root: Path,
+    artifacts: tuple[str, ...],
+    logger: JsonEventLogger,
+    evidence_args: list[str] | None = None,
+) -> bool:
+    """Best-effort slow-loop handoff; local review success remains authoritative."""
+
+    if not _truthy(os.environ.get("AI_QUANT_LOOP_SYNC_ENABLED")):
+        return True
+    binding = os.environ.get("AI_QUANT_LOOP_BINDING_FILE", "").strip()
+    active_policy = os.environ.get("AI_QUANT_ACTIVE_POLICY_FILE", "").strip()
+    if not binding or not active_policy:
+        logger.emit(
+            "loop_review_sync_skipped",
+            level="warning",
+            trade_date=trade_date.isoformat(),
+            reason="binding_or_active_policy_missing",
+        )
+        return False
+    command = [
+        sys.executable,
+        "-m",
+        "scripts.sync_loop_daily_review",
+        "--trade-date",
+        trade_date.isoformat(),
+        "--data-root",
+        str(data_root),
+        "--binding",
+        binding,
+        "--active-policy",
+        active_policy,
+    ]
+    for artifact in artifacts:
+        command.extend(("--artifact-id", artifact))
+    command.extend(_loop_evidence_args() if evidence_args is None else evidence_args)
+    result = run_child(command, cwd=ROOT, timeout_seconds=120)
+    receipt = _business_receipt(result.stdout)
+    completed = (
+        result.return_code == 0 and receipt.get("status") == "delivered"
+        and bool(receipt.get("task_id")) and bool(receipt.get("run_id"))
+    )
+    logger.emit(
+        "loop_review_sync_completed" if completed else "loop_review_sync_pending",
+        level="info" if completed else "warning",
+        trade_date=trade_date.isoformat(),
+        return_code=result.return_code,
+        orders_submitted=0,
+    )
+    return completed
+
+
+def _business_receipt(stdout: str) -> dict[str, Any]:
+    try:
+        value = json.loads(stdout)
+    except (ValueError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _loop_evidence_args(prefix: str = "AI_QUANT_LOOP") -> list[str]:
+    path = os.environ.get(f"{prefix}_EXECUTION_INDEX_FILE", "").strip()
+    digest = os.environ.get(f"{prefix}_EXECUTION_INDEX_SHA256", "").strip()
+    if bool(path) != bool(digest):
+        raise ValueError("scheduled execution index path/hash must be paired")
+    return ["--execution-index", path, "--execution-index-sha256", digest] if path else []
+
+
+def _sync_loop_outcomes(
+    *,
+    trade_date: date,
+    data_root: Path,
+    logger: JsonEventLogger,
+    evidence_args: list[str] | None = None,
+) -> bool:
+    """Best-effort delayed labels; never weaken the local postmarket result."""
+
+    if not _truthy(os.environ.get("AI_QUANT_LOOP_OUTCOME_SYNC_ENABLED")):
+        return True
+    config_file = os.environ.get(
+        "AI_QUANT_LOOP_OUTCOME_CONFIG_FILE", ""
+    ).strip()
+    if not config_file:
+        logger.emit(
+            "loop_outcome_sync_skipped",
+            level="warning",
+            trade_date=trade_date.isoformat(),
+            reason="approved_outcome_config_missing",
+        )
+        return False
+    command = [
+        sys.executable,
+        "-m",
+        "scripts.sync_loop_due_outcomes",
+        "--as-of-trade-date",
+        trade_date.isoformat(),
+        "--data-root",
+        str(data_root),
+        "--config",
+        config_file,
+    ]
+    command.extend(_loop_evidence_args() if evidence_args is None else evidence_args)
+    result = run_child(command, cwd=ROOT, timeout_seconds=300)
+    receipt = _business_receipt(result.stdout)
+    completed = (
+        result.return_code == 0 and receipt.get("status") == "completed"
+        and type(receipt.get("due")) is int
+        and receipt.get("due") == receipt.get("delivered")
+        and isinstance(receipt.get("pending"), list)
+        and all(item.get("reason") == "horizon_not_mature"
+                for item in receipt["pending"] if isinstance(item, dict))
+        and all(isinstance(item, dict) for item in receipt["pending"])
+    )
+    logger.emit(
+        "loop_outcome_sync_completed"
+        if completed
+        else "loop_outcome_sync_pending",
+        level="info" if completed else "warning",
+        trade_date=trade_date.isoformat(),
+        return_code=result.return_code,
+        orders_submitted=0,
+    )
+    return completed
+
+
+def _sync_loop_handoffs(
+    *, trade_date: date, data_root: Path, artifacts: tuple[str, ...],
+    logger: JsonEventLogger,
+) -> int:
+    """Retry independently of local success; remote outbox handles idempotency."""
+    evidence_args = None
+    provider_blocked = False
+    native_root = os.environ.get("AI_QUANT_LOOP_NATIVE_RUN_ROOT", "").strip()
+    if any(_truthy(os.environ.get(name)) for name in (
+        "AI_QUANT_LOOP_SYNC_ENABLED", "AI_QUANT_LOOP_OUTCOME_SYNC_ENABLED",
+    )):
+        config = os.environ.get("AI_QUANT_LOOP_PROVIDER_CONFIG_FILE", "").strip()
+        digest = os.environ.get("AI_QUANT_LOOP_PROVIDER_CONFIG_SHA256", "").strip()
+        if config or digest or native_root:
+            try:
+                if _loop_evidence_args():
+                    raise ValueError("choose scheduled provider or existing index, not both")
+                if native_root:
+                    if config or digest:
+                        raise ValueError("choose native discovery or explicit provider config")
+                    command = [sys.executable, "-m", "scripts.produce_loop_daily",
+                               "--trade-date", str(trade_date), "--run-root", native_root,
+                               "--data-root", str(data_root), "--active-policy",
+                               os.environ.get("AI_QUANT_ACTIVE_POLICY_FILE", "")]
+                else:
+                    if not config or not digest:
+                        raise ValueError("provider config path/hash must be paired")
+                    command = [sys.executable, "-m", "scripts.prepare_loop_execution",
+                               "--trade-date", str(trade_date), "--config", config,
+                               "--config-sha256", digest]
+                result = run_child(command, cwd=ROOT, timeout_seconds=300)
+                receipt = _business_receipt(result.stdout)
+                if (result.return_code != 0 or receipt.get("status") != "prepared"
+                        or not receipt.get("execution_index_path")
+                        or not receipt.get("execution_index_sha256")):
+                    raise ValueError("provider business receipt is not prepared")
+                evidence_args = ["--execution-index", receipt["execution_index_path"],
+                                 "--execution-index-sha256", receipt["execution_index_sha256"]]
+            except Exception as exc:
+                logger.emit("loop_provider_blocked", level="warning",
+                            trade_date=str(trade_date), error_type=type(exc).__name__,
+                            orders_submitted=0)
+                provider_blocked = True
+    failures = int(provider_blocked)
+    for sync, extra in (
+        (_sync_loop_review, {"artifacts": artifacts}),
+        (_sync_loop_outcomes, {}),
+    ):
+        if sync is _sync_loop_review and provider_blocked:
+            continue
+        try:
+            selected_args = evidence_args
+            if sync is _sync_loop_outcomes:
+                selected_args = _loop_evidence_args("AI_QUANT_LOOP_OUTCOME") or evidence_args
+                if selected_args is None and native_root and provider_blocked:
+                    history = run_child([
+                        sys.executable, "-m", "scripts.produce_loop_daily", "--history-only",
+                        "--run-root", native_root, "--trade-date", str(trade_date),
+                    ], cwd=ROOT, timeout_seconds=120)
+                    receipt = _business_receipt(history.stdout)
+                    if history.return_code != 0 or receipt.get("status") != "prepared":
+                        raise ValueError("historical execution index unavailable")
+                    selected_args = ["--execution-index", receipt["execution_index_path"],
+                                     "--execution-index-sha256", receipt["execution_index_sha256"]]
+            if not sync(trade_date=trade_date, data_root=data_root, logger=logger,
+                        evidence_args=selected_args, **extra):
+                failures += 1
+        except Exception as exc:
+            failures += 1
+            logger.emit("loop_sync_pending", level="warning",
+                        trade_date=trade_date.isoformat(), error_type=type(exc).__name__)
+    return failures
 
 
 def _run_one(
@@ -414,6 +615,11 @@ def _run_locked(args: argparse.Namespace, logger: JsonEventLogger) -> int:
                 status=record.status.value if record is not None else "not_claimed",
                 attempts=record.attempts if record is not None else 0,
             )
+            if record is not None and record.status is JobStatus.SUCCEEDED:
+                failures += _sync_loop_handoffs(
+                    trade_date=trade_date, data_root=args.data_root,
+                    artifacts=record.artifact_ids, logger=logger,
+                )
             continue
         logger.emit(
             "job_started",
@@ -455,6 +661,10 @@ def _run_locked(args: argparse.Namespace, logger: JsonEventLogger) -> int:
                 attempt=lease.attempt,
                 artifact_count=len(artifacts),
                 orders_submitted=0,
+            )
+            failures += _sync_loop_handoffs(
+                trade_date=trade_date, data_root=args.data_root,
+                artifacts=artifacts, logger=logger,
             )
         except Exception as exc:
             failures += 1

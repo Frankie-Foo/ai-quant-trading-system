@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- 2026-09-07 reviewed Paper release: replace the $100-only ceiling with an
+  owner-approved $200,000 aggregate notional ceiling, bounded by equity and
+  remaining risk; reserve exposure for positions, partial fills and pending buys.
+- Repair restart/partial-fill exits, current completed-bar signal evaluation,
+  protected re-entry, asynchronous fill notifications and truthful funnel handoff.
+- Keep research counterfactual returns separate from factual broker executions;
+  pin effective plan and complete candidate-pool evidence for Loop review.
+- Deploy the local first-wave invocation no earlier than 21:00 Beijing; preserve
+  existing point-in-time snapshot cutoffs and the later exchange-time stages.
+- Retain the former smoke configuration names for compatibility; changing a
+  limit never by itself arms Paper or permits live trading.
+
 - Consolidated automated trading into one Modern H15 Alpaca Paper path.
 - Added durable ET/XNYS three-stage funnel execution with immutable receipts.
 - Added protected bracket entries, restart reconciliation, Outbox delivery and runtime
