@@ -9,6 +9,7 @@ import httpx
 
 from .contracts import (
     LoopBinding,
+    LoopEventOutcomeAssignment,
     LoopOutcomeAssignment,
     LoopOutcomeEnvelope,
     LoopPolicyCandidate,
@@ -259,6 +260,22 @@ class LoopClient:
             raise RuntimeError("Loop outcome-assignment response is not a list")
         return tuple(LoopOutcomeAssignment.model_validate(item) for item in result)
 
+    def list_event_outcome_assignments(
+        self,
+        *,
+        market_scope: str,
+        limit: int = 5000,
+    ) -> tuple[LoopEventOutcomeAssignment, ...]:
+        query = urlencode({"market_scope": market_scope, "limit": limit})
+        result = self._request(
+            "GET",
+            f"/api/v1/knowledge/quant/event-outcome-assignments?{query}",
+            None,
+        )
+        if not isinstance(result, list):
+            raise RuntimeError("Loop event-outcome-assignment response is not a list")
+        return tuple(LoopEventOutcomeAssignment.model_validate(item) for item in result)
+
     def list_policy_candidates(self, *, market_scope: str) -> tuple[LoopPolicyCandidate, ...]:
         query = urlencode(
             {
@@ -297,10 +314,17 @@ def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict
     frozen_pool = envelope.market_context.get("frozen_candidate_pool", {})
     morning_candidates = frozen_pool.get("candidates") or []
     primary = decisions[0]
-    market_regime = str(envelope.market_context.get("regime") or "UNKNOWN")
+    market_regime = str(envelope.market_context.get("market_regime") or "UNKNOWN")
     top10 = [
         {
             "instrument": item.instrument,
+            "market_regime": item.market_regime,
+            "classification": item.classification,
+            "classification_source": item.classification_source,
+            "logging_policy_id": item.logging_policy_id,
+            "logged_action": item.logged_action,
+            "logging_action_probability": item.logging_action_probability,
+            "reward_model_logged": item.reward_model_logged,
             "verdict": item.verdict,
             "reason": item.reason,
             "one_minute_path": list(item.one_minute_path),

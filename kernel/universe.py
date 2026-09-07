@@ -7,6 +7,8 @@ and LULD state are unavailable.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections.abc import Iterable
 from datetime import date, datetime
@@ -85,6 +87,21 @@ def apply_selection_gates(
         raise ValueError("asof_utc must be timezone-aware")
     if low_float_shares <= 0:
         raise ValueError("low_float_shares must be positive")
+    logging_policy_payload = {
+        "policy": "kernel.universe.selection_gates.v2",
+        "min_rvol": cfg.universe.min_rvol,
+        "min_premarket_gap_return": cfg.universe.min_premarket_gap_return,
+        "min_market_cap_usd": cfg.universe.min_market_cap_usd,
+        "low_float_shares": low_float_shares,
+    }
+    logging_policy_digest = hashlib.sha256(
+        json.dumps(
+            logging_policy_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    logging_policy_id = f"kernel.universe.selection_gates.v2@{logging_policy_digest}"
     for name, frame, required in (
         ("daily_universe", daily_universe, {"symbol", "precheck_pass", "reject_reason"}),
         ("catalyst_candidates", catalyst_candidates, {"symbol"}),
@@ -165,20 +182,12 @@ def apply_selection_gates(
     locked_symbols = catalyst_candidates.get_column("symbol").to_list()
     if len(locked_symbols) != len(set(locked_symbols)):
         raise ValueError("catalyst candidate symbols must be unique")
-    daily_map = {
-        str(row["symbol"]): row for row in daily_universe.iter_rows(named=True)
-    }
-    rvol_map = {
-        str(row["symbol"]): row for row in rvol_features.iter_rows(named=True)
-    }
-    market_map = {
-        str(row["symbol"]): row for row in market_details.iter_rows(named=True)
-    }
+    daily_map = {str(row["symbol"]): row for row in daily_universe.iter_rows(named=True)}
+    rvol_map = {str(row["symbol"]): row for row in rvol_features.iter_rows(named=True)}
+    market_map = {str(row["symbol"]): row for row in market_details.iter_rows(named=True)}
     float_map = {str(row["symbol"]): row for row in free_float.iter_rows(named=True)}
     earnings_symbols = set(
-        earnings_calendar.filter(pl.col("trade_date") == trade_date)
-        .get_column("symbol")
-        .to_list()
+        earnings_calendar.filter(pl.col("trade_date") == trade_date).get_column("symbol").to_list()
     )
     recent_dates = set(recent_session_dates)
     known_halts = trade_halts.filter(pl.col("halt_ts_utc") <= asof_utc)
@@ -199,9 +208,7 @@ def apply_selection_gates(
         premarket_close = _number(rvol_row.get("premarket_close"))
         premarket_gap_return = (
             premarket_close / daily_close - 1
-            if premarket_close is not None
-            and daily_close is not None
-            and daily_close > 0
+            if premarket_close is not None and daily_close is not None and daily_close > 0
             else None
         )
         float_value = _number(float_row.get("free_float"))
@@ -287,15 +294,9 @@ def apply_selection_gates(
                 "premarket_vwap": rvol_row.get("premarket_vwap"),
                 "premarket_return": rvol_row.get("premarket_return"),
                 "premarket_gap_return": premarket_gap_return,
-                "premarket_close_location": rvol_row.get(
-                    "premarket_close_location"
-                ),
-                "premarket_above_vwap": bool(
-                    rvol_row.get("premarket_above_vwap")
-                ),
-                "premarket_price_confirmation": bool(
-                    rvol_row.get("premarket_price_confirmation")
-                ),
+                "premarket_close_location": rvol_row.get("premarket_close_location"),
+                "premarket_above_vwap": bool(rvol_row.get("premarket_above_vwap")),
+                "premarket_price_confirmation": bool(rvol_row.get("premarket_price_confirmation")),
                 "directional_volume_confirmed": (
                     rvol_value is not None
                     and rvol_value > cfg.universe.min_rvol
@@ -303,9 +304,7 @@ def apply_selection_gates(
                     and premarket_gap_return is not None
                     and premarket_gap_return > cfg.universe.min_premarket_gap_return
                 ),
-                "premarket_price_provenance": rvol_row.get(
-                    "premarket_price_provenance"
-                ),
+                "premarket_price_provenance": rvol_row.get("premarket_price_provenance"),
                 "free_float": float_value,
                 "free_float_effective_date": float_row.get("effective_date"),
                 "free_float_provenance": float_row.get("provenance"),
@@ -315,6 +314,11 @@ def apply_selection_gates(
                 "luld_risk": luld_risk,
                 "pass_gate": not reasons,
                 "reject_reason": ";".join(reasons) if reasons else "",
+                "logging_policy_id": logging_policy_id,
+                "logged_action": "accept" if not reasons else "reject",
+                "logging_action_probability": 1.0,
+                "reward_model_logged": 0.0,
+                "reward_model_id": "zero_net_return_baseline.v1",
                 "gate_asof_utc": asof_utc,
                 "selection_rank": None,
             }
@@ -345,9 +349,7 @@ def _reason(row: dict[str, object], cfg: Config) -> tuple[bool, str]:
     beta_value = _number(row.get("beta"))
     atr_pct = _number(row.get("atr_pct"))
     max_abs_return = _number(row.get("max_abs_return"))
-    daily_open_to_close_return = _number(
-        row.get("daily_open_to_close_return")
-    )
+    daily_open_to_close_return = _number(row.get("daily_open_to_close_return"))
     daily_volume_ratio = _number(row.get("daily_volume_ratio"))
     daily_close_location = _number(row.get("daily_close_location"))
 
@@ -363,8 +365,7 @@ def _reason(row: dict[str, object], cfg: Config) -> tuple[bool, str]:
         daily_open_to_close_return is not None
         and daily_volume_ratio is not None
         and daily_close_location is not None
-        and daily_open_to_close_return
-        <= cfg.universe.max_bearish_open_to_close_return
+        and daily_open_to_close_return <= cfg.universe.max_bearish_open_to_close_return
         and daily_volume_ratio >= cfg.universe.min_distribution_volume_ratio
         and daily_close_location <= cfg.universe.max_distribution_close_location
     ):
@@ -405,9 +406,7 @@ def _build_universe_from_daily(
         # SPY. Filtering before rolling calculations preserves exact values while
         # making historical event-pool replay proportional to the locked pool.
         history_filter &= pl.col("symbol").is_in(sorted(candidate_symbols | {"SPY"}))
-    history = daily.filter(history_filter).select(*sorted(required)).sort(
-        "symbol", "trade_date"
-    )
+    history = daily.filter(history_filter).select(*sorted(required)).sort("symbol", "trade_date")
     if history.is_empty():
         raise ValueError(f"no daily history is available before {trade_date.isoformat()}")
     if history.select(pl.struct("symbol", "trade_date").n_unique()).item() != history.height:
@@ -416,9 +415,7 @@ def _build_universe_from_daily(
     asof_date = history.get_column("trade_date").max()
     if not isinstance(asof_date, date):
         raise ValueError("daily history has no as-of date")
-    if history.filter(
-        (pl.col("symbol") == "SPY") & (pl.col("trade_date") == asof_date)
-    ).is_empty():
+    if history.filter((pl.col("symbol") == "SPY") & (pl.col("trade_date") == asof_date)).is_empty():
         raise ValueError(f"SPY market benchmark is missing on {asof_date}")
 
     enriched = history.with_columns(
@@ -489,13 +486,9 @@ def _build_universe_from_daily(
             pl.col("low").alias("daily_low"),
             pl.col("close").alias("daily_close"),
             pl.col("volume").alias("daily_volume"),
-            (pl.col("close") / pl.col("open") - 1).alias(
-                "daily_open_to_close_return"
-            ),
+            (pl.col("close") / pl.col("open") - 1).alias("daily_open_to_close_return"),
             pl.col("asset_return").alias("daily_close_to_close_return"),
-            (pl.col("volume") / pl.col("prior_20d_avg_volume")).alias(
-                "daily_volume_ratio"
-            ),
+            (pl.col("volume") / pl.col("prior_20d_avg_volume")).alias("daily_volume_ratio"),
             pl.when(pl.col("high") > pl.col("low"))
             .then((pl.col("close") - pl.col("low")) / (pl.col("high") - pl.col("low")))
             .otherwise(0.5)
@@ -527,9 +520,7 @@ def _build_universe_from_daily(
         pl.lit(f"{provenance}|adv{ADV_WINDOW}.v1").alias("adv_usd_provenance"),
         pl.lit(f"{provenance}|beta{BETA_WINDOW}.v1").alias("beta_provenance"),
         pl.lit(f"{provenance}|wilder_atr{ATR_WINDOW}.v1").alias("atr_pct_provenance"),
-        pl.lit(f"{provenance}|max_abs_return.v1").alias(
-            "identity_check_provenance"
-        ),
+        pl.lit(f"{provenance}|max_abs_return.v1").alias("identity_check_provenance"),
         pl.lit(
             f"{provenance}|bearish_distribution.v1|"
             f"open_to_close<={cfg.universe.max_bearish_open_to_close_return}|"
@@ -544,9 +535,7 @@ def _build_universe_from_daily(
     return result.select(*REQUIRED_UNIVERSE_COLUMNS, pl.exclude(REQUIRED_UNIVERSE_COLUMNS))
 
 
-def _load_accepted_massive_daily(
-    trade_date: date, data_root: Path
-) -> tuple[pl.DataFrame, str]:
+def _load_accepted_massive_daily(trade_date: date, data_root: Path) -> tuple[pl.DataFrame, str]:
     paths = sorted((data_root / "accepted").glob("massive.grouped_daily-*/data.parquet"))
     if not paths:
         raise FileNotFoundError("no accepted Massive grouped-daily snapshots found")
@@ -573,18 +562,13 @@ def _load_accepted_massive_daily(
         .collect(engine="streaming")
     )
     provenance = (
-        f"massive.grouped_daily[{len(selected_dates)}sessions]"
-        f"@{selected_dates[-1].isoformat()}"
+        f"massive.grouped_daily[{len(selected_dates)}sessions]@{selected_dates[-1].isoformat()}"
     )
     return daily, provenance
 
 
-def _load_accepted_common_stocks(
-    trade_date: date, data_root: Path
-) -> tuple[set[str], str]:
-    paths = sorted(
-        (data_root / "accepted").glob("massive.reference_tickers.cs-*/data.parquet")
-    )
+def _load_accepted_common_stocks(trade_date: date, data_root: Path) -> tuple[set[str], str]:
+    paths = sorted((data_root / "accepted").glob("massive.reference_tickers.cs-*/data.parquet"))
     if not paths:
         raise FileNotFoundError(
             "no accepted point-in-time Massive common-stock reference snapshot found"
@@ -593,10 +577,7 @@ def _load_accepted_common_stocks(
     eligible: list[tuple[date, Path]] = []
     for path in paths:
         dates = (
-            pl.read_parquet(path, columns=["asof_date"])
-            .get_column("asof_date")
-            .unique()
-            .to_list()
+            pl.read_parquet(path, columns=["asof_date"]).get_column("asof_date").unique().to_list()
         )
         if len(dates) != 1 or not isinstance(dates[0], date):
             raise ValueError(f"common-stock reference has invalid asof_date: {path}")

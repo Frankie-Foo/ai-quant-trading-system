@@ -2314,3 +2314,32 @@ Status: offline implementation and verification; no production activation.
   Replacing its runtime platform guard with the type-checker-recognized
   `sys.platform == "win32"` passed both Linux and Windows mypy targets; all
   **41** funnel-stage regression tests passed. No type-ignore was introduced.
+
+## M93 2026-09-07 raw event Outcome separation
+
+- Split delayed labels into strategy-independent `event_observation` facts and
+  revision-bound `strategy_evaluation` evidence. Every real instrument decision can
+  now receive deterministic 1d/5d/20d labels before a strategy Revision exists.
+- The same XNYS calendar, accepted snapshot hashes, benchmark, cost approval and
+  point-in-time checks apply to both layers. Event facts never enter strategy accuracy;
+  only explicit holdout/Walk-forward/forward assignments remain governance samples.
+- The postmarket scanner queries both assignment feeds and uses the existing idempotent
+  Outbox. Loop/Gateway/frontend changes expose the new feed and display event maturity
+  separately from strategy governance.
+
+## M94 2026-09-07 Loop quant contract bridge v4
+
+- Added explicit event-level `market_regime`, `classification`, classifier lineage and
+  point-in-time OPE logging. The deterministic universe gate records a versioned policy
+  identity, actual action, propensity 1.0 and an explicit zero-return baseline; no score
+  is relabeled as a probability.
+- Added the shared `strategy_policy_candidate.v4` contract. The consumer reads only
+  `universe.min_rvol`, writes a lineage-bound Shadow Challenger and rejects attempted
+  production/order authority while ignoring execution fields.
+- Split Outcome meaning into realized policy return, counterfactual instrument return,
+  counterfactual net excess return and direction correctness. Raw-event reject/block
+  counterfactual costs are doubled while strategy-evaluation costs retain their legacy
+  basis. Unknown realized return remains null; only broker-confirmed no-trade becomes zero.
+  OPE now uses verified realized policy return, not direction correctness.
+- Feature-branch verification recorded 793 full-suite passes with the optional active
+  policy override empty, plus 37 focused Loop bridge/selection/Outcome tests and Ruff.

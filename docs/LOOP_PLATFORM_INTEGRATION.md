@@ -54,9 +54,22 @@ policy hash；相同身份不同内容会失败关闭。合同缺失或不一致
 HTTP 2xx 只表示接口调用成功，不表示复盘成功。只有返回的 `Run.status=COMPLETED` 才会把
 Outbox 标记为 delivered；`FAILED` 会保留远端 Task ID、Run ID、失败节点和错误码供审计与重试。
 
+每个 Top10 事件必须显式上传 `market_regime`、`classification`、版本化
+`classification_source`，以及决策时点的 `logging_policy_id`、`logged_action`、
+`logging_action_probability`、`reward_model_logged`。Loop 在 Task API 与 Run 内部双重校验；
+缺失字段返回 422/失败关闭。`UNKNOWN`、`UNSPECIFIED` 允许保留为审计事实，但不会进入
+Distiller。`pattern_key` 只允许作为研究属性，不能替代稳定分类。
+
 ## 延迟 Outcome
 
+Outcome 分为两层，不能混用统计口径：
+
+- `event_observation`：每条真实原始决策事件到期后的客观 1d/5d/20d 表现，不依赖策略 Revision，供复盘页面和后续提炼使用；
+- `strategy_evaluation`：精确绑定策略 Revision 的 holdout/Walk-forward/forward 评价，只有这一层参与策略准确度与晋级治理。
+
 1d、5d、20d Outcome 在真正可用后单独回填，不放入当天 Task。Loop 通过
+`GET /api/v1/knowledge/quant/event-outcome-assignments` 给出所有待观察的真实原始事件，
+并通过
 `GET /api/v1/knowledge/quant/outcome-assignments` 给出精确的
 `strategy_revision_id + decision_event_id + outstanding_horizons`，避免交易系统猜测归属。
 
@@ -84,10 +97,26 @@ approved_by=<负责人>
 approved_at_utc=<UTC 时间>
 ```
 
-新上报固定使用 `ai_quant.loop_outcome.v2`。治理血缘只放在 `evidence`；收益单位固定为
-decimal fraction，方法固定为 split-adjusted close-to-close；`excess_return` 固定等于
-`strategy_return - benchmark_return - transaction_cost - slippage`。Loop 会再次验证
-horizon session 数、到期收盘时间、快照 ID、基准、公式和 point-in-time guard。
+事件事实固定使用 `ai_quant.loop_event_outcome.v1`，不允许携带
+`strategy_revision_id`；策略评价固定使用 `ai_quant.loop_outcome.v2`。治理血缘只放在
+`evidence`；收益单位固定为 decimal fraction，方法固定为 split-adjusted close-to-close。
+新生产者必须区分：
+
+- `realized_policy_return`：仅在具备可核验且已归一化的执行收益时填写；未关联
+  执行证据为 `null`，经经纪商证据确认整日无交易时为 0；
+- `counterfactual_instrument_return`：标的同期 Close-to-Close 收益；
+- `counterfactual_net_excess_return`：标的收益减基准、手续费和滑点；
+- `direction_correct`：由 verdict 与反事实净超额计算。
+
+原始事件层 `reject/block` 的反事实手续费和滑点采用正常往返成本的 2 倍；策略评价层继续使用
+既有成本口径，避免历史序列断裂。旧
+`instrument_return/strategy_return/excess_return` 仅作 v2 兼容字段，不能继续作为混合业务口径。
+Loop 会再次验证 horizon session 数、到期收盘时间、快照 ID、基准、公式和
+point-in-time guard。
+
+Strategy Assignment 会返回 T 日行为策略 OPE 字段和目标 Revision 的概率/收益模型估计。
+Reporter 只在字段完整且实际策略收益可核验时写入 `policy_evaluation`。Loop 的 Doubly Robust 奖励是显式
+`realized_policy_return`，不使用方向正确率或反事实标的收益替代；字段不完整时策略不能晋级。
 
 历史或人工修正仍可使用文件上传器：
 
@@ -107,9 +136,11 @@ AI_QUANT_LOOP_OUTCOME_CONFIG_FILE=/secure/config/loop-outcome-reporter.json
 
 ## 下行策略候选
 
-交易系统只读取 Loop 的 `strategy_policy_candidate`。首阶段唯一允许参数是
-`universe.min_rvol`，范围仍由本地 `kernel.strategy_policy` 校验。任何 trading policy、
-订单权限、生产资格或额外参数都会拒绝整个候选：
+交易系统只读取共享 `config/schemas/strategy_policy_candidate.v4.json`。首阶段唯一允许参数是
+`allowed_parameter_overrides["universe.min_rvol"]`；共享范围为 0–10，最终仍由本地
+`kernel.strategy_policy` 的更窄范围校验。`advisory_rule` 只读，
+`forbidden_execution_fields` 中的 trading policy、仓位、止损和账户字段完全不被消费。
+任何额外参数、订单权限、生产资格或非 PAPER 模式都会拒绝整个候选：
 
 ```bash
 python -m scripts.sync_loop_policy_candidates \

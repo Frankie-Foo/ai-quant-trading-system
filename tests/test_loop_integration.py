@@ -112,7 +112,14 @@ def _opportunity(tmp_path: Path) -> tuple[Path, DatasetSnapshot]:
                 "selection_status": "selected" if selected else "rejected",
                 "root_cause": "selected" if selected else "intentional_gate",
                 "root_cause_detail": "selected by frozen gate" if selected else "RVOL gate",
+                "classification": "SELECTED" if selected else "INTENTIONAL_GATE",
+                "classification_source": "intraday_selection_postmortem.rule_classifier.v1",
+                "logging_policy_id": "kernel.universe.selection_gates.v2@test",
+                "logged_action": "accept" if selected else "reject",
+                "logging_action_probability": 1.0,
+                "reward_model_logged": 0.0,
                 "pattern_key": "selected" if selected else "intentional_gate:rvol",
+                "rvol": 4.0 if selected else 2.5,
                 "close_return": 0.02 - index / 1000,
                 "mfe_from_previous_close": 0.03,
                 "mae_from_previous_close": -0.01,
@@ -197,6 +204,14 @@ def test_review_builder_keeps_top10_separate_and_never_fabricates_paths(tmp_path
     assert len(envelope.top10_decisions) == 10
     assert sum(item.verdict == "accept" for item in envelope.top10_decisions) == 3
     assert all(item.one_minute_path == () for item in envelope.top10_decisions)
+    assert all(item.market_regime == "UNKNOWN" for item in envelope.top10_decisions)
+    assert all(item.classification for item in envelope.top10_decisions)
+    assert all(item.classification_source for item in envelope.top10_decisions)
+    assert all(item.logging_action_probability == 1.0 for item in envelope.top10_decisions)
+    assert all(
+        item.logged_action in {"accept", "watch", "reject", "block"}
+        for item in envelope.top10_decisions
+    )
     assert envelope.execution_summary["orders_authorized"] is False
     task = build_loop_task(envelope, _binding())
     primary = envelope.top10_decisions[0]
@@ -645,7 +660,11 @@ def test_outbox_rejects_identity_collision_and_tracks_remote_ids(tmp_path: Path)
     assert item.remote_run_id == "run-1"
 
 
-def _candidate(*, trading_policy: dict[str, object] | None = None) -> LoopPolicyCandidate:
+def _candidate(
+    *,
+    forbidden_execution_fields: dict[str, object] | None = None,
+    production_eligible: bool = False,
+) -> LoopPolicyCandidate:
     return LoopPolicyCandidate.model_validate(
         {
             "id": "artifact-1",
@@ -658,13 +677,14 @@ def _candidate(*, trading_policy: dict[str, object] | None = None) -> LoopPolicy
             "created_at": NOW.isoformat(),
             "updated_at": NOW.isoformat(),
             "payload": {
-                "schema_version": "quant-strategy-policy-v3",
+                "schema_version": "strategy_policy_candidate.v4",
                 "mode": "PAPER_ONLY",
                 "strategy_revision_id": "revision-1",
-                "strategy_fingerprint": "f" * 64,
-                "selection_policy": {"parameter_overrides": {"universe.min_rvol": 3.5}},
-                "trading_policy": trading_policy or {},
-                "production_eligible": False,
+                "fingerprint": "f" * 64,
+                "advisory_rule": {"selection_policy": {"decision": "watch"}},
+                "allowed_parameter_overrides": {"universe.min_rvol": 3.5},
+                "forbidden_execution_fields": forbidden_execution_fields or {},
+                "production_eligible": production_eligible,
                 "allow_order_execution": False,
             },
         }
@@ -693,12 +713,20 @@ def test_loop_candidate_can_only_install_allowlisted_shadow_policy(tmp_path: Pat
     assert challenger.min_rvol == 3.5
     assert challenger.previous_version == active.version
     assert active_path.read_text() == active.model_dump_json(indent=2)
-    with pytest.raises(ValueError, match="trading policy"):
-        install_shadow_candidate(
-            _candidate(trading_policy={"stop_loss": 0.5}),
-            active_path=active_path,
-            challenger_path=tmp_path / "other.json",
-        )
+    filtered = install_shadow_candidate(
+        _candidate(
+            forbidden_execution_fields={
+                "trading_policy": {"stop_loss": 0.5},
+                "broker_account": "forbidden",
+            }
+        ),
+        active_path=active_path,
+        challenger_path=tmp_path / "filtered.json",
+    )
+    assert filtered.min_rvol == 3.5
+    assert filtered.status == "shadow"
+    with pytest.raises(ValueError, match="production eligibility"):
+        _candidate(production_eligible=True)
 
 
 def test_delayed_outcome_requires_revision_and_point_in_time_lineage() -> None:
@@ -793,6 +821,58 @@ def test_outcome_v2_enforces_maturity_and_return_semantics() -> None:
                 "observed_at": "2026-09-01T19:59:00+00:00",
             }
         )
+
+
+def test_outcome_v2_keeps_legacy_and_counterfactual_costs_separate() -> None:
+    evidence = {
+        "schema_version": "quant-outcome-evidence-v2",
+        "strategy_revision_id": "strategy-r1",
+        "evaluation_role": "holdout",
+        "point_in_time_guard_passed": True,
+        "decision_trading_date": "2026-08-31",
+        "horizon_end_trading_date": "2026-09-01",
+        "horizon_end_market_close_utc": "2026-09-01T20:00:00+00:00",
+        "trading_session_dates": ["2026-09-01"],
+        "trading_calendar": {
+            "name": "XNYS",
+            "source": "pandas_market_calendars.NYSE",
+            "version": "5.1.1",
+        },
+        "benchmark_id": "QQQ",
+        "price_snapshot_ids": ["snapshot-start", "snapshot-end"],
+        "return_semantics": {
+            "unit": "decimal_fraction",
+            "method": "close_to_close_split_adjusted",
+            "strategy_return_basis": "gross_before_costs",
+            "excess_return_formula": "strategy_return-benchmark_return-transaction_cost-slippage",
+        },
+        "counterfactual_transaction_cost": 0.001,
+        "counterfactual_slippage": 0.0005,
+    }
+    outcome = LoopOutcomeEnvelope(
+        schema_version="ai_quant.loop_outcome.v2",
+        id="outcome-v3-watch",
+        decision_event_id="event-1",
+        source_run_id="run-1",
+        market_scope="US-equity",
+        instrument="AAPL",
+        horizon="1d",
+        observed_at=NOW,
+        instrument_return=0.04,
+        strategy_return=0.0,
+        counterfactual_instrument_return=0.04,
+        counterfactual_net_excess_return=0.0285,
+        benchmark_return=0.01,
+        excess_return=-0.01,
+        max_drawdown=0.0,
+        transaction_cost=0.0,
+        slippage=0.0,
+        direction_correct=False,
+        evidence=evidence,
+        metadata={"source_system": "ai-quant-trading-system"},
+    )
+    assert outcome.excess_return == pytest.approx(-0.01)
+    assert outcome.counterfactual_net_excess_return == pytest.approx(0.0285)
 
 
 def test_outcome_assignment_and_reporter_config_are_fail_closed() -> None:
@@ -895,6 +975,8 @@ def test_due_outcome_reporter_waits_for_sessions_then_submits_v2(
     ) -> object:
         requests.append((method, path, payload))
         if method == "GET":
+            if "event-outcome-assignments" in path:
+                return []
             return [
                 {
                     "schema_version": "quant-outcome-assignment-v1",
@@ -909,6 +991,13 @@ def test_due_outcome_reporter_waits_for_sessions_then_submits_v2(
                     "observed_verdict": "watch",
                     "target_verdict": "accept",
                     "evaluation_role": "holdout",
+                    "logging_policy_id": "selection-v1@" + "a" * 64,
+                    "logged_action": "accept",
+                    "logging_action_probability": 1.0,
+                    "reward_model_logged": 0.0,
+                    "target_policy_id": "strategy-r1",
+                    "target_probability_for_logged_action": 1.0,
+                    "reward_model_target": 0.0,
                     "outstanding_horizons": ["1d", "5d"],
                 }
             ]
@@ -939,6 +1028,8 @@ def test_due_outcome_reporter_waits_for_sessions_then_submits_v2(
     )
 
     assert summary.assignments == 1
+    assert summary.event_assignments == 0
+    assert summary.strategy_assignments == 1
     assert summary.due == 1
     assert summary.staged == 1
     assert summary.delivered == 1
@@ -947,6 +1038,8 @@ def test_due_outcome_reporter_waits_for_sessions_then_submits_v2(
     posted = next(payload for method, _, payload in requests if method == "POST")
     assert posted is not None
     assert posted["schema_version"] == "ai_quant.loop_outcome.v2"
+    expected_id_prefix = "quant_outcome_linked_" if with_execution else "quant_outcome_v3_"
+    assert str(posted["id"]).startswith(expected_id_prefix)
     assert posted["strategy_return"] == pytest.approx(0.04)
     assert posted["benchmark_return"] == pytest.approx(0.01)
     assert posted["excess_return"] == pytest.approx(0.0285)
@@ -956,11 +1049,31 @@ def test_due_outcome_reporter_waits_for_sessions_then_submits_v2(
     assert evidence["return_semantics"]["performance_kind"] == "market_counterfactual"
     assert evidence["return_semantics"]["is_realized_trade_pnl"] is False
     assert evidence["counterfactual_selected_close_return"] == pytest.approx(0.04)
+    expected_policy_assignment = {
+        "logging_policy_id": "selection-v1@" + "a" * 64,
+        "logged_action": "accept",
+        "target_policy_id": "strategy-r1",
+        "logging_action_probability": 1.0,
+        "target_probability_for_logged_action": 1.0,
+        "reward_model_logged": 0.0,
+        "reward_model_target": 0.0,
+    }
+    assert evidence["policy_assignment"] == expected_policy_assignment
+    assert posted["counterfactual_instrument_return"] == pytest.approx(0.04)
+    assert posted["counterfactual_net_excess_return"] == pytest.approx(0.0285)
     if with_execution:
         assert evidence["factual_execution"]["status"] == "no_trade"
         assert evidence["factual_execution"]["realized_gross_pnl"] is None
+        assert posted["realized_policy_return"] == 0.0
+        assert evidence["policy_evaluation"] == {
+            **expected_policy_assignment,
+            "observed_reward": 0.0,
+            "reward_semantics": "realized_policy_return_decimal_fraction",
+        }
         assert str(posted["id"]).startswith("quant_outcome_linked_")
         return
+    assert posted["realized_policy_return"] is None
+    assert "policy_evaluation" not in evidence
     assert evidence["factual_execution"] == {
         "status": "unavailable",
         "reason": "confirmed_fill_evidence_not_supplied",
@@ -968,3 +1081,111 @@ def test_due_outcome_reporter_waits_for_sessions_then_submits_v2(
         "realized_net_pnl": None,
         "fees": None,
     }
+
+
+def test_due_outcome_reporter_submits_event_observation_without_strategy(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    for trade_date, aapl_close, qqq_close in (
+        (date(2026, 9, 3), 100.0, 200.0),
+        (date(2026, 9, 4), 104.0, 202.0),
+    ):
+        frame = canonicalize_daily_bars(
+            pl.DataFrame(
+                {
+                    "symbol": ["AAPL", "QQQ"],
+                    "trade_date": [trade_date, trade_date],
+                    "provider_ts_utc": [NOW, NOW],
+                    "open": [aapl_close - 1, qqq_close - 1],
+                    "high": [aapl_close + 1, qqq_close + 1],
+                    "low": [aapl_close - 2, qqq_close - 2],
+                    "close": [aapl_close, qqq_close],
+                    "volume": [1_000_000.0, 2_000_000.0],
+                    "trade_count": [10_000, 20_000],
+                    "vwap": [aapl_close, qqq_close],
+                    "source": ["massive.grouped_daily"] * 2,
+                    "feed": ["sip", "sip"],
+                    "adjustment": ["split_adjusted", "split_adjusted"],
+                }
+            )
+        )
+        persist_snapshot(
+            frame,
+            root=data_root,
+            source="massive.grouped_daily",
+            schema_version="bars_daily.v1",
+            checks=audit_daily_bars(
+                frame,
+                provenance="massive.grouped_daily",
+                expected_date=trade_date,
+            ),
+        )
+    requests: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def request(
+        method: str,
+        path: str,
+        payload: dict[str, object] | None,
+    ) -> object:
+        requests.append((method, path, payload))
+        if method == "GET" and "event-outcome-assignments" in path:
+            return [
+                {
+                    "schema_version": "quant-event-outcome-assignment-v1",
+                    "decision_event_id": "event-raw-1",
+                    "source_run_id": "run-raw-1",
+                    "market_scope": "US-equity",
+                    "instrument": "AAPL",
+                    "decision_trading_date": "2026-09-03",
+                    "observed_verdict": "block",
+                    "outstanding_horizons": ["1d", "5d"],
+                }
+            ]
+        if method == "GET":
+            return []
+        assert payload is not None
+        return {"id": payload["id"]}
+
+    config = OutcomeReporterConfig(
+        benchmark_symbol="QQQ",
+        transaction_cost_bps_round_trip=10,
+        slippage_bps_round_trip=5,
+        watch_neutral_band_bps=25,
+        cost_model_version="approved-cost-v1",
+        approved_by="risk-owner",
+        approved_at_utc=NOW,
+    )
+    summary = sync_due_outcomes(
+        client=LoopClient(
+            base_url="https://loop.example",
+            api_key="test",
+            request=request,
+        ),
+        outbox=LoopOutbox(tmp_path / "outbox.sqlite3"),
+        data_root=data_root,
+        as_of_date=date(2026, 9, 4),
+        observed_before=datetime.now(UTC) + timedelta(seconds=1),
+        config=config,
+        execution_index_path=tmp_path / "missing-execution-index.json",
+        execution_index_sha256="0" * 64,
+    )
+
+    assert summary.assignments == 1
+    assert summary.event_assignments == 1
+    assert summary.strategy_assignments == 0
+    assert summary.delivered == 1
+    assert summary.pending[0].horizon == "5d"
+    posted = next(payload for method, _, payload in requests if method == "POST")
+    assert posted is not None
+    assert posted["schema_version"] == "ai_quant.loop_event_outcome.v1"
+    assert posted["outcome_kind"] == "event_observation"
+    assert posted["instrument_return"] == pytest.approx(0.04)
+    assert posted["transaction_cost"] == pytest.approx(0.002)
+    assert posted["slippage"] == pytest.approx(0.001)
+    assert posted["excess_return"] == pytest.approx(0.027)
+    assert posted["realized_policy_return"] is None
+    assert posted["counterfactual_instrument_return"] == pytest.approx(0.04)
+    assert posted["counterfactual_net_excess_return"] == pytest.approx(0.027)
+    assert posted["direction_correct"] is False
+    assert "strategy_revision_id" not in posted["evidence"]  # type: ignore[operator]
