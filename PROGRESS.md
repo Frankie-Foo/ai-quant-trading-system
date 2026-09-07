@@ -2281,3 +2281,30 @@ Status: offline implementation and verification; no production activation.
   separate gates. Earlier runtime 971-test and 27-test broker/startup runs are
   intermediate evidence only; additional rejection-recovery changes require
   fresh final verification. Dependency audit reported no known vulnerabilities.
+
+## M92 — Integrated release candidate verification (2026-09-07)
+
+- Integrated owner/main baseline, hardening, Loop v6, runtime repair `5138693`
+  and Loop evidence repair `5c0b053` into one release candidate. The sole merge
+  conflict was append-only progress history; both histories were retained.
+- Final integrated Python 3.12 run: **1102 passed in 78.40s**. Whole-repository
+  Ruff passed; strict mypy passed **459 source files**; compileall passed.
+  Electron tests **33 passed**, UI tests **12 passed**, Vite production build
+  passed. `pip-audit` reported no known vulnerabilities. No credentials matched
+  the staged-tree secret-pattern check; local environment files were not staged.
+- Independent review closed final-price rounding, post-lookup stale quotes,
+  known-pre-POST rollback and mixed historical recovery defects. A local
+  `aborted` intent is not a broker order status; bound/ambiguous orders retain
+  fail-closed handling. Startup evidence failures block entries, not protection.
+- Native daily Loop discovery now freezes the ledger through SQLite backup,
+  verifies startup identity, fetches Paper account activities and owned orders,
+  reconciles final inventory and retains historical execution indexes. Scheduled
+  delivery checks business receipts and retries independently of local review.
+  Missing plans, unowned activity, adjustments and incomplete broker evidence
+  remain blocked. Fees are not fabricated; unknown net PnL stays unavailable.
+- Four existing Codex fallback automations were found pointing to old worktrees.
+  Their definitions were backed up; deployment must move their prompts to the
+  same released scheduler, preserving Terra models and the existing schedules.
+- GitHub CI, main merge, task cutover, authorized evening SIP check and the next
+  real session's fill-to-Loop acceptance remain separate release gates at this
+  candidate checkpoint. No real trading is authorized or enabled.
