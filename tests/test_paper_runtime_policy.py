@@ -72,6 +72,18 @@ def test_arming_accepts_complete_paper_authorization() -> None:
     )
 
 
+def test_arming_accepts_the_same_candidate_pool_in_snapshot_order() -> None:
+    POLICY.validate_arming(
+        trade_date=TRADE_DATE,
+        broker_write_enabled=True,
+        trading_kill_switch=False,
+        broker_base_url="https://paper-api.alpaca.markets",
+        authorization=_authorization(candidate_pool=("AAPL", "MSFT")),
+        expected_candidate_pool=("MSFT", "AAPL"),
+        expected_strategy_version="modern-h15-v1",
+    )
+
+
 def test_retired_paper_runtime_is_unconditionally_blocked() -> None:
     with pytest.raises(RuntimeError, match="retired"):
         reject_retired_paper_runtime("legacy-orb")
