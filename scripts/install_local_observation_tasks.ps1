@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory = $true)][string]$DataRoot,
     [Parameter(Mandatory = $true)][string]$StrategyPolicyApprovedBy,
     [switch]$ArmPaper,
-    [ValidateRange(0.01, 100.0)][decimal]$PaperSmokeMaxNotional = 100.0
+    [decimal]$PaperSmokeMaxNotional = 100.0
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,6 +13,11 @@ $EnvironmentFile = (Resolve-Path -LiteralPath $EnvironmentFile).Path
 $DataRoot = (Resolve-Path -LiteralPath $DataRoot).Path
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location -LiteralPath $repositoryRoot
+$smokeCap = $PaperSmokeMaxNotional.ToString([Globalization.CultureInfo]::InvariantCulture)
+& $PythonPath -m operations.paper_release --validate-cap $smokeCap | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "Invalid Paper portfolio notional cap; owner-approved release validation failed."
+}
 
 function Register-ObservationTask {
     param(
@@ -87,9 +92,6 @@ $commonArguments = (
 )
 $funnelArguments = $commonArguments
 if ($ArmPaper) {
-    $smokeCap = $PaperSmokeMaxNotional.ToString(
-        [Globalization.CultureInfo]::InvariantCulture
-    )
     $funnelArguments += " -ArmPaper -PaperSmokeMaxNotional $smokeCap"
 }
 

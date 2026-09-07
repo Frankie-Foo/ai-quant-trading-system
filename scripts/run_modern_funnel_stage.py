@@ -7,9 +7,11 @@ import hashlib
 import json
 import math
 import os
+import sqlite3
 import subprocess
 import sys
 import time as time_module
+from contextlib import closing
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,7 @@ from data_plane.calendar import build_xnys_schedule
 from data_plane.contracts import DataQualityCheck, DatasetSnapshot, QualitySeverity
 from data_plane.providers.alpaca import fetch_bars, fetch_quotes
 from data_plane.storage import persist_snapshot
+from execution.alpaca_paper import DirectAlpacaPaperBroker
 from kernel.strategy_policy import load_strategy_policy
 from operations.autonomous_notifications import AutonomousNotificationLedger
 from operations.autonomous_selection_handoff import (
@@ -31,8 +34,11 @@ from operations.autonomous_selection_handoff import (
 from operations.feishu_base import FeishuBaseEventClient, InvestmentTable
 from operations.livermore_push import LivermorePushClient, configured_identity
 from operations.local_env import load_project_env, project_data_root
+from operations.paper_release import validate_smoke_notional
+from operations.paper_runtime_policy import PaperRuntimePolicy
 from operations.paper_state import PaperStateStore
-from schedule.modern_funnel import FunnelStage
+from research.modern_momentum import modern_strategy_manifest
+from schedule.modern_funnel import FunnelStage, PaperMonitorBlocked, _session_close_utc, _stage_for
 from scripts.monitor_modern_momentum_forward import SOURCE, _latest_pool
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,18 +60,25 @@ CRYPTO_NEWS_SYMBOLS = {"COIN", "MSTR"}
 
 
 def _strategy_context(candidates: list[dict[str, object]]) -> dict[str, object]:
+    modern = modern_strategy_manifest()
     active_path = os.getenv("AI_QUANT_ACTIVE_POLICY_FILE", "").strip()
     if not active_path:
         return {
             "active_version": STRATEGY_VERSION,
+            "legacy_version": None,
             "active_policy_hash": None,
             "challenger": None,
+            "modern_strategy_manifest": modern,
+            "legacy_policy_role": "selection_data_lineage_only",
         }
     active = load_strategy_policy(active_path, required_status="active")
     context: dict[str, object] = {
-        "active_version": active.version,
+        "active_version": STRATEGY_VERSION,
+        "legacy_version": active.version,
         "active_policy_hash": active.policy_hash,
         "challenger": None,
+        "modern_strategy_manifest": modern,
+        "legacy_policy_role": "selection_data_lineage_only",
     }
     challenger_path = os.getenv("AI_QUANT_CHALLENGER_POLICY_FILE", "").strip()
     if not challenger_path or not Path(challenger_path).is_file():
@@ -94,6 +107,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--trade-date", required=True, type=date.fromisoformat)
     parser.add_argument("--data-root", type=Path, default=project_data_root(ROOT))
     parser.add_argument("--state-root", type=Path, default=ROOT / "runs" / "autonomous")
+    parser.add_argument("--resume-only", action="store_true")
     return parser
 
 
@@ -154,9 +168,7 @@ def _symbols(payload: dict[str, Any]) -> tuple[str, ...]:
 
 def _latest_rows(frame: pl.DataFrame, symbols: tuple[str, ...]) -> dict[str, dict[str, Any]]:
     return {
-        symbol: frame.filter(pl.col("symbol") == symbol).sort("ts_utc").tail(1).row(
-            0, named=True
-        )
+        symbol: frame.filter(pl.col("symbol") == symbol).sort("ts_utc").tail(1).row(0, named=True)
         for symbol in symbols
         if not frame.filter(pl.col("symbol") == symbol).is_empty()
     }
@@ -236,8 +248,7 @@ def _open_plan_lines(candidates: list[dict[str, object]]) -> tuple[str, ...]:
                 "参考入场：触发时最新SIP卖价，实际点差和滑点分别不得超过0.25%；",
                 "失效/止损：跌回H15、失守VWAP或更高低点；含滑点全包止损不超过2%；",
                 "止盈/退出：3R目标或趋势退出；15:00后禁止新仓，15:50前全部清仓；",
-                "仓位：按账户风险动态反算，单票0.5%、板块0.75%、组合1.5%，"
-                "首次/二次尝试60%/40%。",
+                "仓位：按账户风险动态反算，单票0.5%、板块0.75%、组合1.5%，首次/二次尝试60%/40%。",
             )
         )
     return tuple(lines)
@@ -265,9 +276,7 @@ def _selection_event_fields(
         execution_summary = f"剔除理由={_candidate_reason(row)}"
     else:
         next_action = (
-            "等待下一层漏斗"
-            if stage is not FunnelStage.OPEN_CONFIRMATION
-            else "等待H15入场条件"
+            "等待下一层漏斗" if stage is not FunnelStage.OPEN_CONFIRMATION else "等待H15入场条件"
         )
         execution_summary = _execution_summary(stage, row)
     return {
@@ -321,9 +330,7 @@ def evaluate_second_wave(
             raw_closes = symbol_bars["close"].to_list()
             raw_volumes = symbol_bars["volume"].to_list()
             invalid_bar = any(
-                value is None
-                or not math.isfinite(float(value))
-                or float(value) <= 0
+                value is None or not math.isfinite(float(value)) or float(value) <= 0
                 for value in (*raw_closes, *raw_volumes)
             )
             if invalid_bar:
@@ -340,9 +347,7 @@ def evaluate_second_wave(
                 bid = float(quote["bid_price"])
                 ask = float(quote["ask_price"])
                 volume = float(symbol_bars["volume"].sum())
-                dollar_volume = float(
-                    (symbol_bars["close"] * symbol_bars["volume"]).sum()
-                )
+                dollar_volume = float((symbol_bars["close"] * symbol_bars["volume"]).sum())
                 close = float(bar["close"])
             except (TypeError, ValueError):
                 hard_reasons.append("Alpaca SIP盘前行情数值无效")
@@ -363,13 +368,10 @@ def evaluate_second_wave(
                     vwap = dollar_volume / volume
                     if spread > MAX_SECOND_WAVE_HARD_SPREAD:
                         hard_reasons.append(
-                            f"点差{spread:.2%}超过观察上限"
-                            f"{MAX_SECOND_WAVE_HARD_SPREAD:.2%}"
+                            f"点差{spread:.2%}超过观察上限{MAX_SECOND_WAVE_HARD_SPREAD:.2%}"
                         )
                     elif spread >= MAX_SECOND_WAVE_SPREAD:
-                        watch_reasons.append(
-                            f"盘前点差{spread:.2%}偏宽，09:35及入场前复核"
-                        )
+                        watch_reasons.append(f"盘前点差{spread:.2%}偏宽，09:35及入场前复核")
                     if dollar_volume < MIN_PREMARKET_DOLLAR_VOLUME:
                         hard_reasons.append("盘前成交额不足100万美元")
                     if close <= vwap:
@@ -526,9 +528,7 @@ def _publish_stage(
     if base is None:
         raise RuntimeError("dedicated investment Feishu Base is required")
     now = _stage_observed_at(trade_date, stage)
-    stage_rows = tuple((row, True) for row in candidates) + tuple(
-        (row, False) for row in rejected
-    )
+    stage_rows = tuple((row, True) for row in candidates) + tuple((row, False) for row in rejected)
     record_ids = tuple(
         base.record_event(
             InvestmentTable.SELECTION,
@@ -549,13 +549,12 @@ def _publish_stage(
         FunnelStage.SECOND_WAVE: "第二波盘前复核",
         FunnelStage.OPEN_CONFIRMATION: "第三波开盘确认",
     }[stage]
-    kept_text = "；".join(
-        f"{row['symbol']}：{_candidate_reason(row)}" for row in candidates
-    ) or "无"
-    rejected_text = "；".join(
-        f"{row['symbol']}：{'、'.join(_reasons(row))}"
-        for row in rejected
-    ) or "无"
+    kept_text = (
+        "；".join(f"{row['symbol']}：{_candidate_reason(row)}" for row in candidates) or "无"
+    )
+    rejected_text = (
+        "；".join(f"{row['symbol']}：{'、'.join(_reasons(row))}" for row in rejected) or "无"
+    )
     plan_text = (
         "\n".join(_open_plan_lines(candidates)) + "\n"
         if stage is FunnelStage.OPEN_CONFIRMATION
@@ -740,11 +739,15 @@ def _plan_payload(
         "trade_date": trade_date.isoformat(),
         "strategy_version": strategy_version,
         "paper_only": True,
+        "modern_strategy_manifest": modern_strategy_manifest(),
         "entry_after_et": "09:56",
         "new_entry_cutoff_et": "15:00",
         "cancel_unfilled_et": "15:45",
         "flatten_et": "15:50",
         "maximum_all_in_stop_pct": 0.02,
+        "symbol_risk_fraction": PaperRuntimePolicy().symbol_risk_fraction,
+        "attempt_weights": [0.6, 0.4],
+        "maximum_entry_relative_spread": 0.0025,
         "target_r": 3,
         "candidates": rows,
     }
@@ -753,18 +756,27 @@ def _plan_payload(
 def _launch_paper_if_confirmed(trade_date: date, confirmation_path: Path) -> int | None:
     if os.getenv("AI_QUANT_PAPER_RUNTIME_CONFIRMED", "").strip().lower() != "true":
         return None
+    now = datetime.now(UTC)
+    eastern = now.astimezone(EASTERN)
+    if eastern.date() != trade_date or eastern.time() < time(9, 35):
+        return None
+    session_close = _session_close_utc(trade_date)
+    if session_close is None or now >= session_close:
+        return None
+    confirmation = load_open_confirmation(confirmation_path)
+    generated = confirmation.generated_at_utc
+    if (
+        confirmation.authorization.trade_date != trade_date
+        or generated.tzinfo is None
+        or generated.astimezone(EASTERN).date() != trade_date
+        or generated > now
+    ):
+        raise RuntimeError("Paper startup requires existing same-day authorization")
     smoke_raw = os.getenv("AI_QUANT_PAPER_SMOKE_MAX_NOTIONAL", "").strip()
-    if not smoke_raw or not 0 < float(smoke_raw) <= 100:
-        raise RuntimeError("confirmed Paper startup requires a smoke cap no greater than $100")
+    validate_smoke_notional(float(smoke_raw) if smoke_raw else None)
     run_dir = ROOT / "runs" / "modern-momentum" / trade_date.isoformat()
     run_dir.mkdir(parents=True, exist_ok=True)
     store = PaperStateStore(run_dir / "paper-state.sqlite3")
-    active_owner = store.active_run_owner(trade_date, observed_at_utc=datetime.now(UTC))
-    if active_owner is not None:
-        prefix = "pid-"
-        if not active_owner.startswith(prefix) or not active_owner.removeprefix(prefix).isdigit():
-            raise RuntimeError("active Paper monitor lease has an invalid owner")
-        return int(active_owner.removeprefix(prefix))
     command = [
         sys.executable,
         "-m",
@@ -775,6 +787,58 @@ def _launch_paper_if_confirmed(trade_date: date, confirmation_path: Path) -> int
         str(confirmation_path),
         "--arm-paper",
     ]
+    # An expired heartbeat is not evidence that the previous process has exited.
+    with closing(
+        sqlite3.connect(store.path.resolve().as_uri() + "?mode=ro", uri=True)
+    ) as connection:
+        lease = connection.execute(
+            "SELECT owner, lease_until_utc FROM paper_run_lease WHERE trade_date=?",
+            (trade_date.isoformat(),),
+        ).fetchone()
+    if lease is not None:
+        owner = str(lease[0])
+        lease_active = datetime.fromisoformat(str(lease[1])) > now
+        prefix = "pid-"
+        if not owner.startswith(prefix) or not owner.removeprefix(prefix).isdigit():
+            raise RuntimeError("active Paper monitor lease has an invalid owner")
+        pid = int(owner.removeprefix(prefix))
+        if _process_running(pid):
+            # PID reuse must not identify an unrelated module, checkout or authorization as ready.
+            if _process_command_line(pid) != subprocess.list2cmdline(command):
+                raise PaperMonitorBlocked("monitor_identity_mismatch")
+            if not lease_active:
+                raise PaperMonitorBlocked("live_monitor_lease_expired")
+            return pid
+        if lease_active:
+            raise PaperMonitorBlocked("monitor_exited_with_active_lease")
+    # Read-only preflight; the sole broker-writing monitor reconciles again on startup.
+    broker = DirectAlpacaPaperBroker(
+        key_id=SecretStr(os.getenv("ALPACA_PAPER_KEY_ID", "")),
+        secret_key=SecretStr(os.getenv("ALPACA_PAPER_SECRET_KEY", "")),
+        writes_enabled=False,
+    )
+    try:
+        parent_orders = tuple(
+            parent
+            for order in store.list_orders()
+            if order.trade_date == trade_date and order.role == "entry"
+            if (parent := broker.get_order_by_client_id(order.client_order_id)) is not None
+        )
+        store.assert_reconcilable(
+            trade_date,
+            open_orders=broker.list_open_orders(),
+            positions=broker.list_positions(),
+            parent_orders=parent_orders,
+        )
+    finally:
+        broker.close()
+    checked_at = datetime.now(UTC).astimezone(EASTERN)
+    if (
+        checked_at.date() != trade_date
+        or checked_at.time() < time(9, 35)
+        or checked_at >= session_close
+    ):
+        return None
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     with (
         (run_dir / "paper-monitor.out.log").open("ab") as stdout,
@@ -788,11 +852,87 @@ def _launch_paper_if_confirmed(trade_date: date, confirmation_path: Path) -> int
             stderr=stderr,
             creationflags=creationflags,
         )
+    if not store.claim_run(
+        trade_date,
+        owner=f"pid-{process.pid}",
+        observed_at_utc=datetime.now(UTC),
+    ):
+        raise RuntimeError("another Paper monitor owns the startup lease")
     time_module.sleep(2)
     return_code = process.poll()
     if return_code is not None:
         raise RuntimeError(f"Paper monitor failed during startup with exit code {return_code}")
     return process.pid
+
+
+def _process_command_line(pid: int) -> str:
+    """Read process identity without exposing command lines in errors or logs."""
+    if pid <= 0:
+        raise PaperMonitorBlocked("monitor_identity_unverified")
+    try:
+        if os.name == "nt":
+            completed = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    f"Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}' "
+                    "-ErrorAction Stop | Select-Object -ExpandProperty CommandLine | "
+                    "ConvertTo-Json -Compress",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if completed.returncode != 0:
+                raise ValueError("process query failed")
+            command_line = json.loads(completed.stdout)
+            if not isinstance(command_line, str) or not command_line:
+                raise ValueError("process command is unavailable")
+            return command_line
+        process_root = Path("/proc") / str(pid)
+        if (process_root / "cwd").resolve(strict=True) != ROOT.resolve():
+            raise PaperMonitorBlocked("monitor_identity_mismatch")
+        args = process_root.joinpath("cmdline").read_bytes().rstrip(b"\0").decode().split("\0")
+        return subprocess.list2cmdline(args)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        raise PaperMonitorBlocked("monitor_identity_unverified") from None
+
+
+def _process_running(pid: int) -> bool:
+    if pid <= 0:
+        raise RuntimeError("Paper monitor PID is invalid")
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            if ctypes.get_last_error() == 87:  # ERROR_INVALID_PARAMETER: PID no longer exists.
+                return False
+            raise RuntimeError("Paper monitor liveness could not be verified")
+        try:
+            code = wintypes.DWORD()
+            if not kernel.GetExitCodeProcess(handle, ctypes.byref(code)):
+                raise RuntimeError("Paper monitor liveness could not be verified")
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        raise RuntimeError("Paper monitor liveness could not be verified") from None
+    return True
 
 
 def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
@@ -816,6 +956,9 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
             "paper_pid": str(paper_pid or ""),
         }
 
+    if getattr(args, "resume_only", False):
+        raise RuntimeError("handoff recovery requires existing same-day authorization")
+    _require_selection_window(FunnelStage.OPEN_CONFIRMATION, args.trade_date)
     frozen_source = _read_json(day_root / "second_wave_pool.json")
     strategy_context = frozen_source.get("strategy_context")
     if not isinstance(strategy_context, dict):
@@ -938,10 +1081,20 @@ def _receipt(path: Path, record_ids: tuple[str, ...], message_id: str) -> dict[s
     }
 
 
+def _require_selection_window(stage: FunnelStage, trade_date: date) -> None:
+    eastern = datetime.now(UTC).astimezone(EASTERN)
+    if eastern.date() != trade_date or _stage_for(eastern.time()) is not stage:
+        raise RuntimeError("funnel selection window is closed")
+
+
 def main() -> int:
     load_project_env(ROOT)
     args = _parser().parse_args()
     day_root = args.state_root / args.trade_date.isoformat()
+    if args.stage is not FunnelStage.OPEN_CONFIRMATION:
+        if args.resume_only:
+            raise RuntimeError("handoff recovery requires the open-confirmation stage")
+        _require_selection_window(args.stage, args.trade_date)
     if args.stage is FunnelStage.FIRST_WAVE:
         receipt = _first_wave(args, day_root)
     elif args.stage is FunnelStage.SECOND_WAVE:

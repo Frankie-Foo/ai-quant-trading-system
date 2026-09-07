@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -16,8 +18,11 @@ from typing import Protocol, cast
 from zoneinfo import ZoneInfo
 
 from data_plane.calendar import build_xnys_schedule
+from operations.autonomous_selection_handoff import load_open_confirmation
+from operations.feishu_base import FeishuCliError
 
 EASTERN = ZoneInfo("America/New_York")
+BEIJING = ZoneInfo("Asia/Shanghai")
 LEASE_DURATION = timedelta(minutes=15)
 
 
@@ -35,6 +40,13 @@ class FunnelTickStatus(StrEnum):
     NOT_TRADING_DAY = "not_trading_day"
     PREREQUISITE_MISSING = "prerequisite_missing"
     LEASED = "leased"
+    HANDOFF_PENDING = "handoff_pending"
+    MONITORING = "monitoring"
+    BLOCKED = "blocked"
+
+
+class PaperMonitorBlocked(RuntimeError):
+    """A known monitor cannot safely be treated as ready or replaced."""
 
 
 @dataclass(frozen=True)
@@ -45,7 +57,11 @@ class FunnelTickResult:
 
 
 class FunnelStageExecutor(Protocol):
-    def execute(self, stage: FunnelStage, trade_date: date) -> dict[str, str]: ...
+    def execute(
+        self, stage: FunnelStage, trade_date: date, *, resume_only: bool = False
+    ) -> dict[str, str]: ...
+
+    def can_resume(self, trade_date: date, *, now_utc: datetime) -> bool: ...
 
 
 class CompletedStageProcess(Protocol):
@@ -64,7 +80,24 @@ class ProductionFunnelExecutor:
     root: Path
     runner: StageRunner = subprocess.run
 
-    def execute(self, stage: FunnelStage, trade_date: date) -> dict[str, str]:
+    def can_resume(self, trade_date: date, *, now_utc: datetime) -> bool:
+        """Require the frozen authorization and its verified config, not merely a failed row."""
+        path = self.root / "runs" / "autonomous" / trade_date.isoformat() / "open_confirmation.json"
+        try:
+            confirmation = load_open_confirmation(path)
+            generated = confirmation.generated_at_utc
+            return (
+                confirmation.authorization.trade_date == trade_date
+                and generated.tzinfo is not None
+                and generated.astimezone(EASTERN).date() == trade_date
+                and generated <= now_utc
+            )
+        except (OSError, ValueError, TypeError):
+            return False
+
+    def execute(
+        self, stage: FunnelStage, trade_date: date, *, resume_only: bool = False
+    ) -> dict[str, str]:
         command = [
             sys.executable,
             "-m",
@@ -74,19 +107,27 @@ class ProductionFunnelExecutor:
             "--trade-date",
             trade_date.isoformat(),
         ]
-        completed = self.runner(
-            command,
-            cwd=self.root,
-            capture_output=True,
-            text=True,
-            timeout=3600,
-            check=False,
-        )
+        if resume_only:
+            command.append("--resume-only")
+        try:
+            completed = self.runner(
+                command,
+                cwd=self.root,
+                capture_output=True,
+                text=True,
+                timeout=3600,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(f"{stage.value} process failed: {type(exc).__name__}") from None
         if completed.returncode != 0:
             stderr_lines = [line.strip() for line in completed.stderr.splitlines() if line.strip()]
-            detail = f": {stderr_lines[-1][:500]}" if stderr_lines else ""
+            detail = _safe_process_error(stderr_lines[-1]) if stderr_lines else ""
+            if detail.startswith("PaperMonitorBlocked: "):
+                raise PaperMonitorBlocked(detail.removeprefix("PaperMonitorBlocked: "))
             raise RuntimeError(
-                f"{stage.value} process failed with exit code {completed.returncode}{detail}"
+                f"{stage.value} process failed with exit code {completed.returncode}: {detail}"
             )
         receipt = _last_json_object(completed.stdout)
         if receipt.get("ok") is not True or not str(receipt.get("receipt_id", "")).strip():
@@ -98,11 +139,35 @@ class ProductionFunnelExecutor:
         }
 
 
+def _safe_process_error(line: str) -> str:
+    blocked = re.fullmatch(
+        r"(?:schedule.modern_funnel\.)?PaperMonitorBlocked: "
+        r"(live_monitor_lease_expired|monitor_exited_with_active_lease|"
+        r"monitor_identity_mismatch|monitor_identity_unverified)",
+        line,
+    )
+    if blocked:
+        return f"PaperMonitorBlocked: {blocked.group(1)}"
+    match = re.fullmatch(
+        r"(?:operations.feishu_base\.)?FeishuCliError: lark-cli failed "
+        r"\(type=([a-z_]+), code=([0-9]{1,10}|unknown), exit_code=(-?[0-9]+|unknown)\)",
+        line,
+    )
+    if match:
+        kind, code, exit_code = match.groups()
+        return str(FeishuCliError(kind, code, None if exit_code == "unknown" else int(exit_code)))
+    if line == "RuntimeError: Paper startup failed":
+        return line
+    return "stage error details redacted; inspect local logs"
+
+
 def _last_json_object(stdout: str) -> dict[str, object]:
+    if len(stdout) > 2_000_000:
+        raise RuntimeError("funnel stage receipt exceeds output limit")
     for line in reversed(stdout.splitlines()):
         try:
             value = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             continue
         if isinstance(value, dict):
             return cast(dict[str, object], value)
@@ -148,8 +213,9 @@ def _connect(path: Path) -> sqlite3.Connection:
     return connection
 
 
-def _is_trading_day(trade_date: date) -> bool:
-    return not build_xnys_schedule(trade_date, trade_date).is_empty()
+def _session_close_utc(trade_date: date) -> datetime | None:
+    session = build_xnys_schedule(trade_date, trade_date)
+    return None if session.is_empty() else cast(datetime, session["market_close_utc"][0])
 
 
 def _claim(
@@ -172,11 +238,14 @@ def _claim(
             return FunnelTickStatus.PREREQUISITE_MISSING
 
     row = connection.execute(
-        "SELECT status, lease_until_utc FROM funnel_runs "
+        "SELECT status, lease_until_utc, receipt_json FROM funnel_runs "
         "WHERE trade_date = ? AND stage = ?",
         (day, stage.value),
     ).fetchone()
-    if row is not None and row[0] == FunnelTickStatus.SUCCEEDED.value:
+    supervised = (
+        row is not None and stage is FunnelStage.OPEN_CONFIRMATION and _has_candidates(row[2])
+    )
+    if row is not None and row[0] == FunnelTickStatus.SUCCEEDED.value and not supervised:
         connection.rollback()
         return FunnelTickStatus.ALREADY_SUCCEEDED
     if row is not None and row[0] == "running" and row[1]:
@@ -218,7 +287,7 @@ def _finish(
     connection.execute(
         """
         UPDATE funnel_runs
-        SET status = ?, lease_until_utc = NULL, receipt_json = ?, error = ?,
+        SET status = ?, lease_until_utc = NULL, receipt_json = COALESCE(?, receipt_json), error = ?,
             updated_at_utc = ?
         WHERE trade_date = ? AND stage = ?
         """,
@@ -234,27 +303,58 @@ def _finish(
     connection.commit()
 
 
+def _has_candidates(receipt_json: str | None) -> bool:
+    if not receipt_json:
+        return False
+    receipt = json.loads(receipt_json)
+    return isinstance(receipt, dict) and bool(receipt.get("symbols"))
+
+
 def run_tick(
     *,
     ledger_path: Path,
     executor: FunnelStageExecutor,
     now_utc: datetime | None = None,
+    first_wave_not_before_beijing: time | None = None,
 ) -> FunnelTickResult:
-    """Run at most one due funnel stage, exactly once after a successful receipt."""
+    """Publish once; supervise eligible execution without claiming trading success."""
     current = now_utc or datetime.now(UTC)
     if current.tzinfo is None or current.utcoffset() is None:
         raise ValueError("now_utc must be timezone-aware")
     current = current.astimezone(UTC)
     eastern = current.astimezone(EASTERN)
     trade_date = eastern.date()
-    if not _is_trading_day(trade_date):
+    session_close = _session_close_utc(trade_date)
+    if session_close is None:
         return FunnelTickResult(FunnelTickStatus.NOT_TRADING_DAY)
 
     stage = _stage_for(eastern.time().replace(tzinfo=None))
-    if stage is None:
+    if (
+        stage is FunnelStage.FIRST_WAVE
+        and first_wave_not_before_beijing is not None
+        and current.astimezone(BEIJING).time() < first_wave_not_before_beijing
+    ):
+        return FunnelTickResult(FunnelTickStatus.NOT_DUE, stage)
+    resume_only = stage is None and time(9, 45) <= eastern.time() and current < session_close
+    if stage is None and not resume_only:
         return FunnelTickResult(FunnelTickStatus.NOT_DUE)
 
     with _connect(ledger_path) as connection:
+        if resume_only:
+            stage = FunnelStage.OPEN_CONFIRMATION
+            existing = connection.execute(
+                "SELECT status, receipt_json FROM funnel_runs WHERE trade_date=? AND stage=?",
+                (trade_date.isoformat(), stage.value),
+            ).fetchone()
+            # Never invent a missing stage or retry a completed no-trade selection.
+            if existing is None or (
+                existing[0] == FunnelTickStatus.SUCCEEDED.value and not _has_candidates(existing[1])
+            ):
+                return FunnelTickResult(FunnelTickStatus.NOT_DUE)
+            if not executor.can_resume(trade_date, now_utc=current):
+                # Preserve attempts, original error and receipt when there is nothing to recover.
+                return FunnelTickResult(FunnelTickStatus.NOT_DUE)
+        assert stage is not None
         claim_status = _claim(
             connection,
             trade_date=trade_date,
@@ -264,26 +364,48 @@ def run_tick(
         if claim_status is not None:
             return FunnelTickResult(claim_status, stage)
         try:
-            receipt = executor.execute(stage, trade_date)
+            receipt = (
+                executor.execute(stage, trade_date, resume_only=True)
+                if resume_only
+                else executor.execute(stage, trade_date)
+            )
         except Exception as exc:
+            status = (
+                FunnelTickStatus.BLOCKED
+                if isinstance(exc, PaperMonitorBlocked)
+                else FunnelTickStatus.FAILED
+            )
             _finish(
                 connection,
                 trade_date=trade_date,
                 stage=stage,
                 now_utc=current,
-                status=FunnelTickStatus.FAILED,
+                status=status,
                 error=f"{type(exc).__name__}: {exc}",
             )
-            return FunnelTickResult(FunnelTickStatus.FAILED, stage, str(exc))
+            return FunnelTickResult(status, stage, str(exc))
+        status = FunnelTickStatus.SUCCEEDED
+        if stage is FunnelStage.OPEN_CONFIRMATION and receipt.get("symbols"):
+            status = (
+                FunnelTickStatus.MONITORING
+                if str(receipt.get("paper_started", "")).lower() == "true"
+                else FunnelTickStatus.HANDOFF_PENDING
+            )
         _finish(
             connection,
             trade_date=trade_date,
             stage=stage,
             now_utc=current,
-            status=FunnelTickStatus.SUCCEEDED,
+            status=status,
             receipt=receipt,
         )
-        return FunnelTickResult(FunnelTickStatus.SUCCEEDED, stage)
+        return FunnelTickResult(status, stage)
+
+
+def _beijing_time(value: str) -> time:
+    if re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", value) is None:
+        raise argparse.ArgumentTypeError("time must use HH:MM (00:00..23:59)")
+    return time.fromisoformat(value)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -292,6 +414,12 @@ def _parser() -> argparse.ArgumentParser:
         "--ledger-path",
         type=Path,
         default=Path(__file__).resolve().parents[1] / "runs" / "modern-funnel.sqlite3",
+    )
+    parser.add_argument(
+        "--first-wave-not-before-beijing",
+        type=_beijing_time,
+        metavar="HH:MM",
+        help="Gate FIRST_WAVE by Beijing wall time; does not change snapshot cutoffs or recovery.",
     )
     return parser
 
@@ -302,6 +430,7 @@ def main() -> int:
     result = run_tick(
         ledger_path=args.ledger_path,
         executor=ProductionFunnelExecutor(root=root),
+        first_wave_not_before_beijing=args.first_wave_not_before_beijing,
     )
     print(
         json.dumps(
@@ -315,6 +444,7 @@ def main() -> int:
     )
     failed = {
         FunnelTickStatus.FAILED,
+        FunnelTickStatus.BLOCKED,
         FunnelTickStatus.PREREQUISITE_MISSING,
     }
     return 1 if result.status in failed else 0

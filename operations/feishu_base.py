@@ -36,6 +36,40 @@ class FeishuBaseDuplicateError(FeishuBaseError):
     """More than one row matched an immutable event identity."""
 
 
+class FeishuCliError(FeishuBaseError):
+    """Only allowlisted types and numeric codes may cross the CLI boundary."""
+
+    def __init__(
+        self, error_type: object = "unknown", code: object = None, exit_code: int | None = None,
+    ) -> None:
+        known_types = {
+            "unknown", "api_error", "auth_error", "permission_denied", "rate_limit",
+            "validation_error", "network_error", "timeout", "invalid_json",
+            "invalid_response", "command_error", "os_error",
+        }
+        kind = error_type.lower() if isinstance(error_type, str) else "unknown"
+        self.error_type = kind if kind in known_types else "unknown"
+        raw_code = str(code) if isinstance(code, (str, int)) and not isinstance(code, bool) else ""
+        self.code = (
+            raw_code
+            if raw_code.isascii() and raw_code.isdecimal() and len(raw_code) <= 10
+            else "unknown"
+        )
+        self.exit_code = exit_code
+        super().__init__(
+            f"lark-cli failed (type={self.error_type}, code={self.code}, "
+            f"exit_code={exit_code if exit_code is not None else 'unknown'})"
+        )
+
+
+def _cli_payload_error(
+    payload: Mapping[str, object], exit_code: int | None = None,
+) -> FeishuCliError:
+    error = payload.get("error")
+    details = error if isinstance(error, Mapping) else payload
+    return FeishuCliError(details.get("type"), details.get("code", payload.get("code")), exit_code)
+
+
 class InvestmentTable(StrEnum):
     """The only Base tables this process is allowed to write."""
 
@@ -215,29 +249,40 @@ class FeishuBaseEventClient:
                 self._verify_fields(normalized_id, existing[0], normalized_fields)
                 return str(existing[0]["record_id"])
 
-            self._run(
-                (
-                    "base",
-                    "+record-upsert",
-                    "--base-token",
-                    self.settings.base_token,
-                    "--table-id",
-                    table_settings.table_id,
-                    "--json",
-                    json.dumps(
-                        normalized_fields,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ),
+            write_error: FeishuCliError | None = None
+            try:
+                self._run(
+                    (
+                        "base",
+                        "+record-upsert",
+                        "--base-token",
+                        self.settings.base_token,
+                        "--table-id",
+                        table_settings.table_id,
+                        "--json",
+                        json.dumps(
+                            normalized_fields,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    )
                 )
-            )
-            readback = self._readback(
-                table,
-                normalized_id,
-                projected_fields,
-                label=f"{table.value}:{normalized_id}",
-            )
+            except FeishuCliError as exc:
+                write_error = exc
+            try:
+                readback = self._readback(
+                    table,
+                    normalized_id,
+                    projected_fields,
+                    label=f"{table.value}:{normalized_id}",
+                )
+            except FeishuBaseDuplicateError:
+                raise
+            except FeishuBaseError:
+                if write_error is not None:
+                    raise write_error from None
+                raise
             self._verify_fields(normalized_id, readback, normalized_fields)
             return str(readback["record_id"])
 
@@ -363,24 +408,33 @@ class FeishuBaseEventClient:
 
     def _run(self, arguments: Sequence[str]) -> dict[str, Any]:
         command = (*arguments, "--format", "json")
-        try:
-            raw = (
-                self._runner(command) if self._runner is not None else self._run_subprocess(command)
-            )
-        except FeishuBaseError:
-            raise
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise FeishuBaseError(f"lark-cli failed: {type(exc).__name__}") from exc
-        payload = _json_safe_mapping(raw)
-        if payload.get("ok") is not True:
-            error = payload.get("error")
-            error_type = (
-                str(error.get("type"))
-                if isinstance(error, dict) and error.get("type")
-                else "unknown"
-            )
-            raise FeishuBaseError(f"lark-cli returned {error_type} error")
-        return payload
+        # Reads are replay-safe; a timed-out write must be reconciled, never blindly retried.
+        delays = (0.0, 0.25, 0.75) if "+record-list" in arguments else (0.0,)
+        for attempt, delay in enumerate(delays):
+            if delay:
+                self._sleep(delay)
+            try:
+                try:
+                    raw = (
+                        self._runner(command)
+                        if self._runner is not None else self._run_subprocess(command)
+                    )
+                except subprocess.TimeoutExpired:
+                    raise FeishuCliError("timeout") from None
+                except (OSError, subprocess.SubprocessError):
+                    raise FeishuCliError("os_error") from None
+                if not isinstance(raw, Mapping):
+                    raise FeishuCliError("invalid_response")
+                if raw.get("ok") is not True:
+                    raise _cli_payload_error(raw)
+                try:
+                    return _json_safe_mapping(raw)
+                except (RecursionError, ValueError):
+                    raise FeishuCliError("invalid_response") from None
+            except FeishuCliError:
+                if attempt == len(delays) - 1:
+                    raise
+        raise AssertionError("CLI retry loop exhausted")
 
     def _run_subprocess(self, arguments: Sequence[str]) -> Mapping[str, object]:
         command_arguments = list(arguments)
@@ -411,25 +465,32 @@ class FeishuBaseEventClient:
             except Exception:
                 temporary_json.unlink(missing_ok=True)
                 raise
-        completed = subprocess.run(
-            [self._command, *command_arguments],
-            capture_output=True,
-            check=False,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=45,
-        )
         try:
+            completed = subprocess.run(
+                [self._command, *command_arguments],
+                capture_output=True,
+                check=False,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=45,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+            )
+            if len(completed.stdout or "") > 2_000_000:
+                raise FeishuCliError("invalid_response", exit_code=completed.returncode)
             try:
                 payload = json.loads(completed.stdout or "{}")
-            except json.JSONDecodeError as exc:
-                raise FeishuBaseError("lark-cli returned invalid JSON") from exc
+            except (ValueError, RecursionError):
+                raise FeishuCliError("invalid_json", exit_code=completed.returncode) from None
             if not isinstance(payload, dict):
-                raise FeishuBaseError("lark-cli response contract is invalid")
-            if completed.returncode != 0:
-                raise FeishuBaseError("lark-cli command returned a non-zero exit code")
+                raise FeishuCliError("invalid_response", exit_code=completed.returncode)
+            if completed.returncode != 0 or payload.get("ok") is not True:
+                raise _cli_payload_error(payload, completed.returncode)
             return cast(dict[str, object], payload)
+        except subprocess.TimeoutExpired:
+            raise FeishuCliError("timeout") from None
+        except (OSError, subprocess.SubprocessError):
+            raise FeishuCliError("os_error") from None
         finally:
             if temporary_json is not None:
                 temporary_json.unlink(missing_ok=True)

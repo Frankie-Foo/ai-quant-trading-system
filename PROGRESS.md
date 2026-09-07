@@ -2083,3 +2083,94 @@ Status: installed for Alpaca Paper only; real trading remains forbidden.
   capacity-ranking rejection reasons. Independent review found no remaining
   Critical/Important issues. Full pytest passed `745` tests; Ruff, strict Mypy across
   `411` files and compileall passed.
+
+## M90 2026-09-07 review remediation in isolated branches
+
+Status: offline implementation and verification; no production activation.
+
+- Runtime branch `codex/review-fixes-20260907` starts at `7a6feec`; separate Loop
+  branch `codex/loop-review-fixes-20260907` starts at `990f896`. Existing production
+  changes, task definitions, credentials, freeze state and historical artifacts
+  were not modified. No broker requests, Base writes, notifications or Loop uploads
+  were performed against external services during this repair.
+- Split publication success from Paper handoff/monitoring; preserve receipts and
+  same-day authorization on recovery. Feishu diagnostics are redacted and bounded;
+  ambiguous delivery is not blindly resent. A per-symbol funding/risk refusal no
+  longer becomes a global runtime failure. The $100 smoke release cap remains
+  mandatory at both launcher and direct Paper entrypoints.
+- Reconcile actual entry/exit quantities, partial fills, cancellation races and
+  terminal states. Preserve live exit orders; persist bounded residual-exit retry
+  IDs; never replay an old unsubmitted buy. Keep protection intact on inconsistent
+  inventory. Persist cumulative fill observations through restart and distinguish
+  them explicitly from incremental executions.
+- Added explicit, exit-only, prior-day recovery in an isolated ledger. Verify all
+  imported sources, order identities and filled inventory before broker writes;
+  refuse live historical leases and unknown exposure. Recovery does not authorize
+  new entries or auto-unfreeze. Network notification delivery runs outside the
+  broker-management loop, retaining durable delivery state and real receipts.
+- Separated current completed-bar signals from historical trade simulation and
+  actual-position exits. The modern manifest records effective parameters/hash;
+  legacy RVOL policy is lineage, not a claim that Modern H15 uses its parameters.
+  Mismatched approved manifest blocks entries while retaining protective management.
+  First/reentry eligibility share the 15:00 ET cutoff and 0.25% spread ceiling.
+- Read-only audit invalidated the existing 168-attempt cost-filtered backtest for
+  the current strategy: three late reentries, one over-limit spread, and 17 old
+  time exits requiring replay. No corrected performance or new blind-test return
+  is claimed. Full hash and acceptance boundaries are in
+  `docs/REVIEW_REMEDIATION_2026-09-07.md`.
+- Loop now distinguishes frozen morning candidates, post-close opportunity ranks,
+  market-counterfactual outcomes and confirmed execution performance. Native
+  manifest/risk evidence must agree with hash-pinned context. Unknown fees remain
+  unknown; missing fills cannot become realized PnL. Production evidence export,
+  fill adapters, scheduled factual Outcome joins and remote compatibility remain
+  unimplemented/unverified; these are not covered by local unit-test success.
+- Final verification: runtime full pytest passed `911` tests in `123.74s`; Ruff
+  passed across the repository; strict mypy passed across `444` files; compileall
+  and `git diff --check` passed. Loop full pytest passed `826` tests in `46.09s`,
+  with Ruff and strict mypy for its entire integration directory plus related
+  scripts/tests (`13` files); compileall passed. Three pre-existing
+  `control_plane.py` mypy findings were fixed with type annotations only.
+- Independent review regressions additionally cover blocked notification delivery,
+  uncertain position responses, partial fill corrections, previously imported
+  recovery states, bound broker identities and child-order ownership. Caller-supplied
+  verified entry parents now prove independently returned protection children at
+  both ordinary startup gates without accepting foreign orders. Expired leases
+  cannot replace a still-live monitor; monitor supervision extends to session close
+  without changing the new-entry cutoff. Missing recovery authorization preserves
+  the original failure instead of retrying after its execution window.
+- Release and research gates remain: review/integrate the branches, explicitly
+  approve bounded Paper smoke acceptance, then validate corrected costs and signal
+  behavior on new time windows. The 09:35 exclusion/afternoon watch-pool design is
+  not loosened without a same-pool causal comparison. No commit or push this turn.
+
+## M91 — Owner-approved Paper 200,000 USD release preparation (2026-09-07)
+
+- The owner explicitly approved replacing the USD 100 smoke ceiling with a
+  USD 200,000 aggregate Paper notional ceiling. The effective ceiling is still
+  bounded by account equity; holdings, active buy remainders and unresolved
+  intents consume it. Account buying power does not authorize leverage.
+- Rounded entry prices are checked against the 0.25% slippage ceiling and the
+  rounded all-in 2% stop budget. A final pre-POST callback revalidates time,
+  quote freshness and safety gates after the client-order-id lookup. Known
+  pre-POST rejections are distinct from ambiguous submission failures.
+- The local first-wave scheduler is gated until 21:00 Asia/Shanghai, matching
+  permission for the supplemental SIP credential file. XNYS session gates and
+  point-in-time data cutoffs remain intact. No synthetic market facts are used.
+- Content-addressed startup evidence records account identity when available,
+  broker positions/orders, observation times and plan/confirmation hashes.
+  It does not declare opening inventory flat or daily reconciliation complete.
+- Read-only external preflight found the Paper account active and flat, with
+  equity USD 100,574.93; dedicated Feishu table reads, the configured Livermore
+  channel and three US-equity Loop control contracts were reachable. The primary
+  SIP credential returned HTTP 403. The supplemental credential was not loaded
+  before 21:00. These are connection checks, not fill acceptance.
+- Before-deployment snapshots preserve the four Windows task XML definitions
+  and all three existing dirty files in the former production checkout.
+  Production tasks have not yet been switched at this preparation milestone.
+- Real 2026-09-04 accepted review data passed local stage-only construction with
+  risk status unavailable because native plan evidence is missing. It was not
+  submitted to Loop and no historical authorization was manufactured.
+- The final merged release, independent review, CI and deployment receipts are
+  separate gates. Earlier runtime 971-test and 27-test broker/startup runs are
+  intermediate evidence only; additional rejection-recovery changes require
+  fresh final verification. Dependency audit reported no known vulnerabilities.

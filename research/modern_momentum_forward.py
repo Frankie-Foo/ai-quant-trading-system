@@ -6,6 +6,8 @@ from collections.abc import Mapping
 
 import polars as pl
 
+from research.modern_momentum import ModernMomentumConfig
+
 HARD_CATALYSTS = (
     "earnings",
     "contract_partnership",
@@ -19,16 +21,18 @@ def select_forward_pool(
     *,
     market_caps: Mapping[str, float],
     limit: int = 10,
+    config: ModernMomentumConfig | None = None,
 ) -> pl.DataFrame:
     """Rank hard-safe names without consulting the old strategy's soft gate."""
+    config = config or ModernMomentumConfig()
     caps = pl.DataFrame(
         {"symbol": list(market_caps), "forward_market_cap": list(market_caps.values())}
     )
     return (
         gates.join(caps, on="symbol", how="left")
         .filter(
-            (pl.col("forward_market_cap").fill_null(0) >= 1_000_000_000)
-            & (pl.col("rvol").fill_null(0) >= 1.5)
+            (pl.col("forward_market_cap").fill_null(0) >= config.minimum_market_cap)
+            & (pl.col("rvol").fill_null(0) >= config.minimum_premarket_rvol)
             & ~pl.col("current_halt").fill_null(True)
             & ~pl.col("luld_risk").fill_null(True)
         )
