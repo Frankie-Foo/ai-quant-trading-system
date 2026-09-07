@@ -905,7 +905,7 @@ def _process_command_line(pid: int) -> str:
 def _process_running(pid: int) -> bool:
     if pid <= 0:
         raise RuntimeError("Paper monitor PID is invalid")
-    if os.name == "nt":
+    if sys.platform == "win32":
         import ctypes
         from ctypes import wintypes
 

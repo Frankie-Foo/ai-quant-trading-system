@@ -2308,3 +2308,9 @@ Status: offline implementation and verification; no production activation.
 - GitHub CI, main merge, task cutover, authorized evening SIP check and the next
   real session's fill-to-Loop acceptance remain separate release gates at this
   candidate checkpoint. No real trading is authorized or enabled.
+- First GitHub run passed tests, Ruff, dependency audit and client checks but
+  found two Linux mypy errors in the Windows liveness branch. Reproduced with
+  `mypy --platform linux --no-incremental scripts/run_modern_funnel_stage.py`.
+  Replacing its runtime platform guard with the type-checker-recognized
+  `sys.platform == "win32"` passed both Linux and Windows mypy targets; all
+  **41** funnel-stage regression tests passed. No type-ignore was introduced.
