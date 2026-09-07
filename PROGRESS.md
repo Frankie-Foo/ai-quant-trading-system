@@ -1,5 +1,81 @@
 # Progress
 
+## M94 Deterministic Loop review provenance - 2026-09-05
+
+Status: implemented locally; Loop submission remains blocked pending machine-local binding,
+Active Policy and runtime credentials.
+
+- Daily-review provenance now uses immutable accepted-snapshot `as_of` time rather than wall-clock build time, preventing a repeated same-event submission from colliding with different payload content.
+- Verification: Python 3.12 focused `tests/test_loop_integration.py` passed (14 passed); Ruff and `git diff --check` passed.
+
+## M93 Loop daily-review metric and knowledge lineage v6 - 2026-09-03
+
+Status: producer changes are implemented locally; deploy Loop v6 before switching
+the producer binding.
+
+- Replaced ambiguous `top10_pnl`, `non_top10_pnl` and `ab_hit_rate` output with
+  explicit close-return aggregate/rate fields plus sample counts. The Task now
+  declares decimal-return aggregation and explicitly states that portfolio PnL is
+  unavailable when no fills, weights and costs exist.
+- Updated the pinned Workflow binding to `quant_daily_review` v6. Historical v5
+  payloads remain a Loop compatibility concern and are not rewritten by this repo.
+- The companion Loop runtime links generated ranking/regime IDs into the daily
+  review and does not turn `UNKNOWN` into a high-confidence market regime.
+- Verification: compileall, Ruff and `git diff --check` passed for the changed
+  producer files. The focused pytest remains environment-blocked because the local
+  virtualenv has no test/runtime dependencies and the isolated Polars runtime
+  download did not complete; this is not recorded as a test pass.
+
+## M92 Loop review event self-transition contract - 2026-09-03
+
+Status: producer contract and regression coverage updated locally; production retry requires the matching Loop backend deployment.
+
+- Kept the immutable `review_completed` contract semantics as
+  `OBSERVING -> OBSERVING`; a completed daily review records an auditable event and
+  does not fabricate a trading-state promotion.
+- Added payload regression coverage for the contract ID, review event, frozen
+  timestamps and no-order guard; documented Loop's `state_changed=false` and
+  `transition_kind=self_transition` trace contract.
+- No Broker/OMS path, Active Policy, production parameter or versioned v1 control
+  manifest was changed.
+- Verification: Python 3.12 compileall, Ruff 0.15.22 and `git diff --check`
+  passed. The focused pytest run is environment-blocked: the repository `.venv`
+  has no pytest, and an isolated install timed out downloading
+  `polars-runtime-32==1.42.1`; this is not recorded as a test pass.
+
+## M91 Loop contract bootstrap and fail-closed delivery - 2026-09-03
+
+Status: implemented locally; production contract initialization remains an explicit operator action.
+
+- Added versioned `US-equity` Signal/FSM/Golden manifest and an explicit idempotent initializer.
+- Daily review now validates immutable contract identity, type, status, market, PAPER_ONLY flags,
+  config hash and availability before creating any remote Task.
+- Added `blocked_precondition` and `audit_only_backfill` Outbox terminal states; historical reviews
+  cannot enter strategy-governance samples.
+- HTTP success is no longer treated as business success: only COMPLETED Runs are delivered, while
+  FAILED Runs retain Task/Run IDs, failed node and error code.
+- Added regression coverage for missing contracts, temporal boundaries, HTTP 200 + FAILED,
+  idempotent initialization, full completion, active-policy immutability and zero Broker/OMS calls.
+
+## M90 Loop Platform governed daily-review integration - 2026-09-02
+
+Status: implemented locally; external Loop delivery and Paper activation remain disabled.
+
+- Added a provenance-bearing `ai_quant.loop_daily_review.v1` contract that maps the
+  accepted postmarket opportunity cohort to Loop `quant_daily_review` v5 without
+  expanding the six-symbol execution pool. Missing minute paths remain unavailable.
+- Added an idempotent WAL/FULL SQLite Outbox, Task/Run client, delayed 1d/5d/20d
+  Outcome contract, and optional non-blocking postmarket handoff.
+- Added read-only policy-candidate consumption. Only allowlisted `universe.min_rvol`
+  can become a local Shadow challenger; trading-policy changes, order authorization,
+  production eligibility and unsupported parameters fail closed.
+- Loop can never write the active policy or call a Broker. Existing hash-confirmed
+  human approval, same-pool Shadow evidence and rollback remain authoritative.
+- Verification: compileall and Ruff passed; strict Mypy passed for the ten touched
+  Python source files using the available Loop environment; a generated Task passed
+  Loop v5's real input-schema validator. Full pytest was blocked because this checkout
+  had no project environment and dependency downloads did not complete.
+
 ## Feishu investment flywheel repair - 2026-08-07
 
 Status: implemented and verified on the enterprise branch.
@@ -2098,3 +2174,19 @@ Status: installed for Alpaca Paper only; real trading remains forbidden.
   capacity-ranking rejection reasons. Independent review found no remaining
   Critical/Important issues. Full pytest passed `745` tests; Ruff, strict Mypy across
   `411` files and compileall passed.
+
+## M90 2026-09-04 governed delayed Outcome v2
+
+- Unified delayed Outcome governance lineage under `evidence`; legacy v1 metadata is
+  normalized only when non-conflicting, while v2 rejects misplaced or inconsistent
+  lineage.
+- Added Loop-provided revision/event assignments and a deterministic 1d/5d/20d XNYS
+  reporter. It verifies accepted snapshot hashes, never fills missing/halted bars,
+  requires an explicitly approved benchmark/cost model, and persists submissions in
+  the existing idempotent Outbox.
+- Postmarket integration is independently disabled by default and records zero orders.
+  Loop or data failures remain pending without changing the authoritative local review.
+- Verification: targeted Outcome and scheduler tests passed `7`; Ruff and compileall
+  passed. The full suite reached `758` passes; `30` unrelated tests remain blocked by
+  the intentionally absent local `runs/strategy/active.json`, so no active policy was
+  fabricated to make those tests pass.

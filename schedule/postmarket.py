@@ -24,7 +24,7 @@ from schedule.state import JobLedger
 
 ROOT = Path(__file__).resolve().parents[1]
 JOB_NAME = "postmarket_review"
-JOB_VERSION = "postmarket_review.v9"
+JOB_VERSION = "postmarket_review.v10"
 
 
 def _truthy(value: str | None) -> bool:
@@ -159,6 +159,96 @@ def _run_module(
         elapsed_ms=result.elapsed_ms,
     )
     return result.stdout
+
+
+def _sync_loop_review(
+    *,
+    trade_date: date,
+    data_root: Path,
+    artifacts: tuple[str, ...],
+    logger: JsonEventLogger,
+) -> None:
+    """Best-effort slow-loop handoff; local review success remains authoritative."""
+
+    if not _truthy(os.environ.get("AI_QUANT_LOOP_SYNC_ENABLED")):
+        return
+    binding = os.environ.get("AI_QUANT_LOOP_BINDING_FILE", "").strip()
+    active_policy = os.environ.get("AI_QUANT_ACTIVE_POLICY_FILE", "").strip()
+    if not binding or not active_policy:
+        logger.emit(
+            "loop_review_sync_skipped",
+            level="warning",
+            trade_date=trade_date.isoformat(),
+            reason="binding_or_active_policy_missing",
+        )
+        return
+    command = [
+        sys.executable,
+        "-m",
+        "scripts.sync_loop_daily_review",
+        "--trade-date",
+        trade_date.isoformat(),
+        "--data-root",
+        str(data_root),
+        "--binding",
+        binding,
+        "--active-policy",
+        active_policy,
+    ]
+    for artifact in artifacts:
+        command.extend(("--artifact-id", artifact))
+    result = run_child(command, cwd=ROOT, timeout_seconds=120)
+    logger.emit(
+        "loop_review_sync_completed" if result.return_code == 0 else "loop_review_sync_pending",
+        level="info" if result.return_code == 0 else "warning",
+        trade_date=trade_date.isoformat(),
+        return_code=result.return_code,
+        orders_submitted=0,
+    )
+
+
+def _sync_loop_outcomes(
+    *,
+    trade_date: date,
+    data_root: Path,
+    logger: JsonEventLogger,
+) -> None:
+    """Best-effort delayed labels; never weaken the local postmarket result."""
+
+    if not _truthy(os.environ.get("AI_QUANT_LOOP_OUTCOME_SYNC_ENABLED")):
+        return
+    config_file = os.environ.get(
+        "AI_QUANT_LOOP_OUTCOME_CONFIG_FILE", ""
+    ).strip()
+    if not config_file:
+        logger.emit(
+            "loop_outcome_sync_skipped",
+            level="warning",
+            trade_date=trade_date.isoformat(),
+            reason="approved_outcome_config_missing",
+        )
+        return
+    command = [
+        sys.executable,
+        "-m",
+        "scripts.sync_loop_due_outcomes",
+        "--as-of-trade-date",
+        trade_date.isoformat(),
+        "--data-root",
+        str(data_root),
+        "--config",
+        config_file,
+    ]
+    result = run_child(command, cwd=ROOT, timeout_seconds=300)
+    logger.emit(
+        "loop_outcome_sync_completed"
+        if result.return_code == 0
+        else "loop_outcome_sync_pending",
+        level="info" if result.return_code == 0 else "warning",
+        trade_date=trade_date.isoformat(),
+        return_code=result.return_code,
+        orders_submitted=0,
+    )
 
 
 def _run_one(
@@ -448,6 +538,17 @@ def _run_locked(args: argparse.Namespace, logger: JsonEventLogger) -> int:
                     )
                     if _truthy(os.environ.get("FEISHU_INVESTMENT_AUDIT_REQUIRED")):
                         raise
+            _sync_loop_review(
+                trade_date=trade_date,
+                data_root=args.data_root,
+                artifacts=artifacts,
+                logger=logger,
+            )
+            _sync_loop_outcomes(
+                trade_date=trade_date,
+                data_root=args.data_root,
+                logger=logger,
+            )
             ledger.complete(lease, artifact_ids=artifacts)
             logger.emit(
                 "job_completed",
