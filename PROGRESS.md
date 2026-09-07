@@ -2220,3 +2220,21 @@ Status: installed for Alpaca Paper only; real trading remains forbidden.
   `runs/strategy/active.json` and therefore reports the same 30 configuration failures.
   Focused Loop bridge/selection/Outcome tests passed `37`; Ruff passed. Targeted strict
   Mypy reports no new errors; three pre-existing errors remain in `control_plane.py`.
+
+## M94 2026-09-07 auditable decision intent and Outcome timeline
+
+- Added a versioned `ai_quant.decision_intent.v1` contract to every daily-review
+  instrument decision. It records selection intent (`eligible_long`, `observe`,
+  `avoid`, or `risk_block`) while explicitly keeping execution authorization false;
+  unavailable entry, sizing, stop and exit facts remain declared incomplete instead
+  of being fabricated.
+- The delayed Outcome reporter now publishes per-event 1d/5d/20d producer states:
+  not matured, waiting for accepted market data, invalid, sync pending, sync failed or
+  observed. Status batches are capped at 1,000 records and preserve the primary
+  Outcome delivery error if diagnostic status reporting also fails.
+- Loop persists monotonic status checkpoints and derives exchange-session-aware UI
+  timelines. The knowledge page separates each horizon and exposes decision reason,
+  trigger facts, risk controls, invalidation conditions and the non-executable intent.
+- Verification: the full suite passed `793` tests with the optional active-policy
+  override explicitly empty; focused Loop integration tests passed `15`, and Ruff
+  passed for the changed integration surface.

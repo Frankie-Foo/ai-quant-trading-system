@@ -62,6 +62,46 @@ class StrategyIdentity(FrozenModel):
     active_policy_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class DecisionIntent(FrozenModel):
+    """Auditable intent; never an order authorization."""
+
+    schema_version: Literal["ai_quant.decision_intent.v1"] = "ai_quant.decision_intent.v1"
+    intent_type: Literal["selection", "execution_plan"] = "selection"
+    action: Literal["eligible_long", "observe", "avoid", "risk_block"]
+    side: Literal["long_only"] = "long_only"
+    execution_authorized: Literal[False] = False
+    entry_rule: str | None = None
+    entry_valid_until: datetime | None = None
+    target_position_fraction: float | None = Field(default=None, gt=0.0, le=1.0)
+    stop_loss_rule: str | None = None
+    take_profit_rule: str | None = None
+    exit_rule: str | None = None
+    max_holding_sessions: int | None = Field(default=None, ge=1, le=252)
+    execution_plan_complete: bool = False
+    incomplete_reasons: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_execution_plan(self) -> Self:
+        if self.entry_valid_until is not None and (
+            self.entry_valid_until.tzinfo is None or self.entry_valid_until.utcoffset() is None
+        ):
+            raise ValueError("entry_valid_until must be timezone-aware")
+        fields = (
+            self.entry_rule,
+            self.target_position_fraction,
+            self.stop_loss_rule,
+            self.exit_rule,
+            self.max_holding_sessions,
+        )
+        if self.execution_plan_complete and (
+            self.intent_type != "execution_plan" or any(value is None for value in fields)
+        ):
+            raise ValueError("complete execution intent requires entry, size, stop, and exit")
+        if not self.execution_plan_complete and not self.incomplete_reasons:
+            raise ValueError("incomplete decision intent requires explicit reasons")
+        return self
+
+
 class ReviewDecision(FrozenModel):
     instrument: str = Field(pattern=r"^[A-Z][A-Z0-9.-]{0,15}$")
     rank: int = Field(ge=1)
@@ -73,6 +113,7 @@ class ReviewDecision(FrozenModel):
     logging_action_probability: float = Field(gt=0.0, le=1.0)
     reward_model_logged: float
     verdict: Literal["accept", "watch", "reject", "block"]
+    decision_intent: DecisionIntent
     reason: str = Field(min_length=1, max_length=6000)
     event_time: datetime
     available_at: datetime
@@ -412,6 +453,40 @@ class LoopOutcomeEnvelope(FrozenModel):
                 abs_tol=1e-10,
             ):
                 raise ValueError("outcome v2 counterfactual net excess formula mismatch")
+
+
+class LoopOutcomeSyncStatus(FrozenModel):
+    id: str = Field(min_length=1, max_length=64)
+    decision_event_id: str = Field(min_length=1, max_length=64)
+    strategy_revision_id: str = Field(default="", max_length=64)
+    market_scope: str = Field(min_length=1, max_length=128)
+    horizon: Literal["1d", "5d", "20d"]
+    outcome_kind: Literal["event_observation", "strategy_evaluation"]
+    state: Literal[
+        "NOT_MATURED",
+        "WAITING_DATA",
+        "SYNC_PENDING",
+        "SYNC_FAILED",
+        "INVALID",
+        "OBSERVED",
+    ]
+    reason: str = Field(default="", max_length=4000)
+    source_system: Literal["ai-quant-trading-system"] = "ai-quant-trading-system"
+    updated_at: datetime
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("updated_at")
+    @classmethod
+    def status_time_is_utc(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() != UTC.utcoffset(value):
+            raise ValueError("updated_at must be timezone-aware UTC")
+        return value
+
+    @model_validator(mode="after")
+    def event_status_has_no_strategy(self) -> Self:
+        if self.outcome_kind == "event_observation" and self.strategy_revision_id:
+            raise ValueError("event sync status must not bind a strategy revision")
+        return self
 
 
 class LoopOutcomeAssignment(FrozenModel):

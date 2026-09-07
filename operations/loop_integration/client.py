@@ -12,6 +12,7 @@ from .contracts import (
     LoopEventOutcomeAssignment,
     LoopOutcomeAssignment,
     LoopOutcomeEnvelope,
+    LoopOutcomeSyncStatus,
     LoopPolicyCandidate,
     QuantReviewEnvelope,
 )
@@ -239,6 +240,21 @@ class LoopClient:
             raise RuntimeError("Loop outcome response lacks id")
         return str(result["id"])
 
+    def submit_outcome_sync_statuses(self, statuses: tuple[LoopOutcomeSyncStatus, ...]) -> int:
+        if not statuses:
+            return 0
+        batch_size = 1000
+        for offset in range(0, len(statuses), batch_size):
+            batch = statuses[offset : offset + batch_size]
+            result = self._request(
+                "POST",
+                "/api/v1/knowledge/quant/outcome-sync-statuses",
+                {"statuses": [item.model_dump(mode="json") for item in batch]},
+            )
+            if not isinstance(result, dict) or int(result.get("saved") or 0) != len(batch):
+                raise RuntimeError("Loop outcome sync-status response is incomplete")
+        return len(statuses)
+
     def list_outcome_assignments(
         self,
         *,
@@ -319,6 +335,7 @@ def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict
             "logging_action_probability": item.logging_action_probability,
             "reward_model_logged": item.reward_model_logged,
             "verdict": item.verdict,
+            "decision_intent": item.decision_intent.model_dump(mode="json"),
             "reason": item.reason,
             "one_minute_path": list(item.one_minute_path),
             "trigger_results": item.trigger_results,

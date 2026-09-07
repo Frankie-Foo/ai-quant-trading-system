@@ -16,6 +16,7 @@ from kernel.config import Config
 from kernel.strategy_policy import StrategyPolicy
 
 from .contracts import (
+    DecisionIntent,
     QuantReviewEnvelope,
     ReviewDecision,
     ReviewProvenance,
@@ -171,6 +172,20 @@ def build_review_envelope(
                 logging_action_probability=logging_action_probability,
                 reward_model_logged=reward_model_logged,
                 verdict=verdict,
+                decision_intent=DecisionIntent(
+                    action={
+                        "accept": "eligible_long",
+                        "watch": "observe",
+                        "reject": "avoid",
+                        "block": "risk_block",
+                    }[verdict],
+                    incomplete_reasons=(
+                        "daily_review_records_selection_not_order",
+                        "entry_price_not_frozen",
+                        "position_size_not_frozen",
+                        "exit_path_not_frozen",
+                    ),
+                ),
                 reason=str(row.get("root_cause_detail") or root_cause),
                 event_time=cutoff,
                 available_at=as_of,

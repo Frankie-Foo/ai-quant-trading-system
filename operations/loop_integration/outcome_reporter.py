@@ -24,6 +24,7 @@ from .contracts import (
     LoopEventOutcomeAssignment,
     LoopOutcomeAssignment,
     LoopOutcomeEnvelope,
+    LoopOutcomeSyncStatus,
     OutcomeReporterConfig,
 )
 from .outbox import LoopOutbox
@@ -165,6 +166,33 @@ def _event_outcome_id(
         json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     return f"quant_event_outcome_v1_{digest[:36]}"
+
+
+def _sync_status_id(
+    *,
+    decision_event_id: str,
+    strategy_revision_id: str,
+    horizon: str,
+    outcome_kind: str,
+) -> str:
+    digest = hashlib.sha256(
+        "|".join((decision_event_id, strategy_revision_id, horizon, outcome_kind)).encode()
+    ).hexdigest()
+    return f"quant_sync_status_{digest[:36]}"
+
+
+def _pending_state(reason: str) -> str:
+    if reason == "horizon_not_mature":
+        return "NOT_MATURED"
+    if reason.startswith(
+        (
+            "daily_snapshot_missing:",
+            "instrument_bar_missing_or_halted:",
+            "benchmark_bar_missing:",
+        )
+    ):
+        return "WAITING_DATA"
+    return "INVALID"
 
 
 def build_due_event_outcome(
@@ -496,6 +524,7 @@ def sync_due_outcomes(
     due = staged = delivered = 0
     pending: list[PendingOutcome] = []
     generated: list[LoopOutcomeEnvelope] = []
+    statuses: dict[tuple[str, str, str, str], LoopOutcomeSyncStatus] = {}
     for event_assignment in event_assignments:
         for horizon in event_assignment.outstanding_horizons:
             outcome, reason = build_due_event_outcome(
@@ -508,13 +537,28 @@ def sync_due_outcomes(
             if reason != "horizon_not_mature":
                 due += 1
             if outcome is None:
-                pending.append(
-                    PendingOutcome(
-                        decision_event_id=event_assignment.decision_event_id,
+                item = PendingOutcome(
+                    decision_event_id=event_assignment.decision_event_id,
+                    strategy_revision_id="",
+                    horizon=horizon,
+                    reason=reason,
+                )
+                pending.append(item)
+                key = (item.decision_event_id, "", horizon, "event_observation")
+                statuses[key] = LoopOutcomeSyncStatus(
+                    id=_sync_status_id(
+                        decision_event_id=item.decision_event_id,
                         strategy_revision_id="",
                         horizon=horizon,
-                        reason=reason,
-                    )
+                        outcome_kind="event_observation",
+                    ),
+                    decision_event_id=item.decision_event_id,
+                    market_scope=config.market_scope,
+                    horizon=horizon,
+                    outcome_kind="event_observation",
+                    state=_pending_state(reason),
+                    reason=reason,
+                    updated_at=observed_before,
                 )
             else:
                 generated.append(outcome)
@@ -538,9 +582,57 @@ def sync_due_outcomes(
                         reason=reason,
                     )
                 )
+                key = (
+                    strategy_assignment.decision_event_id,
+                    strategy_assignment.strategy_revision_id,
+                    horizon,
+                    "strategy_evaluation",
+                )
+                statuses[key] = LoopOutcomeSyncStatus(
+                    id=_sync_status_id(
+                        decision_event_id=strategy_assignment.decision_event_id,
+                        strategy_revision_id=strategy_assignment.strategy_revision_id,
+                        horizon=horizon,
+                        outcome_kind="strategy_evaluation",
+                    ),
+                    decision_event_id=strategy_assignment.decision_event_id,
+                    strategy_revision_id=strategy_assignment.strategy_revision_id,
+                    market_scope=config.market_scope,
+                    horizon=horizon,
+                    outcome_kind="strategy_evaluation",
+                    state=_pending_state(reason),
+                    reason=reason,
+                    updated_at=observed_before,
+                )
                 continue
             generated.append(outcome)
     for outcome in generated:
+        strategy_revision_id = str(outcome.evidence.get("strategy_revision_id") or "")
+        key = (
+            outcome.decision_event_id,
+            strategy_revision_id,
+            outcome.horizon,
+            outcome.outcome_kind,
+        )
+        status_args = {
+            "id": _sync_status_id(
+                decision_event_id=outcome.decision_event_id,
+                strategy_revision_id=strategy_revision_id,
+                horizon=outcome.horizon,
+                outcome_kind=outcome.outcome_kind,
+            ),
+            "decision_event_id": outcome.decision_event_id,
+            "strategy_revision_id": strategy_revision_id,
+            "market_scope": outcome.market_scope,
+            "horizon": outcome.horizon,
+            "outcome_kind": outcome.outcome_kind,
+            "updated_at": observed_before,
+        }
+        statuses[key] = LoopOutcomeSyncStatus(
+            **status_args,
+            state="SYNC_PENDING",
+            reason="stage_only" if stage_only else "awaiting Loop acknowledgement",
+        )
         payload = outcome.model_dump(mode="json")
         item = outbox.stage(
             event_id=outcome.id,
@@ -553,14 +645,30 @@ def sync_due_outcomes(
             continue
         if item.status == "delivered":
             delivered += 1
+            statuses[key] = LoopOutcomeSyncStatus(
+                **status_args, state="OBSERVED", reason="idempotent replay"
+            )
             continue
         try:
             client.submit_outcome(outcome)
         except Exception as exc:
             outbox.mark_failed(outcome.id, error_code=type(exc).__name__)
+            statuses[key] = LoopOutcomeSyncStatus(
+                **status_args, state="SYNC_FAILED", reason=type(exc).__name__
+            )
+            try:
+                client.submit_outcome_sync_statuses(tuple(statuses.values()))
+            except Exception:
+                # Preserve the outcome delivery error as the primary failure.
+                pass
             raise
         outbox.mark_delivered(outcome.id)
         delivered += 1
+        statuses[key] = LoopOutcomeSyncStatus(
+            **status_args, state="OBSERVED", reason="Loop acknowledged outcome"
+        )
+    if not stage_only:
+        client.submit_outcome_sync_statuses(tuple(statuses.values()))
     return OutcomeSyncSummary(
         assignments=len(event_assignments) + len(strategy_assignments),
         event_assignments=len(event_assignments),

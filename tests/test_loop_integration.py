@@ -180,6 +180,10 @@ def test_review_builder_keeps_top10_separate_and_never_fabricates_paths(tmp_path
     assert envelope.execution_summary["orders_authorized"] is False
     task = build_loop_task(envelope, _binding())
     primary = envelope.top10_decisions[0]
+    assert primary.decision_intent.action == "eligible_long"
+    assert primary.decision_intent.intent_type == "selection"
+    assert primary.decision_intent.execution_authorized is False
+    assert primary.decision_intent.execution_plan_complete is False
     assert task["workflow_version_id"] == "workflow-version-quant-daily-review-v6"
     assert len(task["input_data"]["dynamic_rescan"]["ranked_candidates"]) == 10
     assert task["input_data"]["daily_review"]["outcome_ids"] == []
@@ -727,6 +731,8 @@ def test_due_outcome_reporter_waits_for_sessions_then_submits_v2(
                 }
             ]
         assert payload is not None
+        if path.endswith("/outcome-sync-statuses"):
+            return {"saved": len(payload["statuses"])}  # type: ignore[arg-type]
         return {"id": payload["id"]}
 
     config = OutcomeReporterConfig(
@@ -780,6 +786,18 @@ def test_due_outcome_reporter_waits_for_sessions_then_submits_v2(
     assert posted["realized_policy_return"] == 0.0
     assert posted["counterfactual_instrument_return"] == pytest.approx(0.04)
     assert posted["counterfactual_net_excess_return"] == pytest.approx(0.0285)
+    status_payload = next(
+        payload
+        for method, path, payload in requests
+        if method == "POST" and path.endswith("/outcome-sync-statuses")
+    )
+    assert status_payload is not None
+    status_by_horizon = {
+        item["horizon"]: item
+        for item in status_payload["statuses"]  # type: ignore[index]
+    }
+    assert status_by_horizon["1d"]["state"] == "OBSERVED"
+    assert status_by_horizon["5d"]["state"] == "NOT_MATURED"
 
 
 def test_due_outcome_reporter_submits_event_observation_without_strategy(
@@ -844,6 +862,8 @@ def test_due_outcome_reporter_submits_event_observation_without_strategy(
         if method == "GET":
             return []
         assert payload is not None
+        if path.endswith("/outcome-sync-statuses"):
+            return {"saved": len(payload["statuses"])}  # type: ignore[arg-type]
         return {"id": payload["id"]}
 
     config = OutcomeReporterConfig(
@@ -886,3 +906,15 @@ def test_due_outcome_reporter_submits_event_observation_without_strategy(
     assert posted["counterfactual_net_excess_return"] == pytest.approx(0.027)
     assert posted["direction_correct"] is False
     assert "strategy_revision_id" not in posted["evidence"]  # type: ignore[operator]
+    status_payload = next(
+        payload
+        for method, path, payload in requests
+        if method == "POST" and path.endswith("/outcome-sync-statuses")
+    )
+    assert status_payload is not None
+    status_by_horizon = {
+        item["horizon"]: item
+        for item in status_payload["statuses"]  # type: ignore[index]
+    }
+    assert status_by_horizon["1d"]["state"] == "OBSERVED"
+    assert status_by_horizon["5d"]["state"] == "NOT_MATURED"
