@@ -318,7 +318,11 @@ def validate_loop_task_cohort(task_payload: dict[str, Any]) -> None:
     dynamic_rescan = input_data.get("dynamic_rescan")
     adjudication = input_data.get("top10_adjudication")
     daily_review = input_data.get("daily_review")
-    if not all(isinstance(item, dict) for item in (dynamic_rescan, adjudication, daily_review)):
+    if not isinstance(dynamic_rescan, dict):
+        raise ValueError("Loop task requires daily review cohort sections")
+    if not isinstance(adjudication, dict):
+        raise ValueError("Loop task requires daily review cohort sections")
+    if not isinstance(daily_review, dict):
         raise ValueError("Loop task requires daily review cohort sections")
 
     ranked = dynamic_rescan.get("ranked_candidates")
