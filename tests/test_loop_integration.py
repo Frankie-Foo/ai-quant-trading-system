@@ -26,6 +26,7 @@ from operations.loop_integration.client import (
     LoopPreconditionError,
     LoopRunFailedError,
     build_loop_task,
+    validate_loop_task_cohort,
 )
 from operations.loop_integration.contracts import (
     LoopBinding,
@@ -216,8 +217,10 @@ def test_review_builder_keeps_top10_separate_and_never_fabricates_paths(tmp_path
     task = build_loop_task(envelope, _binding())
     primary = envelope.top10_decisions[0]
     assert task["workflow_version_id"] == "workflow-version-quant-daily-review-v6"
-    assert task["input_data"]["dynamic_rescan"]["universe"] == ["MORNING", "WATCH"]
-    assert len(task["input_data"]["dynamic_rescan"]["ranked_candidates"]) == 2
+    assert task["input_data"]["dynamic_rescan"]["universe"] == [
+        f"T{index:02d}" for index in range(10)
+    ]
+    assert len(task["input_data"]["dynamic_rescan"]["ranked_candidates"]) == 10
     assert task["input_data"]["daily_review"]["outcome_ids"] == []
     review = task["input_data"]["daily_review"]
     assert "top10_pnl" not in review["metrics"]
@@ -259,6 +262,32 @@ def test_review_builder_keeps_top10_separate_and_never_fabricates_paths(tmp_path
     assert fsm_transition["guard_snapshot"]["orders_authorized"] is False
     assert fsm_transition["metadata"]["source_system"] == "ai-quant-trading-system"
     assert task["constraints"]["allow_order_execution"] is False
+    ranked = [
+        item["instrument"]
+        for item in task["input_data"]["dynamic_rescan"]["ranked_candidates"][:10]
+    ]
+    adjudicated = [
+        item["instrument"]
+        for item in task["input_data"]["top10_adjudication"]["decisions"]
+    ]
+    reviewed = [
+        item["instrument"]
+        for item in task["input_data"]["daily_review"]["top10_verdicts"]
+    ]
+    assert ranked == adjudicated == reviewed
+
+
+def test_client_rejects_a_mixed_top10_cohort_before_remote_submission(
+    tmp_path: Path,
+) -> None:
+    task = build_loop_task(_envelope(tmp_path), _binding())
+    task["input_data"]["top10_adjudication"]["decisions"][0]["instrument"] = "OTHER"
+
+    with pytest.raises(
+        ValueError,
+        match=r"Top10 cohort mismatch.*missing=T00.*unexpected=OTHER",
+    ):
+        validate_loop_task_cohort(task)
 
 
 def test_review_without_effective_plan_does_not_invent_risk_or_execution(tmp_path: Path) -> None:
@@ -313,7 +342,8 @@ def test_review_carries_factual_summary_and_full_pool_without_winner_selection_b
     task = build_loop_task(envelope, _binding())
     review = task["input_data"]["daily_review"]
     assert review["frozen_candidate_pool"]["count"] == 15
-    assert len(task["input_data"]["dynamic_rescan"]["ranked_candidates"]) == 15
+    assert len(task["input_data"]["dynamic_rescan"]["ranked_candidates"]) == 10
+    assert len(review["frozen_candidate_pool"]["candidates"]) == 15
     assert review["execution_summary"]["realized_net_pnl"] == 78
     assert review["execution_summary"]["strategy_sha256"] == (
         review["risk_policy"]["evidence"]["strategy_sha256"]
@@ -327,7 +357,9 @@ def test_missing_morning_pool_never_falls_back_to_winners(tmp_path: Path) -> Non
         "candidate_pool_complete": False, "candidates": None,
     })
     task = build_loop_task(envelope, _binding())
-    assert task["input_data"]["dynamic_rescan"]["universe"] == []
+    assert task["input_data"]["dynamic_rescan"]["universe"] == [
+        f"T{index:02d}" for index in range(10)
+    ]
     assert task["input_data"]["daily_review"]["frozen_candidate_pool"]["count"] is None
     assert len(envelope.top10_decisions) == 10
 
