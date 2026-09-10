@@ -2238,3 +2238,16 @@ Status: installed for Alpaca Paper only; real trading remains forbidden.
 - Verification: the full suite passed `793` tests with the optional active-policy
   override explicitly empty; focused Loop integration tests passed `15`, and Ruff
   passed for the changed integration surface.
+
+## M95 2026-09-10 daily Top10 cohort integrity
+
+- Daily Top10 membership may change between trading sessions, but a single review now
+  derives dynamic ranking, forced adjudication and daily verdicts from one immutable
+  cohort. The payload records a deterministic cohort ID and decision trading date.
+- The trading-system adapter rejects missing, duplicate or cross-section instruments
+  and verdict drift before any remote Task request. Historical 1d/5d/20d observations
+  remain separate Outcome submissions and never replace the current day's candidates.
+- Loop independently applies the same invariant during Task creation, returning 422
+  with missing and unexpected symbols instead of failing after a Run has staged data.
+- Verification: trading-system Loop integration tests passed `16`; Loop contract bridge
+  tests passed `8`; Ruff passed on all changed Python files in both repositories.

@@ -22,6 +22,7 @@ from operations.loop_integration.client import (
     LoopPreconditionError,
     LoopRunFailedError,
     build_loop_task,
+    validate_loop_task_cohort,
 )
 from operations.loop_integration.contracts import (
     LoopBinding,
@@ -227,6 +228,32 @@ def test_review_builder_keeps_top10_separate_and_never_fabricates_paths(tmp_path
     assert fsm_transition["guard_snapshot"]["orders_authorized"] is False
     assert fsm_transition["metadata"]["source_system"] == "ai-quant-trading-system"
     assert task["constraints"]["allow_order_execution"] is False
+    ranked = [
+        item["instrument"]
+        for item in task["input_data"]["dynamic_rescan"]["ranked_candidates"][:10]
+    ]
+    adjudicated = [
+        item["instrument"]
+        for item in task["input_data"]["top10_adjudication"]["decisions"]
+    ]
+    reviewed = [
+        item["instrument"]
+        for item in task["input_data"]["daily_review"]["top10_verdicts"]
+    ]
+    assert ranked == adjudicated == reviewed
+
+
+def test_client_rejects_a_mixed_top10_cohort_before_remote_submission(
+    tmp_path: Path,
+) -> None:
+    task = build_loop_task(_envelope(tmp_path), _binding())
+    task["input_data"]["top10_adjudication"]["decisions"][0]["instrument"] = "OTHER"
+
+    with pytest.raises(
+        ValueError,
+        match=r"Top10 cohort mismatch.*missing=T00.*unexpected=OTHER",
+    ):
+        validate_loop_task_cohort(task)
 
 
 def test_loop_client_creates_idempotent_task_then_runs_it(tmp_path: Path) -> None:
