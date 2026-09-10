@@ -1,5 +1,20 @@
 # Progress
 
+## M95 Loop SignalContract submit preflight - 2026-09-10
+
+Status: implemented locally; production deployment and replacement Task creation remain pending.
+
+- The official Loop client now evaluates the final Task signal against the exact active,
+  hash-verified remote SignalContract before creating a Task.
+- Missing required features, unsupported signal types, stale events and future information fail
+  closed with explicit evidence; no remote Task is created.
+- Historical owner-attested producers must use the same client and retain missing market facts as
+  blocked preconditions. The implementation does not invent or backfill absent market evidence.
+- Verification: `tests/test_loop_integration.py` passed (29 tests); Ruff, strict Mypy and
+  `git diff --check` passed. The repository suite passed 1106 tests with 2 platform skips when
+  the unrelated order-sensitive SQLite byte-identity test was deselected. That test passed in
+  isolation but failed in full-suite order at SQLite header byte 27; it was not changed here.
+
 ## M94 Deterministic Loop review provenance - 2026-09-05
 
 Status: implemented locally; Loop submission remains blocked pending machine-local binding,

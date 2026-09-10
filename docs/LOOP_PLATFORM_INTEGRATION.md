@@ -33,6 +33,14 @@ python -m scripts.sync_loop_daily_review \
   --active-policy runs/strategy/active.json
 ```
 
+合同验证成功后，客户端还会用刚读取且 Hash 匹配的 SignalContract 对最终 Task 做提交前校验，
+包括 required features、允许的 signal type、事件新鲜度和 point-in-time 边界。校验失败返回
+`SIGNAL_CONTRACT_REJECTED` 及具体违规项，且不会调用 `POST /api/v1/tasks`。所有正式、历史补录
+和人工见证生产者都必须调用 `LoopClient.submit_review`；禁止绕过该入口直接拼装 Task。若历史
+证据没有 `close_return`、`dollar_volume`、`atr_pct` 等合同要求的决策时点事实，应保持
+`blocked_precondition`，不能用当前行情、默认值或人工猜测补齐；只有找到原始不可变快照后才能
+创建新的替代 Task。
+
 环境变量：
 
 ```text

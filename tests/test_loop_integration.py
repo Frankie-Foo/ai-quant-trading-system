@@ -30,6 +30,7 @@ from operations.loop_integration.contracts import (
     LoopOutcomeEnvelope,
     LoopPolicyCandidate,
     OutcomeReporterConfig,
+    QuantReviewEnvelope,
 )
 from operations.loop_integration.control_plane import (
     LoopControlPlaneManifest,
@@ -45,7 +46,7 @@ TRADE_DATE = date(2026, 9, 1)
 
 
 def _control_payload(artifact_id: str) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "id": artifact_id,
         "market_scope": "US-equity",
         "status": "active",
@@ -55,6 +56,15 @@ def _control_payload(artifact_id: str) -> dict[str, object]:
             "production_eligible": False,
         },
     }
+    if artifact_id == "signal-v1":
+        payload.update(
+            {
+                "required_features": ["close_return", "dollar_volume", "atr_pct"],
+                "allowed_signal_types": ["long", "watch"],
+                "max_signal_age_seconds": 86400,
+            }
+        )
+    return payload
 
 
 def _control_hash(artifact_id: str) -> str:
@@ -162,6 +172,17 @@ def _envelope(tmp_path: Path):
         cfg=load_config(Path(__file__).resolve().parents[1] / "config.yaml"),
         active_policy=active,
     )
+
+
+def _submission_envelope(tmp_path: Path) -> QuantReviewEnvelope:
+    envelope = _envelope(tmp_path)
+    decisions = tuple(
+        decision.model_copy(
+            update={"event_time": envelope.as_of, "available_at": envelope.as_of}
+        )
+        for decision in envelope.top10_decisions
+    )
+    return envelope.model_copy(update={"top10_decisions": decisions})
 
 
 def test_review_builder_keeps_top10_separate_and_never_fabricates_paths(tmp_path: Path) -> None:
@@ -274,7 +295,10 @@ def test_loop_client_creates_idempotent_task_then_runs_it(tmp_path: Path) -> Non
         return {"id": "run-1", "status": "COMPLETED"}
 
     client = LoopClient(base_url="https://loop.invalid", api_key="secret", request=request)
-    assert client.submit_review(_envelope(tmp_path), _binding()) == ("task-1", "run-1")
+    assert client.submit_review(_submission_envelope(tmp_path), _binding()) == (
+        "task-1",
+        "run-1",
+    )
     assert all(
         item[1].startswith("/api/v1/knowledge/quant/control-artifacts?") for item in calls[:3]
     )
@@ -309,6 +333,49 @@ def test_missing_contract_blocks_before_remote_task_creation(tmp_path: Path) -> 
     assert blocked is not None
     assert blocked.status == "blocked_precondition"
     assert blocked.remote_task_id is None and blocked.remote_run_id is None
+
+
+def test_signal_contract_rejects_missing_features_before_task_creation(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    def request(method: str, path: str, payload: object) -> object:
+        del method, payload
+        calls.append(path)
+        if path.startswith("/api/v1/knowledge/quant/control-artifacts?"):
+            artifact_type = path.split("artifact_type=", 1)[1].split("&", 1)[0]
+            artifact_id = {
+                "signal_contract": "signal-v1",
+                "fsm_contract": "fsm-v1",
+                "golden_case_suite": "golden-v1",
+            }[artifact_type]
+            return [_control_artifact(artifact_id, artifact_type)]
+        pytest.fail(f"preflight must block before remote Task creation: {path}")
+
+    envelope = _submission_envelope(tmp_path)
+    primary = envelope.top10_decisions[0]
+    incomplete_features = {
+        name: value
+        for name, value in primary.features.items()
+        if name not in {"close_return", "dollar_volume", "atr_pct"}
+    }
+    decisions = (
+        primary.model_copy(update={"features": incomplete_features}),
+        *envelope.top10_decisions[1:],
+    )
+    incomplete = envelope.model_copy(update={"top10_decisions": decisions})
+
+    client = LoopClient(base_url="https://loop.invalid", api_key="secret", request=request)
+    with pytest.raises(LoopPreconditionError) as caught:
+        client.submit_review(incomplete, _binding())
+
+    assert caught.value.code == "SIGNAL_CONTRACT_REJECTED"
+    assert str(caught.value) == (
+        "SignalContract signal-v1 rejected signal: "
+        "missing_features:close_return,dollar_volume,atr_pct"
+    )
+    assert not any(path == "/api/v1/tasks" for path in calls)
 
 
 def test_review_before_contract_available_at_is_audit_only(tmp_path: Path) -> None:
@@ -358,7 +425,7 @@ def test_http_200_failed_run_preserves_remote_failure_evidence(tmp_path: Path) -
 
     client = LoopClient(base_url="https://loop.invalid", api_key="secret", request=request)
     with pytest.raises(LoopRunFailedError) as caught:
-        client.submit_review(_envelope(tmp_path), _binding())
+        client.submit_review(_submission_envelope(tmp_path), _binding())
     outbox = LoopOutbox(tmp_path / "failed.sqlite3")
     envelope = _envelope(tmp_path)
     outbox.stage(
@@ -464,7 +531,7 @@ def test_complete_review_keeps_active_policy_immutable_and_never_calls_broker(
 
     result = LoopClient(
         base_url="https://loop.invalid", api_key="secret", request=request
-    ).submit_review(_envelope(tmp_path), _binding())
+    ).submit_review(_submission_envelope(tmp_path), _binding())
     after = hashlib.sha256(active_path.read_bytes()).hexdigest()
     assert result == ("task-1", "run-1")
     assert before == after

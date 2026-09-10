@@ -90,8 +90,12 @@ class LoopClient:
         return response.json()
 
     def submit_review(self, envelope: QuantReviewEnvelope, binding: LoopBinding) -> tuple[str, str]:
-        self.validate_review_contracts(binding=binding, as_of=envelope.as_of)
+        contracts = self.validate_review_contracts(binding=binding, as_of=envelope.as_of)
         task_payload = build_loop_task(envelope, binding)
+        signal_contract = next(
+            item for item in contracts if item.artifact_type == "signal_contract"
+        )
+        validate_loop_task_signal_contract(task_payload, signal_contract)
         task = self._request("POST", "/api/v1/tasks", task_payload)
         if not isinstance(task, dict) or not str(task.get("id") or ""):
             raise RuntimeError("Loop create-task response lacks task id")
@@ -533,3 +537,99 @@ def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict
     }
     validate_loop_task_cohort(task_payload)
     return task_payload
+
+
+def validate_loop_task_signal_contract(
+    task_payload: dict[str, Any],
+    signal_contract: LoopControlArtifact,
+) -> None:
+    """Reject a Task locally when Loop's frozen SignalContract would reject it."""
+    input_data = task_payload.get("input_data")
+    if not isinstance(input_data, dict):
+        raise LoopPreconditionError(
+            "INVALID_SIGNAL_VALIDATION",
+            "Task input_data must be an object",
+        )
+    validation = input_data.get("signal_validation")
+    signal = validation.get("signal") if isinstance(validation, dict) else None
+    if not isinstance(validation, dict) or not isinstance(signal, dict):
+        raise LoopPreconditionError(
+            "INVALID_SIGNAL_VALIDATION",
+            "Task input_data.signal_validation.signal must be an object",
+        )
+
+    contract_id = str(validation.get("contract_id") or "").strip()
+    if contract_id != signal_contract.id:
+        raise LoopPreconditionError(
+            "SIGNAL_CONTRACT_MISMATCH",
+            f"Task references {contract_id or '-'} but validated {signal_contract.id}",
+        )
+
+    features = signal.get("features")
+    if not isinstance(features, dict):
+        raise LoopPreconditionError(
+            "INVALID_SIGNAL_VALIDATION",
+            "signal.features must be an object",
+        )
+
+    required_features = tuple(
+        str(item).strip()
+        for item in signal_contract.payload.get("required_features") or ()
+        if str(item).strip()
+    )
+    missing = [name for name in required_features if name not in features]
+    signal_type = str(signal.get("signal_type") or "").strip().lower()
+    allowed_signal_types = {
+        str(item).strip().lower()
+        for item in signal_contract.payload.get("allowed_signal_types") or ()
+        if str(item).strip()
+    }
+    try:
+        as_of = _aware_task_datetime(
+            validation.get("as_of") or input_data.get("as_of"),
+            field_name="signal_validation.as_of",
+        )
+        event_time = _aware_task_datetime(
+            signal.get("event_time"), field_name="signal.event_time"
+        )
+        available_at = _aware_task_datetime(
+            signal.get("available_at"), field_name="signal.available_at"
+        )
+    except (TypeError, ValueError) as exc:
+        raise LoopPreconditionError("INVALID_SIGNAL_VALIDATION", str(exc)) from exc
+
+    if available_at < event_time:
+        raise LoopPreconditionError(
+            "INVALID_SIGNAL_VALIDATION",
+            "signal available_at must not precede event_time",
+        )
+
+    violations: list[str] = []
+    if missing:
+        violations.append("missing_features:" + ",".join(missing))
+    if signal_type not in allowed_signal_types:
+        violations.append("unsupported_signal_type")
+    if available_at > as_of:
+        violations.append("future_information")
+    age_seconds = (as_of - event_time).total_seconds()
+    if age_seconds < 0:
+        violations.append("future_event")
+    if age_seconds > int(signal_contract.payload.get("max_signal_age_seconds") or 300):
+        violations.append("stale_signal")
+    if violations:
+        raise LoopPreconditionError(
+            "SIGNAL_CONTRACT_REJECTED",
+            f"SignalContract {signal_contract.id} rejected signal: {';'.join(violations)}",
+        )
+
+
+def _aware_task_datetime(value: Any, *, field_name: str) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    else:
+        raise ValueError(f"{field_name} must be an ISO datetime")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware")
+    return parsed
