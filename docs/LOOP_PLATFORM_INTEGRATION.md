@@ -60,6 +60,15 @@ Outbox 标记为 delivered；`FAILED` 会保留远端 Task ID、Run ID、失败�
 缺失字段返回 422/失败关闭。`UNKNOWN`、`UNSPECIFIED` 允许保留为审计事实，但不会进入
 Distiller。`pattern_key` 只允许作为研究属性，不能替代稳定分类。
 
+Top10 是当日候选批次，不要求跨交易日保持相同。每个 Task 内，
+`dynamic_rescan.ranked_candidates` 的前十个标的、`top10_adjudication.decisions` 和
+`daily_review.top10_verdicts` 必须是同一组十个唯一标的，后两者对同一标的的 verdict 也必须
+一致。生产器为三段数据写入同一个 `decision_cohort_id` 和 `decision_trading_date`，并在发起
+HTTP 请求前再次校验；Loop 创建 Task 时执行同样校验，错配直接返回 422，不再等到 Run 中途
+失败。前一日 Top10 不得混入今日候选；它们的到期表现只通过下述 Outcome 链路独立回填。
+盘前冻结候选池继续保存在 `daily_review.frozen_candidate_pool`，作为当日执行范围事实；它不再
+冒充盘后研究 Top10，也不参与强制精判集合的一致性比较。
+
 ## 延迟 Outcome
 
 Outcome 分为两层，不能混用统计口径：

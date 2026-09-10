@@ -2343,3 +2343,37 @@ Status: offline implementation and verification; no production activation.
   OPE now uses verified realized policy return, not direction correctness.
 - Feature-branch verification recorded 793 full-suite passes with the optional active
   policy override empty, plus 37 focused Loop bridge/selection/Outcome tests and Ruff.
+
+## M94 2026-09-07 auditable decision intent and Outcome timeline
+
+- Added a versioned `ai_quant.decision_intent.v1` contract to every daily-review
+  instrument decision. It records selection intent (`eligible_long`, `observe`,
+  `avoid`, or `risk_block`) while explicitly keeping execution authorization false;
+  unavailable entry, sizing, stop and exit facts remain declared incomplete instead
+  of being fabricated.
+- The delayed Outcome reporter now publishes per-event 1d/5d/20d producer states:
+  not matured, waiting for accepted market data, invalid, sync pending, sync failed or
+  observed. Status batches are capped at 1,000 records and preserve the primary
+  Outcome delivery error if diagnostic status reporting also fails.
+- Loop persists monotonic status checkpoints and derives exchange-session-aware UI
+  timelines. The knowledge page separates each horizon and exposes decision reason,
+  trigger facts, risk controls, invalidation conditions and the non-executable intent.
+- Verification: the full suite passed `793` tests with the optional active-policy
+  override explicitly empty; focused Loop integration tests passed `15`, and Ruff
+  passed for the changed integration surface.
+
+## M95 2026-09-10 daily Top10 cohort integrity
+
+- Daily Top10 membership may change between trading sessions, but a single review now
+  derives dynamic ranking, forced adjudication and daily verdicts from one immutable
+  cohort. The payload records a deterministic cohort ID and decision trading date.
+- The frozen morning execution pool remains a separate daily-review fact and is no
+  longer serialized as the dynamic research ranking; this removes the production
+  mixed-cohort source while preserving the actual execution scope for audit.
+- The trading-system adapter rejects missing, duplicate or cross-section instruments
+  and verdict drift before any remote Task request. Historical 1d/5d/20d observations
+  remain separate Outcome submissions and never replace the current day's candidates.
+- Loop independently applies the same invariant during Task creation, returning 422
+  with missing and unexpected symbols instead of failing after a Run has staged data.
+- Verification: trading-system Loop integration tests passed `16`; Loop contract bridge
+  tests passed `8`; Ruff passed on all changed Python files in both repositories.
