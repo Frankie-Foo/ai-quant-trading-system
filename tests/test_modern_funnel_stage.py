@@ -545,6 +545,68 @@ def test_first_wave_retry_reuses_frozen_artifact(
     )
 
 
+def test_frozen_artifact_tolerates_retry_timestamp_only(tmp_path: Path) -> None:
+    path = tmp_path / "first_wave_pool.json"
+    stage_runner._write_json(
+        path,
+        {
+            "trade_date": "2026-08-24",
+            "generated_at_utc": "2026-08-24T12:00:00+00:00",
+            "candidates": [_candidate("PASS")],
+        },
+    )
+
+    stage_runner._write_json(
+        path,
+        {
+            "trade_date": "2026-08-24",
+            "generated_at_utc": "2026-08-24T12:01:00+00:00",
+            "candidates": [_candidate("PASS")],
+        },
+    )
+
+
+def test_publish_stage_keeps_selection_when_feishu_is_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Push:
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+
+        def push(self, body: str) -> str:
+            self.messages.append(body)
+            return "message-1"
+
+        def close(self) -> None:
+            return None
+
+    push = Push()
+    monkeypatch.setattr(
+        stage_runner.FeishuBaseEventClient,
+        "from_environment",
+        lambda _environment: (_ for _ in ()).throw(RuntimeError("Base unavailable")),
+    )
+    monkeypatch.setattr(stage_runner, "_push_client", lambda: push)
+
+    record_ids, message_id = stage_runner._publish_stage(
+        trade_date=date(2026, 8, 24),
+        stage=FunnelStage.FIRST_WAVE,
+        candidates=[
+            {
+                **_candidate("PASS"),
+                "catalyst_categories": ["earnings"],
+                "rvol": 3.0,
+            }
+        ],
+        rejected=[],
+        state_root=tmp_path,
+    )
+
+    assert record_ids == ()
+    assert message_id == "message-1"
+    assert "飞书 Base 同步失败" in push.messages[0]
+
+
 def test_second_wave_retry_does_not_refetch_market_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -410,8 +410,8 @@ def _run_locked(
             error_type=type(exc).__name__,
             trade_date=trade_date.isoformat(),
         )
-        if _truthy(os.environ.get("FEISHU_INVESTMENT_AUDIT_REQUIRED")):
-            return 1
+        # Selection is frozen locally before projection. A Base outage must
+        # not discard that decision and make the downstream funnel impossible.
         feishu = None
     if feishu is not None:
         try:
@@ -434,8 +434,6 @@ def _run_locked(
                 error_type=type(exc).__name__,
                 trade_date=trade_date.isoformat(),
             )
-            if _truthy(os.environ.get("FEISHU_INVESTMENT_AUDIT_REQUIRED")):
-                return 1
     shadow_status = "disabled"
     if cfg.scheduler.multisignal_shadow_enabled:
         shadow_status = "pending"

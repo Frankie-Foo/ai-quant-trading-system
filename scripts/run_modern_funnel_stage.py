@@ -31,7 +31,7 @@ from operations.autonomous_selection_handoff import (
     create_open_confirmation,
     load_open_confirmation,
 )
-from operations.feishu_base import FeishuBaseEventClient, InvestmentTable
+from operations.feishu_base import FeishuBaseError, FeishuBaseEventClient, InvestmentTable
 from operations.livermore_push import LivermorePushClient, configured_identity
 from operations.local_env import load_project_env, project_data_root
 from operations.paper_release import validate_smoke_notional
@@ -135,8 +135,14 @@ def _run_module(module: str, trade_date: date, data_root: Path) -> None:
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     encoded = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
     if path.exists():
-        existing = path.read_text(encoding="utf-8")
-        if json.loads(existing) != json.loads(encoded):
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        requested = json.loads(encoded)
+        # A retry may have a different wall-clock generation time. The frozen
+        # selection itself must remain identical, but that volatile timestamp
+        # must not turn a recovered notification write into a failed trade day.
+        existing.pop("generated_at_utc", None)
+        requested.pop("generated_at_utc", None)
+        if existing != requested:
             raise RuntimeError(f"immutable funnel artifact changed: {path.name}")
         return
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -524,26 +530,34 @@ def _publish_stage(
     state_root: Path,
     strategy_version: str = STRATEGY_VERSION,
 ) -> tuple[tuple[str, ...], str]:
-    base = FeishuBaseEventClient.from_environment(os.environ)
-    if base is None:
-        raise RuntimeError("dedicated investment Feishu Base is required")
     now = _stage_observed_at(trade_date, stage)
     stage_rows = tuple((row, True) for row in candidates) + tuple((row, False) for row in rejected)
-    record_ids = tuple(
-        base.record_event(
-            InvestmentTable.SELECTION,
-            f"funnel:{trade_date.isoformat()}:{stage.value}:{row['symbol']}",
-            _selection_event_fields(
-                trade_date=trade_date,
-                stage=stage,
-                row=row,
-                kept=kept,
-                observed_at_utc=now,
-                strategy_version=strategy_version,
-            ),
+    record_ids: tuple[str, ...] = ()
+    feishu_failed = False
+    try:
+        base = FeishuBaseEventClient.from_environment(os.environ)
+        if base is None:
+            raise RuntimeError("dedicated investment Feishu Base is unavailable")
+        record_ids = tuple(
+            base.record_event(
+                InvestmentTable.SELECTION,
+                f"funnel:{trade_date.isoformat()}:{stage.value}:{row['symbol']}",
+                _selection_event_fields(
+                    trade_date=trade_date,
+                    stage=stage,
+                    row=row,
+                    kept=kept,
+                    observed_at_utc=now,
+                    strategy_version=strategy_version,
+                ),
+            )
+            for row, kept in stage_rows
         )
-        for row, kept in stage_rows
-    )
+    except (FeishuBaseError, RuntimeError, ValueError):
+        # Preserve selection and its notification during a Base outage.
+        # create_open_confirmation still requires real Base receipts before
+        # Paper authorization; this degraded projection does not grant it.
+        feishu_failed = True
     stage_title = {
         FunnelStage.FIRST_WAVE: "第一波观察池",
         FunnelStage.SECOND_WAVE: "第二波盘前复核",
@@ -572,6 +586,8 @@ def _publish_stage(
             "仅Alpaca Paper模拟盘；本消息不代表已经成交。"
         )
     )
+    if feishu_failed:
+        body += "\n飞书 Base 同步失败：本地审计已保留，请检查连接后补写。"
     ledger = AutonomousNotificationLedger(
         state_root / trade_date.isoformat() / "funnel-notifications.sqlite3"
     )
@@ -582,7 +598,11 @@ def _publish_stage(
             push,
             key=f"funnel:{trade_date.isoformat()}:{stage.value}",
             body=body,
-            payload={"kept": kept_text, "rejected": rejected_text},
+            payload={
+                "kept": kept_text,
+                "rejected": rejected_text,
+                "feishu_status": "failed" if feishu_failed else "succeeded",
+            },
         )
     finally:
         push.close()
