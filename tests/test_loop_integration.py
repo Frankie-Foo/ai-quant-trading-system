@@ -31,6 +31,7 @@ from operations.loop_integration.contracts import (
     LoopPolicyCandidate,
     OutcomeReporterConfig,
     QuantReviewEnvelope,
+    RiskPolicyEvidence,
 )
 from operations.loop_integration.control_plane import (
     LoopControlPlaneManifest,
@@ -39,7 +40,10 @@ from operations.loop_integration.control_plane import (
 from operations.loop_integration.outbox import LoopOutbox
 from operations.loop_integration.outcome_reporter import sync_due_outcomes
 from operations.loop_integration.policy_consumer import install_shadow_candidate
-from operations.loop_integration.review_builder import build_review_envelope
+from operations.loop_integration.review_builder import (
+    build_review_envelope,
+    build_risk_policy_timing,
+)
 
 NOW = datetime(2026, 9, 1, 21, 0, tzinfo=UTC)
 TRADE_DATE = date(2026, 9, 1)
@@ -306,6 +310,80 @@ def test_loop_client_creates_idempotent_task_then_runs_it(tmp_path: Path) -> Non
         "/api/v1/tasks",
         "/api/v1/tasks/task-1/run",
     ]
+
+
+def test_future_risk_authorization_is_separate_from_evidence_timeline() -> None:
+    authorization = NOW + timedelta(minutes=17)
+    timing = build_risk_policy_timing(
+        source=r"D:\\runs\\modern_h15_paper_plan.json",
+        effective_at=NOW,
+        available_at=NOW,
+        authorization_effective_at=authorization,
+        provenance={"content_sha256": "a" * 64},
+    )
+
+    parsed = RiskPolicyEvidence.model_validate(timing["evidence"])
+    assert parsed.effective_at == NOW
+    assert parsed.available_at == NOW
+    assert timing["authorization_effective_at"] == authorization.isoformat()
+    assert timing["evidence"]["content_sha256"] == "a" * 64
+
+
+def test_invalid_risk_evidence_blocks_before_any_remote_request(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def request(method: str, path: str, payload: object) -> object:
+        del method, payload
+        calls.append(path)
+        pytest.fail(f"risk evidence preflight must block before network request: {path}")
+
+    envelope = _submission_envelope(tmp_path)
+    risk_policy = dict(envelope.risk_policy)
+    evidence = dict(risk_policy["evidence"])
+    evidence.update(
+        {
+            "effective_at": (NOW + timedelta(minutes=17)).isoformat(),
+            "available_at": NOW.isoformat(),
+        }
+    )
+    risk_policy["evidence"] = evidence
+    invalid = envelope.model_copy(update={"risk_policy": risk_policy})
+
+    client = LoopClient(base_url="https://loop.invalid", api_key="secret", request=request)
+    with pytest.raises(LoopPreconditionError) as caught:
+        client.submit_review(invalid, _binding())
+
+    assert caught.value.code == "RISK_POLICY_EVIDENCE_INVALID"
+    assert "available_at must not precede effective_at" in str(caught.value)
+    assert calls == []
+
+
+def test_future_available_risk_evidence_blocks_before_any_remote_request(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    def request(method: str, path: str, payload: object) -> object:
+        del method, payload
+        calls.append(path)
+        pytest.fail(f"future evidence preflight must block before network request: {path}")
+
+    envelope = _submission_envelope(tmp_path)
+    risk_policy = dict(envelope.risk_policy)
+    evidence = dict(risk_policy["evidence"])
+    evidence["available_at"] = (envelope.as_of + timedelta(seconds=1)).isoformat()
+    risk_policy["evidence"] = evidence
+    invalid = envelope.model_copy(update={"risk_policy": risk_policy})
+
+    client = LoopClient(base_url="https://loop.invalid", api_key="secret", request=request)
+    with pytest.raises(LoopPreconditionError) as caught:
+        client.submit_review(invalid, _binding())
+
+    assert caught.value.code == "RISK_POLICY_EVIDENCE_INVALID"
+    assert str(caught.value) == (
+        "risk_policy.evidence.available_at must not exceed review as_of"
+    )
+    assert calls == []
 
 
 def test_missing_contract_blocks_before_remote_task_creation(tmp_path: Path) -> None:

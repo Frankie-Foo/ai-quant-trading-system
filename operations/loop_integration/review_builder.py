@@ -20,6 +20,7 @@ from .contracts import (
     QuantReviewEnvelope,
     ReviewDecision,
     ReviewProvenance,
+    RiskPolicyEvidence,
     StrategyIdentity,
 )
 
@@ -60,6 +61,35 @@ def load_accepted_snapshot(path: Path) -> tuple[DatasetSnapshot, pl.DataFrame]:
 
 
 DecisionAction = Literal["accept", "watch", "reject", "block"]
+
+
+def build_risk_policy_timing(
+    *,
+    source: str,
+    effective_at: datetime,
+    available_at: datetime,
+    authorization_effective_at: datetime | None = None,
+    provenance: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Build evidence provenance plus a separate optional plan activation time."""
+
+    evidence = RiskPolicyEvidence(
+        source=source,
+        effective_at=effective_at,
+        available_at=available_at,
+        **(provenance or {}),
+    )
+    timing: dict[str, Any] = {"evidence": evidence.model_dump(mode="json")}
+    if authorization_effective_at is not None:
+        if (
+            authorization_effective_at.tzinfo is None
+            or authorization_effective_at.utcoffset() is None
+        ):
+            raise ValueError("authorization_effective_at must be timezone-aware")
+        if authorization_effective_at < evidence.effective_at:
+            raise ValueError("authorization_effective_at must not precede effective_at")
+        timing["authorization_effective_at"] = authorization_effective_at.isoformat()
+    return timing
 
 
 def _verdict(row: dict[str, Any]) -> DecisionAction:
@@ -261,12 +291,12 @@ def build_review_envelope(
         "reentry_conditions": ["local_strategy_policy_only"],
         "risk_budget": {"daily_loss_limit_fraction": cfg.guardrails.daily_loss_limit},
         "liquidity_constraints": {"participation_cap": cfg.participation_cap},
-        "evidence": {
-            "source": "ai-quant-trading-system/config.yaml",
-            "effective_at": cutoff.isoformat(),
-            "available_at": as_of.isoformat(),
-            "config_sha256": config_hash,
-        },
+        **build_risk_policy_timing(
+            source="ai-quant-trading-system/config.yaml",
+            effective_at=cutoff,
+            available_at=as_of,
+            provenance={"config_sha256": config_hash},
+        ),
     }
     return QuantReviewEnvelope(
         event_id=(

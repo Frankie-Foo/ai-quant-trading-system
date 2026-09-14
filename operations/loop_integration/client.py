@@ -15,6 +15,7 @@ from .contracts import (
     LoopOutcomeSyncStatus,
     LoopPolicyCandidate,
     QuantReviewEnvelope,
+    RiskPolicyEvidence,
 )
 from .control_plane import (
     ARTIFACT_ENDPOINTS,
@@ -57,6 +58,47 @@ class LoopRunIncompleteError(RuntimeError):
     pass
 
 
+def validate_review_risk_policy_evidence(envelope: QuantReviewEnvelope) -> None:
+    """Reject temporal/provenance defects before any Loop network request."""
+
+    raw_policy = envelope.risk_policy
+    raw_evidence = raw_policy.get("evidence") if isinstance(raw_policy, dict) else None
+    if not isinstance(raw_evidence, dict):
+        raise LoopPreconditionError(
+            "RISK_POLICY_EVIDENCE_INVALID",
+            "risk_policy.evidence must be an object",
+        )
+    try:
+        evidence = RiskPolicyEvidence.model_validate(raw_evidence)
+    except ValueError as exc:
+        raise LoopPreconditionError(
+            "RISK_POLICY_EVIDENCE_INVALID",
+            f"invalid risk_policy.evidence: {exc}",
+        ) from exc
+    if evidence.available_at > envelope.as_of:
+        raise LoopPreconditionError(
+            "RISK_POLICY_EVIDENCE_INVALID",
+            "risk_policy.evidence.available_at must not exceed review as_of",
+        )
+    raw_authorization = raw_policy.get("authorization_effective_at")
+    if raw_authorization is not None:
+        try:
+            authorization = _aware_task_datetime(
+                raw_authorization,
+                field_name="risk_policy.authorization_effective_at",
+            )
+        except ValueError as exc:
+            raise LoopPreconditionError(
+                "RISK_POLICY_EVIDENCE_INVALID",
+                str(exc),
+            ) from exc
+        if authorization < evidence.effective_at:
+            raise LoopPreconditionError(
+                "RISK_POLICY_EVIDENCE_INVALID",
+                "risk_policy.authorization_effective_at must not precede evidence effective_at",
+            )
+
+
 class LoopClient:
     def __init__(
         self,
@@ -90,6 +132,7 @@ class LoopClient:
         return response.json()
 
     def submit_review(self, envelope: QuantReviewEnvelope, binding: LoopBinding) -> tuple[str, str]:
+        validate_review_risk_policy_evidence(envelope)
         contracts = self.validate_review_contracts(binding=binding, as_of=envelope.as_of)
         task_payload = build_loop_task(envelope, binding)
         signal_contract = next(

@@ -55,6 +55,29 @@ class ReviewProvenance(FrozenModel):
         raise ValueError("synthetic and not_real_market_data must agree")
 
 
+class RiskPolicyEvidence(FrozenModel):
+    """Point-in-time provenance for a risk policy, not its activation window."""
+
+    model_config = ConfigDict(extra="allow", frozen=True, str_strip_whitespace=True)
+
+    source: str = Field(min_length=1)
+    effective_at: datetime
+    available_at: datetime
+
+    @field_validator("effective_at", "available_at")
+    @classmethod
+    def aware(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("risk policy evidence timestamps must be timezone-aware")
+        return value
+
+    @model_validator(mode="after")
+    def validate_timeline(self) -> Self:
+        if self.available_at < self.effective_at:
+            raise ValueError("available_at must not precede effective_at")
+        return self
+
+
 class StrategyIdentity(FrozenModel):
     strategy_id: str = Field(min_length=1, max_length=128)
     strategy_version: str = Field(min_length=1, max_length=128)

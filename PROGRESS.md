@@ -1,5 +1,21 @@
 # Progress
 
+## M96 Loop risk-policy temporal preflight - 2026-09-14
+
+Status: implemented locally; Windows producer rollout and a new immutable Task remain pending.
+
+- Added a typed risk-policy evidence contract that keeps evidence formation/availability separate
+  from a future `authorization_effective_at` plan activation time.
+- The official Loop client now rejects missing, naive, future-available or reversed evidence
+  timestamps before any contract lookup or remote Task creation, and the Outbox records the
+  existing `blocked_precondition` terminal state.
+- Loop's `available_at >= effective_at` future-information invariant remains unchanged; failed
+  immutable Tasks must not be edited or retried with mutated input.
+- Verification: focused `tests/test_loop_integration.py` passed 20 tests; the full suite passed
+  798 tests with the optional Active Policy override explicitly empty. Ruff, compileall,
+  `git diff --check` and strict Mypy for the new evidence contract passed. Broader strict Mypy
+  still reports four pre-existing errors in decision-action inference and response unpacking.
+
 ## M95 Loop SignalContract submit preflight - 2026-09-10
 
 Status: implemented locally; production deployment and replacement Task creation remain pending.
