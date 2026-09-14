@@ -26,6 +26,7 @@ from operations.loop_integration.client import (
     LoopPreconditionError,
     LoopRunFailedError,
     build_loop_task,
+    validate_loop_task_cohort,
 )
 from operations.loop_integration.contracts import (
     LoopBinding,
@@ -34,6 +35,7 @@ from operations.loop_integration.contracts import (
     LoopPolicyCandidate,
     OutcomeReporterConfig,
     QuantReviewEnvelope,
+    RiskPolicyEvidence,
 )
 from operations.loop_integration.control_plane import (
     LoopControlPlaneManifest,
@@ -42,14 +44,17 @@ from operations.loop_integration.control_plane import (
 from operations.loop_integration.outbox import LoopOutbox
 from operations.loop_integration.outcome_reporter import sync_due_outcomes
 from operations.loop_integration.policy_consumer import install_shadow_candidate
-from operations.loop_integration.review_builder import build_review_envelope
+from operations.loop_integration.review_builder import (
+    build_review_envelope,
+    build_risk_policy_timing,
+)
 
 NOW = datetime(2026, 9, 1, 21, 0, tzinfo=UTC)
 TRADE_DATE = date(2026, 9, 1)
 
 
 def _control_payload(artifact_id: str) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "id": artifact_id,
         "market_scope": "US-equity",
         "status": "active",
@@ -59,6 +64,15 @@ def _control_payload(artifact_id: str) -> dict[str, object]:
             "production_eligible": False,
         },
     }
+    if artifact_id == "signal-v1":
+        payload.update(
+            {
+                "required_features": ["close_return", "dollar_volume", "atr_pct"],
+                "allowed_signal_types": ["long", "watch"],
+                "max_signal_age_seconds": 86400,
+            }
+        )
+    return payload
 
 
 def _control_hash(artifact_id: str) -> str:
@@ -147,6 +161,29 @@ def _opportunity(tmp_path: Path) -> tuple[Path, DatasetSnapshot]:
     return path, snapshot
 
 
+def _frozen_candidates(count: int = 12) -> list[dict[str, Any]]:
+    """Synthetic frozen decisions, independent of the post-close ranking fixture."""
+    return [
+        {
+            "symbol": f"T{index:02d}",
+            "verdict": "accept" if index < 3 else "block",
+            "selection_status": "selected" if index < 3 else "rejected",
+            "classification": "SELECTED" if index < 3 else "INTENTIONAL_GATE",
+            "classification_source": "test.frozen_morning_classifier.v1",
+            "logging_policy_id": "test.frozen_morning_policy.v1",
+            "logged_action": "accept" if index < 3 else "reject",
+            "logging_action_probability": 1.0,
+            "reward_model_logged": 0.0,
+            "root_cause": "selected" if index < 3 else "intentional_gate",
+            "root_cause_detail": "synthetic frozen morning decision",
+            "dollar_volume": 2_000_000.0,
+            "atr_pct": 0.04,
+            "rvol": 4.0 if index < 3 else 2.5,
+        }
+        for index in range(count)
+    ]
+
+
 def _envelope(
     tmp_path: Path, *, with_plan: bool = True, plan_overrides: dict[str, Any] | None = None,
     fill_rows: list[dict[str, Any]] | None = None,
@@ -162,7 +199,11 @@ def _envelope(
         approved_at_utc=NOW,
     )
     plan_path = tmp_path / "effective-plan.json"
-    plan_data = {**plan_payload(active.policy_hash), **(plan_overrides or {})}
+    plan_data = {
+        **plan_payload(active.policy_hash),
+        "candidates": _frozen_candidates(),
+        **(plan_overrides or {}),
+    }
     context_path = tmp_path / "context.json"
     context_hash = None
     plan_hash: str | None
@@ -195,7 +236,19 @@ def _envelope(
         fill_evidence_sha256=fill_hash,
         review_context_path=context_path if context_hash else None,
         review_context_sha256=context_hash,
+        synthetic=True,
     )
+
+
+def _submission_envelope(tmp_path: Path) -> QuantReviewEnvelope:
+    envelope = _envelope(tmp_path, fill_rows=[])
+    decisions = tuple(
+        decision.model_copy(
+            update={"event_time": envelope.as_of, "available_at": envelope.as_of}
+        )
+        for decision in envelope.top10_decisions
+    )
+    return envelope.model_copy(update={"top10_decisions": decisions})
 
 
 def test_review_builder_keeps_top10_separate_and_never_fabricates_paths(tmp_path: Path) -> None:
@@ -215,9 +268,13 @@ def test_review_builder_keeps_top10_separate_and_never_fabricates_paths(tmp_path
     assert envelope.execution_summary["orders_authorized"] is False
     task = build_loop_task(envelope, _binding())
     primary = envelope.top10_decisions[0]
+    assert primary.decision_intent.action == "eligible_long"
+    assert primary.decision_intent.intent_type == "selection"
+    assert primary.decision_intent.execution_authorized is False
+    assert primary.decision_intent.execution_plan_complete is False
     assert task["workflow_version_id"] == "workflow-version-quant-daily-review-v6"
-    assert task["input_data"]["dynamic_rescan"]["universe"] == ["MORNING", "WATCH"]
-    assert len(task["input_data"]["dynamic_rescan"]["ranked_candidates"]) == 2
+    assert task["input_data"]["dynamic_rescan"]["universe"] == [f"T{i:02d}" for i in range(12)]
+    assert len(task["input_data"]["dynamic_rescan"]["ranked_candidates"]) == 12
     assert task["input_data"]["daily_review"]["outcome_ids"] == []
     review = task["input_data"]["daily_review"]
     assert "top10_pnl" not in review["metrics"]
@@ -228,6 +285,7 @@ def test_review_builder_keeps_top10_separate_and_never_fabricates_paths(tmp_path
     assert review["metrics"]["non_top10_close_return_sample_count"] == 2
     assert review["metric_semantics"] == {
         "schema_version": "quant-review-metrics-v2",
+        "cohort_source": "post_close_winners.opportunity_rank_not_adjudication",
         "return_unit": "decimal_fraction",
         "return_aggregation": "unweighted_sum_of_instrument_close_returns",
         "positive_rate_denominator": "top10_instruments_with_close_return",
@@ -259,6 +317,32 @@ def test_review_builder_keeps_top10_separate_and_never_fabricates_paths(tmp_path
     assert fsm_transition["guard_snapshot"]["orders_authorized"] is False
     assert fsm_transition["metadata"]["source_system"] == "ai-quant-trading-system"
     assert task["constraints"]["allow_order_execution"] is False
+    ranked = [
+        item["instrument"]
+        for item in task["input_data"]["dynamic_rescan"]["ranked_candidates"][:10]
+    ]
+    adjudicated = [
+        item["instrument"]
+        for item in task["input_data"]["top10_adjudication"]["decisions"]
+    ]
+    reviewed = [
+        item["instrument"]
+        for item in task["input_data"]["daily_review"]["top10_verdicts"]
+    ]
+    assert ranked == adjudicated == reviewed
+
+
+def test_client_rejects_a_mixed_top10_cohort_before_remote_submission(
+    tmp_path: Path,
+) -> None:
+    task = build_loop_task(_envelope(tmp_path), _binding())
+    task["input_data"]["top10_adjudication"]["decisions"][0]["instrument"] = "OTHER"
+
+    with pytest.raises(
+        ValueError,
+        match=r"Top10 cohort mismatch.*missing=T00.*unexpected=OTHER",
+    ):
+        validate_loop_task_cohort(task)
 
 
 def test_review_without_effective_plan_does_not_invent_risk_or_execution(tmp_path: Path) -> None:
@@ -291,10 +375,10 @@ def test_review_uses_effective_modern_risk_and_separates_morning_pool(tmp_path: 
         (tmp_path / "effective-plan.json").read_bytes()
     ).hexdigest()
     assert "ATR" not in str(risk) and "15:55" not in str(risk)
-    assert envelope.market_context["frozen_candidate_pool"]["count"] == 2
+    assert envelope.market_context["frozen_candidate_pool"]["count"] == 12
     task = build_loop_task(envelope, _binding())
     review = task["input_data"]["daily_review"]
-    assert review["frozen_candidate_pool"]["candidates"][0]["symbol"] == "MORNING"
+    assert review["frozen_candidate_pool"]["candidates"][0]["symbol"] == "T00"
     assert review["post_close_winners"]["count"] == 12
     assert review["execution_summary"]["status"] == "unavailable"
     assert "selected_return" not in review["metrics"]
@@ -303,8 +387,9 @@ def test_review_uses_effective_modern_risk_and_separates_morning_pool(tmp_path: 
 def test_review_carries_factual_summary_and_full_pool_without_winner_selection_bias(
     tmp_path: Path,
 ) -> None:
-    candidates = [{"symbol": f"POOL{index}", "verdict": "reject"} for index in range(15)]
-    candidates[0] = {"symbol": "MORNING", "verdict": "accept"}
+    candidates = _frozen_candidates(15)
+    for index, candidate in enumerate(candidates):
+        candidate["symbol"] = "MORNING" if index == 0 else f"POOL{index}"
     envelope = _envelope(
         tmp_path, plan_overrides={"candidates": candidates},
         fill_rows=[fill("buy-1", "buy", "4", "100", 14),
@@ -326,9 +411,9 @@ def test_missing_morning_pool_never_falls_back_to_winners(tmp_path: Path) -> Non
     envelope = _envelope(tmp_path, plan_overrides={
         "candidate_pool_complete": False, "candidates": None,
     })
-    task = build_loop_task(envelope, _binding())
-    assert task["input_data"]["dynamic_rescan"]["universe"] == []
-    assert task["input_data"]["daily_review"]["frozen_candidate_pool"]["count"] is None
+    with pytest.raises(ValueError, match="at least 10 ranked candidates"):
+        build_loop_task(envelope, _binding())
+    assert envelope.market_context["frozen_candidate_pool"]["count"] is None
     assert len(envelope.top10_decisions) == 10
 
 
@@ -439,7 +524,10 @@ def test_loop_client_creates_idempotent_task_then_runs_it(tmp_path: Path) -> Non
         return {"id": "run-1", "status": "COMPLETED"}
 
     client = LoopClient(base_url="https://loop.invalid", api_key="secret", request=request)
-    assert client.submit_review(_envelope(tmp_path), _binding()) == ("task-1", "run-1")
+    assert client.submit_review(_submission_envelope(tmp_path), _binding()) == (
+        "task-1",
+        "run-1",
+    )
     assert all(
         item[1].startswith("/api/v1/knowledge/quant/control-artifacts?") for item in calls[:3]
     )
@@ -447,6 +535,80 @@ def test_loop_client_creates_idempotent_task_then_runs_it(tmp_path: Path) -> Non
         "/api/v1/tasks",
         "/api/v1/tasks/task-1/run",
     ]
+
+
+def test_future_risk_authorization_is_separate_from_evidence_timeline() -> None:
+    authorization = NOW + timedelta(minutes=17)
+    timing = build_risk_policy_timing(
+        source=r"D:\\runs\\modern_h15_paper_plan.json",
+        effective_at=NOW,
+        available_at=NOW,
+        authorization_effective_at=authorization,
+        provenance={"content_sha256": "a" * 64},
+    )
+
+    parsed = RiskPolicyEvidence.model_validate(timing["evidence"])
+    assert parsed.effective_at == NOW
+    assert parsed.available_at == NOW
+    assert timing["authorization_effective_at"] == authorization.isoformat()
+    assert timing["evidence"]["content_sha256"] == "a" * 64
+
+
+def test_invalid_risk_evidence_blocks_before_any_remote_request(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def request(method: str, path: str, payload: object) -> object:
+        del method, payload
+        calls.append(path)
+        pytest.fail(f"risk evidence preflight must block before network request: {path}")
+
+    envelope = _submission_envelope(tmp_path)
+    risk_policy = dict(envelope.risk_policy)
+    evidence = dict(risk_policy["evidence"])
+    evidence.update(
+        {
+            "effective_at": (NOW + timedelta(minutes=17)).isoformat(),
+            "available_at": NOW.isoformat(),
+        }
+    )
+    risk_policy["evidence"] = evidence
+    invalid = envelope.model_copy(update={"risk_policy": risk_policy})
+
+    client = LoopClient(base_url="https://loop.invalid", api_key="secret", request=request)
+    with pytest.raises(LoopPreconditionError) as caught:
+        client.submit_review(invalid, _binding())
+
+    assert caught.value.code == "RISK_POLICY_EVIDENCE_INVALID"
+    assert "available_at must not precede effective_at" in str(caught.value)
+    assert calls == []
+
+
+def test_future_available_risk_evidence_blocks_before_any_remote_request(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    def request(method: str, path: str, payload: object) -> object:
+        del method, payload
+        calls.append(path)
+        pytest.fail(f"future evidence preflight must block before network request: {path}")
+
+    envelope = _submission_envelope(tmp_path)
+    risk_policy = dict(envelope.risk_policy)
+    evidence = dict(risk_policy["evidence"])
+    evidence["available_at"] = (envelope.as_of + timedelta(seconds=1)).isoformat()
+    risk_policy["evidence"] = evidence
+    invalid = envelope.model_copy(update={"risk_policy": risk_policy})
+
+    client = LoopClient(base_url="https://loop.invalid", api_key="secret", request=request)
+    with pytest.raises(LoopPreconditionError) as caught:
+        client.submit_review(invalid, _binding())
+
+    assert caught.value.code == "RISK_POLICY_EVIDENCE_INVALID"
+    assert str(caught.value) == (
+        "risk_policy.evidence.available_at must not exceed review as_of"
+    )
+    assert calls == []
 
 
 def test_missing_contract_blocks_before_remote_task_creation(tmp_path: Path) -> None:
@@ -459,7 +621,7 @@ def test_missing_contract_blocks_before_remote_task_creation(tmp_path: Path) -> 
 
     client = LoopClient(base_url="https://loop.invalid", api_key="secret", request=request)
     with pytest.raises(LoopPreconditionError) as caught:
-        client.submit_review(_envelope(tmp_path), _binding())
+        client.submit_review(_submission_envelope(tmp_path), _binding())
     assert caught.value.code == "CONTRACT_NOT_FOUND"
     assert not any(path == "/api/v1/tasks" for path in calls)
     outbox = LoopOutbox(tmp_path / "blocked.sqlite3")
@@ -476,8 +638,51 @@ def test_missing_contract_blocks_before_remote_task_creation(tmp_path: Path) -> 
     assert blocked.remote_task_id is None and blocked.remote_run_id is None
 
 
+def test_signal_contract_rejects_missing_features_before_task_creation(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    def request(method: str, path: str, payload: object) -> object:
+        del method, payload
+        calls.append(path)
+        if path.startswith("/api/v1/knowledge/quant/control-artifacts?"):
+            artifact_type = path.split("artifact_type=", 1)[1].split("&", 1)[0]
+            artifact_id = {
+                "signal_contract": "signal-v1",
+                "fsm_contract": "fsm-v1",
+                "golden_case_suite": "golden-v1",
+            }[artifact_type]
+            return [_control_artifact(artifact_id, artifact_type)]
+        pytest.fail(f"preflight must block before remote Task creation: {path}")
+
+    envelope = _submission_envelope(tmp_path)
+    primary = envelope.top10_decisions[0]
+    incomplete_features = {
+        name: value
+        for name, value in primary.features.items()
+        if name not in {"close_return", "dollar_volume", "atr_pct"}
+    }
+    decisions = (
+        primary.model_copy(update={"features": incomplete_features}),
+        *envelope.top10_decisions[1:],
+    )
+    incomplete = envelope.model_copy(update={"top10_decisions": decisions})
+
+    client = LoopClient(base_url="https://loop.invalid", api_key="secret", request=request)
+    with pytest.raises(LoopPreconditionError) as caught:
+        client.submit_review(incomplete, _binding())
+
+    assert caught.value.code == "SIGNAL_CONTRACT_REJECTED"
+    assert str(caught.value) == (
+        "SignalContract signal-v1 rejected signal: "
+        "missing_features:close_return,dollar_volume,atr_pct"
+    )
+    assert not any(path == "/api/v1/tasks" for path in calls)
+
+
 def test_review_before_contract_available_at_is_audit_only(tmp_path: Path) -> None:
-    envelope = _envelope(tmp_path)
+    envelope = _submission_envelope(tmp_path)
     future = envelope.as_of.replace(year=envelope.as_of.year + 1)
 
     def request(method: str, path: str, payload: object) -> object:
@@ -523,7 +728,7 @@ def test_http_200_failed_run_preserves_remote_failure_evidence(tmp_path: Path) -
 
     client = LoopClient(base_url="https://loop.invalid", api_key="secret", request=request)
     with pytest.raises(LoopRunFailedError) as caught:
-        client.submit_review(_envelope(tmp_path), _binding())
+        client.submit_review(_submission_envelope(tmp_path), _binding())
     outbox = LoopOutbox(tmp_path / "failed.sqlite3")
     envelope = _envelope(tmp_path)
     outbox.stage(
@@ -629,7 +834,7 @@ def test_complete_review_keeps_active_policy_immutable_and_never_calls_broker(
 
     result = LoopClient(
         base_url="https://loop.invalid", api_key="secret", request=request
-    ).submit_review(_envelope(tmp_path), _binding())
+    ).submit_review(_submission_envelope(tmp_path), _binding())
     after = hashlib.sha256(active_path.read_bytes()).hexdigest()
     assert result == ("task-1", "run-1")
     assert before == after
@@ -1002,6 +1207,8 @@ def test_due_outcome_reporter_waits_for_sessions_then_submits_v2(
                 }
             ]
         assert payload is not None
+        if path.endswith("/outcome-sync-statuses"):
+            return {"saved": len(payload["statuses"])}  # type: ignore[arg-type]
         return {"id": payload["id"]}
 
     config = OutcomeReporterConfig(
@@ -1061,6 +1268,16 @@ def test_due_outcome_reporter_waits_for_sessions_then_submits_v2(
     assert evidence["policy_assignment"] == expected_policy_assignment
     assert posted["counterfactual_instrument_return"] == pytest.approx(0.04)
     assert posted["counterfactual_net_excess_return"] == pytest.approx(0.0285)
+    status_payload = next(
+        payload for method, path, payload in requests
+        if method == "POST" and path.endswith("/outcome-sync-statuses")
+    )
+    assert status_payload is not None
+    status_rows = status_payload["statuses"]
+    assert isinstance(status_rows, list)
+    status_by_horizon = {item["horizon"]: item for item in status_rows}
+    assert status_by_horizon["1d"]["state"] == "OBSERVED"
+    assert status_by_horizon["5d"]["state"] == "NOT_MATURED"
     if with_execution:
         assert evidence["factual_execution"]["status"] == "no_trade"
         assert evidence["factual_execution"]["realized_gross_pnl"] is None
@@ -1145,6 +1362,8 @@ def test_due_outcome_reporter_submits_event_observation_without_strategy(
         if method == "GET":
             return []
         assert payload is not None
+        if path.endswith("/outcome-sync-statuses"):
+            return {"saved": len(payload["statuses"])}  # type: ignore[arg-type]
         return {"id": payload["id"]}
 
     config = OutcomeReporterConfig(
@@ -1189,3 +1408,14 @@ def test_due_outcome_reporter_submits_event_observation_without_strategy(
     assert posted["counterfactual_net_excess_return"] == pytest.approx(0.027)
     assert posted["direction_correct"] is False
     assert "strategy_revision_id" not in posted["evidence"]  # type: ignore[operator]
+    status_payload = next(
+        payload
+        for method, path, payload in requests
+        if method == "POST" and path.endswith("/outcome-sync-statuses")
+    )
+    assert status_payload is not None
+    status_rows = status_payload["statuses"]
+    assert isinstance(status_rows, list)
+    status_by_horizon = {item["horizon"]: item for item in status_rows}
+    assert status_by_horizon["1d"]["state"] == "OBSERVED"
+    assert status_by_horizon["5d"]["state"] == "NOT_MATURED"

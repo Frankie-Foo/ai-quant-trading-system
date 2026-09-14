@@ -16,9 +16,11 @@ from kernel.config import Config
 from kernel.strategy_policy import StrategyPolicy
 
 from .contracts import (
+    DecisionIntent,
     QuantReviewEnvelope,
     ReviewDecision,
     ReviewProvenance,
+    RiskPolicyEvidence,
     StrategyIdentity,
 )
 from .execution_summary import (
@@ -65,6 +67,35 @@ def load_accepted_snapshot(path: Path) -> tuple[DatasetSnapshot, pl.DataFrame]:
 
 
 DecisionAction = Literal["accept", "watch", "reject", "block"]
+
+
+def build_risk_policy_timing(
+    *,
+    source: str,
+    effective_at: datetime,
+    available_at: datetime,
+    authorization_effective_at: datetime | None = None,
+    provenance: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Build evidence provenance plus a separate optional plan activation time."""
+
+    evidence = RiskPolicyEvidence(
+        source=source,
+        effective_at=effective_at,
+        available_at=available_at,
+        **(provenance or {}),
+    )
+    timing: dict[str, Any] = {"evidence": evidence.model_dump(mode="json")}
+    if authorization_effective_at is not None:
+        if (
+            authorization_effective_at.tzinfo is None
+            or authorization_effective_at.utcoffset() is None
+        ):
+            raise ValueError("authorization_effective_at must be timezone-aware")
+        if authorization_effective_at < evidence.effective_at:
+            raise ValueError("authorization_effective_at must not precede effective_at")
+        timing["authorization_effective_at"] = authorization_effective_at.isoformat()
+    return timing
 
 
 def _verdict(row: dict[str, Any]) -> DecisionAction:
@@ -203,9 +234,12 @@ def build_review_envelope(
                 "review_context_sha256": review_context_sha256,
                 "authorization_strategy_version": plan.authorization_strategy_version,
                 "source_snapshot_ids": list(plan.source_snapshot_ids),
-                "effective_at": plan.effective_at_utc.isoformat(),
+                # Context availability is the source observation; plan effective_at
+                # is trading authorization activation, not the source event time.
+                "effective_at": plan.available_at_utc.isoformat(),
                 "available_at": plan.available_at_utc.isoformat(),
             },
+            "authorization_effective_at": plan.effective_at_utc.isoformat(),
         }
         if plan.candidates is not None:
             frozen_pool.update(
@@ -223,8 +257,19 @@ def build_review_envelope(
             review_context_path=review_context_path, review_context_sha256=review_context_sha256,
         )
     source_ids = tuple(dict.fromkeys((*artifact_ids, opportunity_snapshot.dataset_id)))
+    # A complete cohort uses only frozen morning decisions, never post-close winners.
+    decision_rows = list(top.iter_rows(named=True))
+    decision_source_ids: tuple[str, ...] = (opportunity_snapshot.dataset_id,)
+    if plan is not None and plan.candidates is not None and len(plan.candidates) >= 10:
+        decision_rows = [item.model_dump(mode="json") for item in plan.candidates[:10]]
+        decision_source_ids = plan.source_snapshot_ids
+        if any(row.get("verdict") is None for row in decision_rows):
+            raise ValueError("frozen morning cohort decision verdict is unavailable")
     decisions: list[ReviewDecision] = []
-    for rank, row in enumerate(top.iter_rows(named=True), start=1):
+    intent_actions: dict[
+        DecisionAction, Literal["eligible_long", "observe", "avoid", "risk_block"]
+    ] = {"accept": "eligible_long", "watch": "observe", "reject": "avoid", "block": "risk_block"}
+    for rank, row in enumerate(decision_rows, start=1):
         features: dict[str, float | int | str | bool | None] = {
             "close_return": _finite(row.get("close_return")),
             "mfe_from_previous_close": _finite(row.get("mfe_from_previous_close")),
@@ -240,8 +285,8 @@ def build_review_envelope(
         classification = str(row.get("classification") or "").strip().upper()
         classification_source = str(row.get("classification_source") or "").strip()
         if not classification or not classification_source:
-            raise ValueError("opportunity review classification contract is incomplete")
-        verdict = _verdict(row)
+            raise ValueError("review decision classification contract is incomplete")
+        verdict = cast(DecisionAction, row.get("verdict") or _verdict(row))
         logging_policy_id = str(row.get("logging_policy_id") or "").strip()
         logged_action = str(row.get("logged_action") or "").strip().lower()
         logging_action_probability = _finite(row.get("logging_action_probability"))
@@ -253,7 +298,7 @@ def build_review_envelope(
             or not 0.0 < logging_action_probability <= 1.0
             or reward_model_logged is None
         ):
-            raise ValueError("opportunity review OPE contract is incomplete")
+            raise ValueError("review decision OPE contract is incomplete")
         typed_logged_action = cast(DecisionAction, logged_action)
         decisions.append(
             ReviewDecision(
@@ -267,6 +312,15 @@ def build_review_envelope(
                 logging_action_probability=logging_action_probability,
                 reward_model_logged=reward_model_logged,
                 verdict=verdict,
+                decision_intent=DecisionIntent(
+                    action=intent_actions[verdict],
+                    incomplete_reasons=(
+                        "daily_review_records_selection_not_order",
+                        "entry_price_not_frozen",
+                        "position_size_not_frozen",
+                        "exit_path_not_frozen",
+                    ),
+                ),
                 reason=str(row.get("root_cause_detail") or root_cause),
                 event_time=cutoff,
                 available_at=as_of,
@@ -296,7 +350,7 @@ def build_review_envelope(
                     "future_information_detected",
                     f"root_cause_changes:{root_cause}",
                 ),
-                source_snapshot_ids=(opportunity_snapshot.dataset_id,),
+                source_snapshot_ids=decision_source_ids,
             )
         )
     top_returns = [

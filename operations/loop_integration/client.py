@@ -12,8 +12,10 @@ from .contracts import (
     LoopEventOutcomeAssignment,
     LoopOutcomeAssignment,
     LoopOutcomeEnvelope,
+    LoopOutcomeSyncStatus,
     LoopPolicyCandidate,
     QuantReviewEnvelope,
+    RiskPolicyEvidence,
 )
 from .control_plane import (
     ARTIFACT_ENDPOINTS,
@@ -56,6 +58,47 @@ class LoopRunIncompleteError(RuntimeError):
     pass
 
 
+def validate_review_risk_policy_evidence(envelope: QuantReviewEnvelope) -> None:
+    """Reject temporal/provenance defects before any Loop network request."""
+
+    raw_policy = envelope.risk_policy
+    raw_evidence = raw_policy.get("evidence") if isinstance(raw_policy, dict) else None
+    if not isinstance(raw_evidence, dict):
+        raise LoopPreconditionError(
+            "RISK_POLICY_EVIDENCE_INVALID",
+            "risk_policy.evidence must be an object",
+        )
+    try:
+        evidence = RiskPolicyEvidence.model_validate(raw_evidence)
+    except ValueError as exc:
+        raise LoopPreconditionError(
+            "RISK_POLICY_EVIDENCE_INVALID",
+            f"invalid risk_policy.evidence: {exc}",
+        ) from exc
+    if evidence.available_at > envelope.as_of:
+        raise LoopPreconditionError(
+            "RISK_POLICY_EVIDENCE_INVALID",
+            "risk_policy.evidence.available_at must not exceed review as_of",
+        )
+    raw_authorization = raw_policy.get("authorization_effective_at")
+    if raw_authorization is not None:
+        try:
+            authorization = _aware_task_datetime(
+                raw_authorization,
+                field_name="risk_policy.authorization_effective_at",
+            )
+        except ValueError as exc:
+            raise LoopPreconditionError(
+                "RISK_POLICY_EVIDENCE_INVALID",
+                str(exc),
+            ) from exc
+        if authorization < evidence.effective_at:
+            raise LoopPreconditionError(
+                "RISK_POLICY_EVIDENCE_INVALID",
+                "risk_policy.authorization_effective_at must not precede evidence effective_at",
+            )
+
+
 class LoopClient:
     def __init__(
         self,
@@ -94,8 +137,21 @@ class LoopClient:
                 "EFFECTIVE_MODERN_PLAN_UNAVAILABLE",
                 "review submission requires a hash-verified effective modern plan",
             )
-        self.validate_review_contracts(binding=binding, as_of=envelope.as_of)
-        task_payload = build_loop_task(envelope, binding)
+        if envelope.execution_summary.get("status") == "unavailable":
+            raise LoopPreconditionError(
+                "BROKER_EXECUTION_EVIDENCE_UNAVAILABLE",
+                "review submission requires confirmed broker execution evidence",
+            )
+        validate_review_risk_policy_evidence(envelope)
+        try:
+            task_payload = build_loop_task(envelope, binding)
+        except ValueError as exc:
+            raise LoopPreconditionError("TOP10_COHORT_INCOMPATIBLE", str(exc)) from exc
+        contracts = self.validate_review_contracts(binding=binding, as_of=envelope.as_of)
+        signal_contract = next(
+            item for item in contracts if item.artifact_type == "signal_contract"
+        )
+        validate_loop_task_signal_contract(task_payload, signal_contract)
         task = self._request("POST", "/api/v1/tasks", task_payload)
         if not isinstance(task, dict) or not str(task.get("id") or ""):
             raise RuntimeError("Loop create-task response lacks task id")
@@ -244,6 +300,21 @@ class LoopClient:
             raise RuntimeError("Loop outcome response lacks id")
         return str(result["id"])
 
+    def submit_outcome_sync_statuses(self, statuses: tuple[LoopOutcomeSyncStatus, ...]) -> int:
+        if not statuses:
+            return 0
+        batch_size = 1000
+        for offset in range(0, len(statuses), batch_size):
+            batch = statuses[offset : offset + batch_size]
+            result = self._request(
+                "POST",
+                "/api/v1/knowledge/quant/outcome-sync-statuses",
+                {"statuses": [item.model_dump(mode="json") for item in batch]},
+            )
+            if not isinstance(result, dict) or int(result.get("saved") or 0) != len(batch):
+                raise RuntimeError("Loop outcome sync-status response is incomplete")
+        return len(statuses)
+
     def list_outcome_assignments(
         self,
         *,
@@ -309,6 +380,80 @@ def _run_failure(run: dict[str, Any]) -> tuple[str, str]:
     )
 
 
+def validate_loop_task_cohort(task_payload: dict[str, Any]) -> None:
+    """Fail before submission when one review mixes different daily Top10 cohorts."""
+
+    input_data = task_payload.get("input_data")
+    if not isinstance(input_data, dict):
+        raise ValueError("Loop task requires input_data")
+    dynamic_rescan = input_data.get("dynamic_rescan")
+    adjudication = input_data.get("top10_adjudication")
+    daily_review = input_data.get("daily_review")
+    if (
+        not isinstance(dynamic_rescan, dict)
+        or not isinstance(adjudication, dict)
+        or not isinstance(daily_review, dict)
+    ):
+        raise ValueError("Loop task requires daily review cohort sections")
+
+    ranked = dynamic_rescan.get("ranked_candidates")
+    adjudicated = adjudication.get("decisions")
+    reviewed = daily_review.get("top10_verdicts")
+    if not isinstance(ranked, list) or len(ranked) < 10:
+        raise ValueError("Loop task requires at least 10 ranked candidates")
+    if not isinstance(adjudicated, list) or len(adjudicated) != 10:
+        raise ValueError("Loop task requires exactly 10 Top10 adjudication decisions")
+    if not isinstance(reviewed, list) or len(reviewed) != 10:
+        raise ValueError("Loop task requires exactly 10 daily review verdicts")
+
+    def instruments(items: list[Any], field_name: str) -> tuple[str, ...]:
+        result = tuple(
+            str(item.get("instrument") or "").strip()
+            if isinstance(item, dict)
+            else ""
+            for item in items
+        )
+        if any(not instrument for instrument in result):
+            raise ValueError(f"{field_name} requires non-empty instruments")
+        if len(set(result)) != len(result):
+            raise ValueError(f"{field_name} requires unique instruments")
+        return result
+
+    required = instruments(ranked, "dynamic_rescan.ranked_candidates")[:10]
+    for section_name, actual in (
+        ("top10_adjudication", instruments(adjudicated, "top10_adjudication.decisions")),
+        ("daily_review", instruments(reviewed, "daily_review.top10_verdicts")),
+    ):
+        required_set = set(required)
+        actual_set = set(actual)
+        if required_set != actual_set:
+            missing = [item for item in required if item not in actual_set]
+            unexpected = [item for item in actual if item not in required_set]
+            raise ValueError(
+                f"Top10 cohort mismatch in {section_name}: "
+                f"missing={','.join(missing) or '-'}; "
+                f"unexpected={','.join(unexpected) or '-'}"
+            )
+
+    adjudicated_verdicts = {
+        str(item["instrument"]).strip(): str(item.get("verdict") or "").strip().lower()
+        for item in adjudicated
+    }
+    reviewed_verdicts = {
+        str(item["instrument"]).strip(): str(item.get("verdict") or "").strip().lower()
+        for item in reviewed
+    }
+    drift = [
+        instrument
+        for instrument in required
+        if adjudicated_verdicts[instrument] != reviewed_verdicts[instrument]
+    ]
+    if drift:
+        raise ValueError(
+            "daily_review verdicts differ from Top10 adjudication: " + ", ".join(drift)
+        )
+
+
 def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict[str, Any]:
     decisions = envelope.top10_decisions
     frozen_pool = envelope.market_context.get("frozen_candidate_pool", {})
@@ -326,6 +471,7 @@ def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict
             "logging_action_probability": item.logging_action_probability,
             "reward_model_logged": item.reward_model_logged,
             "verdict": item.verdict,
+            "decision_intent": item.decision_intent.model_dump(mode="json"),
             "reason": item.reason,
             "one_minute_path": list(item.one_minute_path),
             "trigger_results": item.trigger_results,
@@ -351,8 +497,10 @@ def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict
         "strategy_sha256": envelope.risk_policy.get("evidence", {}).get("strategy_sha256"),
         "payload_sha256": envelope.payload_sha256,
         "market_regime": market_regime,
+        "decision_cohort_id": f"quant-review-cohort:{envelope.payload_sha256[:32]}",
+        "decision_trading_date": envelope.trading_date.isoformat(),
     }
-    return {
+    task_payload = {
         "workflow_id": binding.workflow_id,
         "workflow_version_id": binding.workflow_version_id,
         "objective": (
@@ -436,6 +584,7 @@ def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict
                 "metrics": envelope.metrics,
                 "metric_semantics": {
                     "schema_version": "quant-review-metrics-v2",
+                    "cohort_source": "post_close_winners.opportunity_rank_not_adjudication",
                     "return_unit": "decimal_fraction",
                     "return_aggregation": ("unweighted_sum_of_instrument_close_returns"),
                     "positive_rate_denominator": ("top10_instruments_with_close_return"),
@@ -446,3 +595,101 @@ def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict
             },
         },
     }
+    validate_loop_task_cohort(task_payload)
+    return task_payload
+
+
+def validate_loop_task_signal_contract(
+    task_payload: dict[str, Any],
+    signal_contract: LoopControlArtifact,
+) -> None:
+    """Reject a Task locally when Loop's frozen SignalContract would reject it."""
+    input_data = task_payload.get("input_data")
+    if not isinstance(input_data, dict):
+        raise LoopPreconditionError(
+            "INVALID_SIGNAL_VALIDATION",
+            "Task input_data must be an object",
+        )
+    validation = input_data.get("signal_validation")
+    signal = validation.get("signal") if isinstance(validation, dict) else None
+    if not isinstance(validation, dict) or not isinstance(signal, dict):
+        raise LoopPreconditionError(
+            "INVALID_SIGNAL_VALIDATION",
+            "Task input_data.signal_validation.signal must be an object",
+        )
+
+    contract_id = str(validation.get("contract_id") or "").strip()
+    if contract_id != signal_contract.id:
+        raise LoopPreconditionError(
+            "SIGNAL_CONTRACT_MISMATCH",
+            f"Task references {contract_id or '-'} but validated {signal_contract.id}",
+        )
+
+    features = signal.get("features")
+    if not isinstance(features, dict):
+        raise LoopPreconditionError(
+            "INVALID_SIGNAL_VALIDATION",
+            "signal.features must be an object",
+        )
+
+    required_features = tuple(
+        str(item).strip()
+        for item in signal_contract.payload.get("required_features") or ()
+        if str(item).strip()
+    )
+    missing = [name for name in required_features if name not in features]
+    signal_type = str(signal.get("signal_type") or "").strip().lower()
+    allowed_signal_types = {
+        str(item).strip().lower()
+        for item in signal_contract.payload.get("allowed_signal_types") or ()
+        if str(item).strip()
+    }
+    try:
+        as_of = _aware_task_datetime(
+            validation.get("as_of") or input_data.get("as_of"),
+            field_name="signal_validation.as_of",
+        )
+        event_time = _aware_task_datetime(
+            signal.get("event_time"), field_name="signal.event_time"
+        )
+        available_at = _aware_task_datetime(
+            signal.get("available_at"), field_name="signal.available_at"
+        )
+    except (TypeError, ValueError) as exc:
+        raise LoopPreconditionError("INVALID_SIGNAL_VALIDATION", str(exc)) from exc
+
+    if available_at < event_time:
+        raise LoopPreconditionError(
+            "INVALID_SIGNAL_VALIDATION",
+            "signal available_at must not precede event_time",
+        )
+
+    violations: list[str] = []
+    if missing:
+        violations.append("missing_features:" + ",".join(missing))
+    if signal_type not in allowed_signal_types:
+        violations.append("unsupported_signal_type")
+    if available_at > as_of:
+        violations.append("future_information")
+    age_seconds = (as_of - event_time).total_seconds()
+    if age_seconds < 0:
+        violations.append("future_event")
+    if age_seconds > int(signal_contract.payload.get("max_signal_age_seconds") or 300):
+        violations.append("stale_signal")
+    if violations:
+        raise LoopPreconditionError(
+            "SIGNAL_CONTRACT_REJECTED",
+            f"SignalContract {signal_contract.id} rejected signal: {';'.join(violations)}",
+        )
+
+
+def _aware_task_datetime(value: Any, *, field_name: str) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    else:
+        raise ValueError(f"{field_name} must be an ISO datetime")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware")
+    return parsed

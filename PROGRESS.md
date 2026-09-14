@@ -1,5 +1,36 @@
 # Progress
 
+## M96 Loop risk-policy temporal preflight - 2026-09-14
+
+Status: implemented locally; Windows producer rollout and a new immutable Task remain pending.
+
+- Added a typed risk-policy evidence contract that keeps evidence formation/availability separate
+  from a future `authorization_effective_at` plan activation time.
+- The official Loop client now rejects missing, naive, future-available or reversed evidence
+  timestamps before any contract lookup or remote Task creation, and the Outbox records the
+  existing `blocked_precondition` terminal state.
+- Loop's `available_at >= effective_at` future-information invariant remains unchanged; failed
+  immutable Tasks must not be edited or retried with mutated input.
+- Verification: focused `tests/test_loop_integration.py` passed 20 tests; the full suite passed
+  798 tests with the optional Active Policy override explicitly empty. Ruff, compileall,
+  `git diff --check` and strict Mypy for the new evidence contract passed. Broader strict Mypy
+  still reports four pre-existing errors in decision-action inference and response unpacking.
+
+## M95 Loop SignalContract submit preflight - 2026-09-10
+
+Status: implemented locally; production deployment and replacement Task creation remain pending.
+
+- The official Loop client now evaluates the final Task signal against the exact active,
+  hash-verified remote SignalContract before creating a Task.
+- Missing required features, unsupported signal types, stale events and future information fail
+  closed with explicit evidence; no remote Task is created.
+- Historical owner-attested producers must use the same client and retain missing market facts as
+  blocked preconditions. The implementation does not invent or backfill absent market evidence.
+- Verification: `tests/test_loop_integration.py` passed (29 tests); Ruff, strict Mypy and
+  `git diff --check` passed. The repository suite passed 1106 tests with 2 platform skips when
+  the unrelated order-sensitive SQLite byte-identity test was deselected. That test passed in
+  isolation but failed in full-suite order at SQLite header byte 27; it was not changed here.
+
 ## M94 Deterministic Loop review provenance - 2026-09-05
 
 Status: implemented locally; Loop submission remains blocked pending machine-local binding,
@@ -2343,3 +2374,74 @@ Status: offline implementation and verification; no production activation.
   OPE now uses verified realized policy return, not direction correctness.
 - Feature-branch verification recorded 793 full-suite passes with the optional active
   policy override empty, plus 37 focused Loop bridge/selection/Outcome tests and Ruff.
+
+## M94 2026-09-07 auditable decision intent and Outcome timeline
+
+- Added a versioned `ai_quant.decision_intent.v1` contract to every daily-review
+  instrument decision. It records selection intent (`eligible_long`, `observe`,
+  `avoid`, or `risk_block`) while explicitly keeping execution authorization false;
+  unavailable entry, sizing, stop and exit facts remain declared incomplete instead
+  of being fabricated.
+- The delayed Outcome reporter now publishes per-event 1d/5d/20d producer states:
+  not matured, waiting for accepted market data, invalid, sync pending, sync failed or
+  observed. Status batches are capped at 1,000 records and preserve the primary
+  Outcome delivery error if diagnostic status reporting also fails.
+- Loop persists monotonic status checkpoints and derives exchange-session-aware UI
+  timelines. The knowledge page separates each horizon and exposes decision reason,
+  trigger facts, risk controls, invalidation conditions and the non-executable intent.
+- Verification: the full suite passed `793` tests with the optional active-policy
+  override explicitly empty; focused Loop integration tests passed `15`, and Ruff
+  passed for the changed integration surface.
+
+## M95 2026-09-10 daily Top10 cohort integrity
+
+- Daily Top10 membership may change between trading sessions, but a single review now
+  derives dynamic ranking, forced adjudication and daily verdicts from one immutable
+  cohort. The payload records a deterministic cohort ID and decision trading date.
+- The trading-system adapter rejects missing, duplicate or cross-section instruments
+  and verdict drift before any remote Task request. Historical 1d/5d/20d observations
+  remain separate Outcome submissions and never replace the current day's candidates.
+- Loop independently applies the same invariant during Task creation, returning 422
+  with missing and unexpected symbols instead of failing after a Run has staged data.
+- Verification: trading-system Loop integration tests passed `16`; Loop contract bridge
+  tests passed `8`; Ruff passed on all changed Python files in both repositories.
+
+## M0 — Loop baseline merge conflict resolution (2026-09-14)
+
+- Resolved the five Loop/progress conflicts between main `c2e5966` and
+  feature/loop `d6ce9e7` without replacing the main tree. Retained native-plan
+  hash verification, factual broker execution, unknown fee/net-PnL nulls,
+  legacy research return semantics and confirmed-no-trade-only realized zero.
+- Retained DecisionIntent, SignalContract preflight, strict daily cohort
+  membership/verdict checks, RiskPolicyEvidence and Outcome sync states.
+  `execution_summary.status=unavailable` blocks before any Loop request with
+  `BROKER_EXECUTION_EVIDENCE_UNAVAILABLE`; normal submission fixtures use a
+  confirmed empty broker ledger, not missing execution evidence.
+- Missing or fewer-than-ten frozen morning candidates remain local audit
+  envelopes only: build rejects and submit records `TOP10_COHORT_INCOMPATIBLE`.
+  No winner replacement or production synthetic pool is introduced. For complete
+  pools, decisions and their provenance come from the first ten frozen candidates;
+  missing verdict/classification/OPE facts fail closed rather than borrowing facts
+  from post-close winners. Missing instrument returns remain null. Existing
+  post-close research metrics are retained and explicitly labeled as that cohort,
+  not the morning adjudication cohort.
+- Source observation uses frozen context availability; authorization activation
+  is retained separately as `authorization_effective_at`. Availability is never
+  shifted backward to accommodate later trading authorization.
+- Event Outcomes are delivered and their statuses reported before reading the
+  strategy execution index. Event-only assignments do not load that index.
+  Strategy date/hash evidence misses remain pending with WAITING_DATA. Delivery
+  failures retain their original exception if diagnostic reporting also fails;
+  stage-only and idempotent replay behavior are covered.
+- Fresh offline verification: all `tests/test_loop*.py` passed, **96 passed in
+  13.01s** (PowerShell Get-ChildItem file list, Python 3.12 runtime). The new merge
+  regression file contains 14 passing cases. Broker guard mutation check: removing
+  the guard produced the expected local fake-request failure; restoring it passed.
+  Ruff and strict mypy passed for client, contracts, review_builder,
+  outcome_reporter and the two integration/regression test files (6 files).
+- Only the five conflict files and `tests/test_loop_merge_regressions.py` were
+  edited by this worker; auto-merged contracts were checked, not rewritten.
+  No network, .env, scheduler, broker operation or commit. Other workers' files
+  are untouched. Independent review tooling is unavailable in this task; main
+  agent owns independent review, final integrated checks and the merge commit.
+  These fixtures are not production-data or remote acceptance evidence.

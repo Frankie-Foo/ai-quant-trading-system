@@ -33,6 +33,14 @@ python -m scripts.sync_loop_daily_review \
   --active-policy runs/strategy/active.json
 ```
 
+合同验证成功后，客户端还会用刚读取且 Hash 匹配的 SignalContract 对最终 Task 做提交前校验，
+包括 required features、允许的 signal type、事件新鲜度和 point-in-time 边界。校验失败返回
+`SIGNAL_CONTRACT_REJECTED` 及具体违规项，且不会调用 `POST /api/v1/tasks`。所有正式、历史补录
+和人工见证生产者都必须调用 `LoopClient.submit_review`；禁止绕过该入口直接拼装 Task。若历史
+证据没有 `close_return`、`dollar_volume`、`atr_pct` 等合同要求的决策时点事实，应保持
+`blocked_precondition`，不能用当前行情、默认值或人工猜测补齐；只有找到原始不可变快照后才能
+创建新的替代 Task。
+
 环境变量：
 
 ```text
@@ -59,6 +67,13 @@ Outbox 标记为 delivered；`FAILED` 会保留远端 Task ID、Run ID、失败�
 `logging_action_probability`、`reward_model_logged`。Loop 在 Task API 与 Run 内部双重校验；
 缺失字段返回 422/失败关闭。`UNKNOWN`、`UNSPECIFIED` 允许保留为审计事实，但不会进入
 Distiller。`pattern_key` 只允许作为研究属性，不能替代稳定分类。
+
+Top10 是当日候选批次，不要求跨交易日保持相同。每个 Task 内，
+`dynamic_rescan.ranked_candidates` 的前十个标的、`top10_adjudication.decisions` 和
+`daily_review.top10_verdicts` 必须是同一组十个唯一标的，后两者对同一标的的 verdict 也必须
+一致。生产器为三段数据写入同一个 `decision_cohort_id` 和 `decision_trading_date`，并在发起
+HTTP 请求前再次校验；Loop 创建 Task 时执行同样校验，错配直接返回 422，不再等到 Run 中途
+失败。前一日 Top10 不得混入今日候选；它们的到期表现只通过下述 Outcome 链路独立回填。
 
 ## 延迟 Outcome
 
