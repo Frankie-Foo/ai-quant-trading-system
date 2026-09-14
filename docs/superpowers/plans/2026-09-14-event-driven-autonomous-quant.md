@@ -509,4 +509,3 @@ active policy 保存交易规则、风控、交易时刻、特征/成本版本�
 ## 实施启动记录（2026-09-14）
 
 用户最终选择 GPT-6 Astra / medium，并发出“开始”。开发树 D:/cdoeX-worktrees/ai-quant-event-v1，分支 codex/event-driven-v1-20260914。原设计中的“本轮完成边界”指设计轮，不是本实施轮。阶段状态见 docs/implementation/2026-09-14-event-v1-status.md；本记录不表示已部署。
-

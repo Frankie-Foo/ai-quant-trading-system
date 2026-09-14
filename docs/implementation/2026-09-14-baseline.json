@@ -139,4 +139,3 @@
   },
   "release_gate": "All release-only changes must be reconciled and tested before switching scheduled tasks; do not overwrite the active release."
 }
-
