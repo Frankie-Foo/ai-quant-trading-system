@@ -74,7 +74,7 @@ def test_load_project_env_accepts_an_explicit_machine_runtime_file(
     assert project_data_root(project) == Path("D:/shared/ai-quant/data")
 
 
-def test_market_data_credentials_are_loaded_only_after_2100_beijing(
+def test_market_data_credentials_are_loaded_only_after_2100_beijing_in_winter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -113,12 +113,12 @@ def test_market_data_credentials_are_loaded_only_after_2100_beijing(
     monkeypatch.setenv("ALPACA_ENV_FILE", str(tmp_path / "missing.env"))
     monkeypatch.setenv("ALPACA_SIP_ENV_FILE", str(sip_env))
 
-    load_project_env(project, now_utc=datetime(2026, 8, 31, 12, 59, tzinfo=UTC))
+    load_project_env(project, now_utc=datetime(2026, 12, 1, 12, 59, tzinfo=UTC))
     assert "ALPACA_API_KEY_ID" not in os.environ
     assert "FINNHUB_API_KEY" not in os.environ
     assert "ALPHAVANTAGE_API_KEY" not in os.environ
 
-    load_project_env(project, now_utc=datetime(2026, 8, 31, 13, 0, tzinfo=UTC))
+    load_project_env(project, now_utc=datetime(2026, 12, 1, 13, 0, tzinfo=UTC))
     assert os.environ["ALPACA_API_KEY_ID"] == "sip-key"
     assert os.environ["ALPACA_API_SECRET_KEY"] == "sip-secret"
     assert os.environ["ALPACA_DATA_URL"] == "https://data.alpaca.markets"
@@ -126,3 +126,33 @@ def test_market_data_credentials_are_loaded_only_after_2100_beijing(
     assert "ALPACA_PAPER_SECRET_KEY" not in os.environ
     assert os.environ["FINNHUB_API_KEY"] == "finnhub-key"
     assert os.environ["ALPHAVANTAGE_API_KEY"] == "alpha-vantage-key"
+
+
+def test_market_data_credentials_load_at_2000_beijing_during_us_dst(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    sip_env = tmp_path / "sip.env"
+    sip_env.write_text(
+        "ALPACA_API_KEY=sip-key\nALPACA_SECRET_KEY=sip-secret\n",
+        encoding="utf-8",
+    )
+    (project / ".env").write_text(
+        f"ALPACA_SIP_ENV_FILE={sip_env}\n",
+        encoding="utf-8",
+    )
+    for name in (
+        "ALPACA_SIP_ENV_FILE",
+        "ALPACA_API_KEY_ID",
+        "ALPACA_API_SECRET_KEY",
+        "ALPACA_API_KEY",
+        "ALPACA_SECRET_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    load_project_env(project, now_utc=datetime(2026, 8, 31, 12, 0, tzinfo=UTC))
+
+    assert os.environ["ALPACA_API_KEY_ID"] == "sip-key"
+    assert os.environ["ALPACA_API_SECRET_KEY"] == "sip-secret"

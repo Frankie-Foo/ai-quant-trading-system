@@ -30,6 +30,7 @@ _SHARED_ENV_KEYS = frozenset(
     }
 )
 _BEIJING = ZoneInfo("Asia/Shanghai")
+_EASTERN = ZoneInfo("America/New_York")
 
 
 def _promote_alias(target: str, *aliases: str) -> None:
@@ -40,6 +41,14 @@ def _promote_alias(target: str, *aliases: str) -> None:
         if value:
             os.environ[target] = value
             return
+
+
+def _sip_credentials_allowed(now_utc: datetime) -> bool:
+    """Use the 20:00/21:00 Beijing cutoff that follows US DST."""
+
+    eastern = now_utc.astimezone(_EASTERN)
+    cutoff = time(20) if eastern.dst() else time(21)
+    return now_utc.astimezone(_BEIJING).time() >= cutoff
 
 
 def load_project_env(
@@ -90,7 +99,7 @@ def load_project_env(
 
     sip_env_path = os.getenv("ALPACA_SIP_ENV_FILE", "").strip()
     observed_at = now_utc or datetime.now(UTC)
-    if sip_env_path and observed_at.astimezone(_BEIJING).time() >= time(21):
+    if sip_env_path and _sip_credentials_allowed(observed_at):
         values = dotenv_values(Path(sip_env_path).expanduser())
         key_id = str(values.get("ALPACA_API_KEY") or "").strip()
         secret_key = str(values.get("ALPACA_SECRET_KEY") or "").strip()
