@@ -334,12 +334,13 @@ def test_powershell_release_contract_accepts_cap_without_implicitly_arming(name:
     source = path.read_text(encoding="utf-8")
     assert "-m operations.paper_release --validate-cap" in source
     if name.startswith("run_"):
-        assert '--first-wave-not-before-beijing "21:00"' in source
+        assert "--first-wave-not-before-beijing" not in source
     # Execute only the parsed parameter block, never the installer/tick body.
     if sys.platform != "win32":
         pytest.skip("PowerShell parameter binding requires Windows")
     arguments = (
-        "-StrategyPolicyApprovedBy fixture" if name.startswith("install")
+        "-ActivePolicyFile fixture -ChallengerPolicyFile fixture -RuntimeStateRoot fixture"
+        if name.startswith("install")
         else "-ActivePolicyFile fixture -ChallengerPolicyFile fixture"
     )
     command = (

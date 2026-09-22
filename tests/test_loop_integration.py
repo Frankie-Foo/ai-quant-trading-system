@@ -345,8 +345,16 @@ def test_client_rejects_a_mixed_top10_cohort_before_remote_submission(
         validate_loop_task_cohort(task)
 
 
-def test_review_without_effective_plan_does_not_invent_risk_or_execution(tmp_path: Path) -> None:
+def test_no_order_review_without_effective_plan_is_submittable(tmp_path: Path) -> None:
     envelope = _envelope(tmp_path, with_plan=False)
+    envelope = envelope.model_copy(update={
+        "top10_decisions": tuple(
+            decision.model_copy(
+                update={"event_time": envelope.as_of, "available_at": envelope.as_of}
+            )
+            for decision in envelope.top10_decisions
+        )
+    })
     assert envelope.risk_policy["status"] == "unavailable"
     assert "stop_loss" not in envelope.risk_policy
     assert envelope.execution_summary["status"] == "unavailable"
@@ -354,12 +362,51 @@ def test_review_without_effective_plan_does_not_invent_risk_or_execution(tmp_pat
     assert envelope.market_context["frozen_candidate_pool"]["count"] is None
     assert envelope.market_context["post_close_winners"]["count"] == 12
 
-    def no_request(method: str, path: str, payload: object) -> object:
-        pytest.fail("missing effective risk must block before any network request")
+    calls: list[str] = []
 
+    def request(method: str, path: str, payload: object) -> object:
+        del method
+        calls.append(path)
+        if path.startswith("/api/v1/knowledge/quant/control-artifacts?"):
+            artifact_type = path.split("artifact_type=", 1)[1].split("&", 1)[0]
+            artifact_id = {
+                "signal_contract": "signal-v1",
+                "fsm_contract": "fsm-v1",
+                "golden_case_suite": "golden-v1",
+            }[artifact_type]
+            return [_control_artifact(artifact_id, artifact_type)]
+        if path == "/api/v1/tasks":
+            assert isinstance(payload, dict)
+            assert payload["constraints"]["allow_order_execution"] is False
+            review = payload["input_data"]["daily_review"]
+            assert review["risk_policy"]["status"] == "unavailable"
+            assert review["execution_summary"]["orders_authorized"] is False
+            assert payload["input_data"]["dynamic_rescan"]["source_kind"] == (
+                "post_close_research_only"
+            )
+            assert payload["input_data"]["dynamic_rescan"]["ranked_candidates"][0][
+                "research_only"
+            ] is True
+            return {"id": "task-no-order"}
+        return {"id": "run-no-order", "status": "COMPLETED"}
+
+    client = LoopClient(base_url="https://loop.invalid", api_key="test", request=request)
+    assert client.submit_review(envelope, _binding()) == ("task-no-order", "run-no-order")
+    assert calls[-2:] == ["/api/v1/tasks", "/api/v1/tasks/task-no-order/run"]
+
+
+def test_order_capable_review_without_effective_plan_still_blocks(tmp_path: Path) -> None:
+    envelope = _envelope(tmp_path, with_plan=False)
+    execution = dict(envelope.execution_summary)
+    execution["orders_authorized"] = True
+    order_capable = envelope.model_copy(update={"execution_summary": execution})
+
+    def no_request(method: str, path: str, payload: object) -> object:
+        pytest.fail(f"order-capable review must block before network request: {path}")
+
+    client = LoopClient(base_url="https://loop.invalid", api_key="test", request=no_request)
     with pytest.raises(LoopPreconditionError) as caught:
-        client = LoopClient(base_url="https://loop.invalid", api_key="test", request=no_request)
-        client.submit_review(envelope, _binding())
+        client.submit_review(order_capable, _binding())
     assert caught.value.code == "EFFECTIVE_MODERN_PLAN_UNAVAILABLE"
 
 
@@ -407,14 +454,40 @@ def test_review_carries_factual_summary_and_full_pool_without_winner_selection_b
     assert review["metrics"]["top10_close_return_sum"] == pytest.approx(0.155)
 
 
-def test_missing_morning_pool_never_falls_back_to_winners(tmp_path: Path) -> None:
+def test_missing_morning_pool_uses_explicit_research_only_cohort(tmp_path: Path) -> None:
     envelope = _envelope(tmp_path, plan_overrides={
         "candidate_pool_complete": False, "candidates": None,
     })
-    with pytest.raises(ValueError, match="at least 10 ranked candidates"):
-        build_loop_task(envelope, _binding())
+    task = build_loop_task(envelope, _binding())
+    rescan = task["input_data"]["dynamic_rescan"]
+    assert rescan["source_kind"] == "post_close_research_only"
+    assert rescan["trigger"] == "post_close_research"
+    assert all(row["research_only"] is True for row in rescan["ranked_candidates"])
     assert envelope.market_context["frozen_candidate_pool"]["count"] is None
-    assert len(envelope.top10_decisions) == 10
+    assert rescan["universe"] == [item.instrument for item in envelope.top10_decisions]
+
+
+def test_review_carries_frozen_intraday_wave_provenance(tmp_path: Path) -> None:
+    envelope = _envelope(tmp_path, with_plan=False)
+    waves = {
+        "status": "available",
+        "missing_stages": [],
+        "semantics": "frozen_intraday_wave_snapshots_not_post_close_winners",
+        "waves": [{
+            "stage": "08:30_top20",
+            "artifact": "first_wave_pool.json",
+            "content_sha256": "a" * 64,
+            "candidate_count": 20,
+            "candidates": [{"symbol": "T00", "repeat_count": 0}],
+        }],
+    }
+    envelope = envelope.model_copy(update={
+        "market_context": {**envelope.market_context, "intraday_waves": waves},
+    })
+
+    task = build_loop_task(envelope, _binding())
+
+    assert task["input_data"]["daily_review"]["intraday_waves"] == waves
 
 
 def test_review_rejects_active_strategy_config_mismatch(tmp_path: Path) -> None:

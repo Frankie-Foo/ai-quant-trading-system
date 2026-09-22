@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import date
+import math
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import polars as pl
 
 from data_plane.contracts import DataQualityCheck, QualitySeverity
-from data_plane.providers.massive import fetch_ticker_details
+from data_plane.snapshot_queries import load_snapshot_by_id
 from data_plane.storage import persist_snapshot
 from operations.local_env import load_project_env, project_data_root
 from research.modern_momentum_forward import select_forward_pool
@@ -31,23 +32,23 @@ def _check(name: str, passed: bool, observed: object, expected: str) -> DataQual
     )
 
 
-def _latest_caps(data_root: Path, *, asof: date) -> dict[str, float]:
-    rows: list[dict[str, object]] = []
-    for path in (data_root / "accepted").glob("massive.ticker_details-*/data.parquet"):
-        frame = pl.read_parquet(path).filter(
-            (pl.col("asof_date") <= asof) & pl.col("market_cap").is_not_null()
-        )
-        rows.extend(frame.select("symbol", "asof_date", "market_cap").to_dicts())
-    latest: dict[str, tuple[date, float]] = {}
-    for row in rows:
-        symbol = str(row["symbol"])
-        row_date = row["asof_date"]
-        cap = row["market_cap"]
-        if not isinstance(row_date, date) or not isinstance(cap, (int, float)):
-            continue
-        if symbol not in latest or row_date > latest[symbol][0]:
-            latest[symbol] = (row_date, float(cap))
-    return {symbol: item[1] for symbol, item in latest.items()}
+def _current_sip_caps(gates: pl.DataFrame) -> dict[str, float]:
+    """Use the gate's fresh SIP cap evidence, never a slow provider fallback."""
+    required = {"symbol", "market_cap", "market_cap_provenance"}
+    missing = required - set(gates.columns)
+    if missing:
+        raise ValueError(f"selection gates missing current market-cap columns: {sorted(missing)}")
+    caps: dict[str, float] = {}
+    for row in gates.iter_rows(named=True):
+        value = row["market_cap"]
+        if (
+            isinstance(value, (int, float))
+            and math.isfinite(float(value))
+            and float(value) > 0
+            and "alpaca.sip" in str(row["market_cap_provenance"])
+        ):
+            caps[str(row["symbol"]).strip().upper()] = float(value)
+    return caps
 
 
 def main() -> None:
@@ -55,42 +56,40 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trade-date", required=True, type=date.fromisoformat)
     parser.add_argument("--data-root", type=Path, default=project_data_root(ROOT))
+    parser.add_argument("--limit", type=int, default=10)
+    parser.add_argument("--all-eligible", action="store_true")
+    parser.add_argument("--gate-snapshot")
     args = parser.parse_args()
-    gates = latest_gate_paths(args.data_root)
-    if args.trade_date not in gates:
-        raise FileNotFoundError("selection gates are missing for trade date")
-    gate_path, gate_snapshot = gates[args.trade_date]
-    frame = pl.read_parquet(gate_path)
+    if args.limit < 1 or args.limit > 50:
+        raise ValueError("limit must be between 1 and 50")
+    if args.gate_snapshot:
+        frame, gate_snapshot = load_snapshot_by_id(
+            args.data_root, args.gate_snapshot, source="kernel.universe.selection_gates",
+            available_by=datetime.now(UTC),
+        )
+        if frame["session_date"].unique().to_list() != [args.trade_date]:
+            raise ValueError("gate snapshot trade date mismatch")
+    else:
+        gates = latest_gate_paths(args.data_root)
+        if args.trade_date not in gates:
+            raise FileNotFoundError("selection gates are missing for trade date")
+        gate_path, gate_snapshot = gates[args.trade_date]
+        frame = pl.read_parquet(gate_path)
     previous_session = frame.get_column("asof_date").max()
     if not isinstance(previous_session, date) or previous_session >= args.trade_date:
         raise ValueError("previous session date is invalid")
-    candidates = frame.filter(pl.col("rvol").fill_null(0) >= 1.5)
-    caps = _latest_caps(args.data_root, asof=previous_session)
+    candidates = frame.filter(
+        pl.col("pass_gate").fill_null(False) & (pl.col("rvol").fill_null(0) >= 1.5)
+    )
+    caps = _current_sip_caps(candidates)
     missing = tuple(sorted(set(candidates["symbol"]) - set(caps)))
     parent_ids = [gate_snapshot.dataset_id]
     if missing:
-        fetched = fetch_ticker_details(missing, previous_session)
-        fetched_snapshot, _ = persist_snapshot(
-            fetched,
-            root=args.data_root,
-            source="massive.ticker_details",
-            schema_version="ticker_details.v1",
-            checks=(
-                _check(
-                    "requested_symbols_returned",
-                    fetched.height == len(missing),
-                    fetched.height,
-                    str(len(missing)),
-                ),
-            ),
-            parent_snapshot_ids=(gate_snapshot.dataset_id,),
+        raise RuntimeError(
+            "selection gates contain candidates without current cached-shares × SIP market caps"
         )
-        fetched_snapshot.assert_usable()
-        parent_ids.append(fetched_snapshot.dataset_id)
-        for row in fetched.iter_rows(named=True):
-            if isinstance(row["market_cap"], (int, float)):
-                caps[str(row["symbol"])] = float(row["market_cap"])
-    pool = select_forward_pool(frame, market_caps=caps)
+    pool_limit = candidates.height if args.all_eligible else args.limit
+    pool = select_forward_pool(candidates, market_caps=caps, limit=pool_limit)
     if pool.is_empty():
         raise RuntimeError("zero candidates satisfy modern momentum first-wave gates")
     minimum_cap = pool["forward_market_cap"].min()
@@ -103,7 +102,7 @@ def main() -> None:
         schema_version="modern_momentum_forward_pool.v1",
         checks=(
             _check("non_empty", pool.height > 0, pool.height, ">0"),
-            _check("maximum_ten", pool.height <= 10, pool.height, "<=10"),
+            _check("maximum_rows", pool.height <= pool_limit, pool.height, f"<={pool_limit}"),
             _check(
                 "minimum_market_cap",
                 minimum_cap >= 1e9,
@@ -127,7 +126,8 @@ def main() -> None:
                     "premarket_return",
                     "catalyst_categories",
                 ).to_dicts(),
-                "missing_market_caps_fetched": len(missing),
+                "market_cap_source": "selection_gate_current_sip",
+                "market_cap_missing": len(missing),
                 "dataset_id": snapshot.dataset_id,
                 "path": str(path),
                 "production_eligible": False,

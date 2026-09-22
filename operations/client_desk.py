@@ -19,6 +19,7 @@ from operations.runtime_agent_safety import (
 )
 
 BEIJING = ZoneInfo("Asia/Shanghai")
+EASTERN = ZoneInfo("America/New_York")
 SELECTION_SOURCE = "kernel.universe.selection_gates"
 REVIEW_SOURCE = "research.intraday_selection_postmortem"
 CURRENT_JOB_NAMES = {
@@ -54,11 +55,11 @@ class TradingDeskEvidence:
         *,
         data_root: Path,
         runs_root: Path,
-        selection_time_beijing: time = time(20, 0),
+        selection_time_eastern: time = time(8, 30),
     ):
         self.data_root = data_root
         self.runs_root = runs_root
-        self.selection_time_beijing = selection_time_beijing
+        self.selection_time_eastern = selection_time_eastern
 
     def snapshot(self, observed_at_utc: datetime | None = None) -> dict[str, object]:
         observed_at = observed_at_utc or datetime.now(UTC)
@@ -66,7 +67,7 @@ class TradingDeskEvidence:
         target_date = _target_session(observed_at)
         phase = market_phase(
             observed_at,
-            selection_time_beijing=self.selection_time_beijing,
+            selection_time_eastern=self.selection_time_eastern,
         )
         jobs = self._jobs(target_date)
         selection = self._selection(
@@ -129,8 +130,8 @@ class TradingDeskEvidence:
         else:
             selection_at = datetime.combine(
                 target_date,
-                self.selection_time_beijing,
-                BEIJING,
+                self.selection_time_eastern,
+                EASTERN,
             ).astimezone(UTC)
             status = "waiting" if observed_at_utc < selection_at else "missing"
             blocker = None
@@ -140,7 +141,15 @@ class TradingDeskEvidence:
             "status": status,
             "blocker": blocker,
             "target_trade_date": target_date.isoformat(),
-            "expected_at_beijing": self.selection_time_beijing.strftime("%H:%M"),
+            "expected_at_eastern": self.selection_time_eastern.strftime("%H:%M"),
+            # Keep the legacy key for clients that have not migrated yet.  Its
+            # value is the actual ET checkpoint converted for this trade date;
+            # it is not a fixed Beijing-time gate.
+            "expected_at_beijing": datetime.combine(
+                target_date,
+                self.selection_time_eastern,
+                EASTERN,
+            ).astimezone(BEIJING).strftime("%H:%M"),
             "session_date": (
                 None if latest is None else latest.session_date.isoformat()
             ),
@@ -426,7 +435,7 @@ def _selection_candidates(frame: pl.DataFrame) -> list[dict[str, object]]:
 def market_phase(
     observed_at_utc: datetime,
     *,
-    selection_time_beijing: time = time(20, 0),
+    selection_time_eastern: time = time(8, 30),
     postmarket_data_grace_minutes: int = 20,
 ) -> dict[str, object]:
     """Return the one desktop action allowed by the exchange-clock window."""
@@ -466,7 +475,7 @@ def market_phase(
     assert isinstance(trade_date, date)
     assert isinstance(close, datetime)
     selection_at = datetime.combine(
-        trade_date, selection_time_beijing, BEIJING
+        trade_date, selection_time_eastern, EASTERN
     ).astimezone(UTC)
     if selection_at <= observed_at_utc <= close:
         return {

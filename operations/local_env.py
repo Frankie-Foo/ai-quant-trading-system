@@ -29,7 +29,17 @@ _SHARED_ENV_KEYS = frozenset(
         "CLOUD_MARKET_DATA_FEED",
     }
 )
-_BEIJING = ZoneInfo("Asia/Shanghai")
+_EASTERN = ZoneInfo("America/New_York")
+_SIP_MONITOR_START = time(8, 30)
+_SIP_MONITOR_END = time(17, 55)
+
+
+def sip_monitoring_window(now_utc: datetime) -> bool:
+    """Return whether a read-only SIP monitor may load its credentials."""
+    if now_utc.tzinfo is None or now_utc.utcoffset() is None:
+        raise ValueError("now_utc must be timezone-aware")
+    local_time = now_utc.astimezone(_EASTERN).time()
+    return _SIP_MONITOR_START <= local_time < _SIP_MONITOR_END
 
 
 def _promote_alias(target: str, *aliases: str) -> None:
@@ -90,7 +100,7 @@ def load_project_env(
 
     sip_env_path = os.getenv("ALPACA_SIP_ENV_FILE", "").strip()
     observed_at = now_utc or datetime.now(UTC)
-    if sip_env_path and observed_at.astimezone(_BEIJING).time() >= time(21):
+    if sip_env_path and sip_monitoring_window(observed_at):
         values = dotenv_values(Path(sip_env_path).expanduser())
         key_id = str(values.get("ALPACA_API_KEY") or "").strip()
         secret_key = str(values.get("ALPACA_SECRET_KEY") or "").strip()

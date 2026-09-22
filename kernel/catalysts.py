@@ -256,6 +256,25 @@ def prepare_catalysts(events: pl.DataFrame, *, asof_utc: datetime) -> pl.DataFra
     """Apply deterministic Phase-1 cleaning without generating a sentiment score."""
     if asof_utc.tzinfo is None or asof_utc.utcoffset() is None:
         raise ValueError("asof_utc must be timezone-aware")
+    if events.is_empty():
+        return events.with_columns(
+            *(pl.lit(None, dtype=pl.String).alias(name) for name in (
+                "content_fingerprint", "catalyst_category", "exclude_reason", "model_provenance",
+            )),
+            *(pl.lit(None, dtype=pl.Int64).alias(name) for name in (
+                "word_count", "symbol_count", "source_count",
+            )),
+            *(pl.lit(None, dtype=pl.Boolean).alias(name) for name in (
+                "eligible", "earnings_structured", "earnings_actual_layer",
+                "earnings_forward_layer", "earnings_raise_layer",
+            )),
+            *(pl.lit(None, dtype=pl.Float64).alias(name) for name in (
+                "model_score", "earnings_actual_eps_surprise", "earnings_actual_revenue_surprise",
+                "earnings_forward_eps_vs_consensus", "earnings_forward_revenue_vs_consensus",
+                "earnings_eps_guidance_raise", "earnings_revenue_guidance_raise",
+            )),
+            pl.lit(None, dtype=pl.List(pl.String)).alias("corroborating_sources"),
+        )
     rows = list(events.sort("published_utc", "source", "source_event_id").iter_rows(named=True))
     fingerprints: list[str] = []
     grouped_sources: dict[str, set[str]] = {}

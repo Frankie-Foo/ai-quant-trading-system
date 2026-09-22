@@ -509,3 +509,9 @@ active policy 保存交易规则、风控、交易时刻、特征/成本版本�
 ## 实施启动记录（2026-09-14）
 
 用户最终选择 GPT-6 Astra / medium，并发出“开始”。开发树 D:/cdoeX-worktrees/ai-quant-event-v1，分支 codex/event-driven-v1-20260914。原设计中的“本轮完成边界”指设计轮，不是本实施轮。阶段状态见 docs/implementation/2026-09-14-event-v1-status.md；本记录不表示已部署。
+
+## 用户更新：实现与测试分工（2026-09-14）
+
+用户要求先完成其他模块实现；到测试阶段写好测试流程并停止，等待确认。Astra medium 仅负责生产代码实现，后续测试不交给 Astra；测试拟由 Sol high 承担。此要求优先于本文原先的测试先行顺序。未经确认不编写或运行本阶段测试、检查器、回放或接口联调；静态阅读代码和编辑实现可以继续。M0 的历史测试记录仅适用于当时版本，不覆盖后续未经验证的模块。
+
+数据获取优先复用已有 API。新配置位置为 D:/桌面搬家/AI-Investgo/Gary-market-data.env，密钥不进入代码和报告；接口接入约束见 docs/implementation/2026-09-14-event-api-routing.md。

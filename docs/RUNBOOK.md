@@ -2,16 +2,17 @@
 
 ## Normal flow
 
-- First wave: the generic window starts 08:00 ET, but this Windows release waits
-  until 21:00 Beijing (09:00 ET in summer, 08:00 ET in winter). Build at most ten
-  names, market cap at least $1 billion; write the dedicated
+- 08:30 ET: build the first Top20 wave. Build at most twenty names, market cap at
+  least $1 billion; write the dedicated
   Investment Base and send one Chinese Livermore summary. No orders.
-- 09:25 ET: read only the frozen first pool, verify SIP price/volume, VWAP, spread and
+- 09:00 ET: read only the frozen first pool, verify SIP price/volume, VWAP, spread and
   liquidity, retain zero to six, persist and notify. A price below premarket VWAP or a
   0.30%-1.00% premarket spread is a yellow observation flag, not an automatic rejection.
   Missing SIP facts, dollar volume below $1 million, or spread above 1.00% still rejects.
   No orders.
-- 09:35 ET: read only the second pool and five completed opening minutes, retain zero to
+- 09:30 ET: rank the retained pool into the Top10 checkpoint. It may not introduce a
+  symbol that was absent from the first two frozen pools; no orders.
+- 09:35 ET: read only the ranked pool and five completed opening minutes, retain zero to
   three, publish the complete plan, then create immutable authorization. Zero candidates
   is a valid no-trade result and must include rejection reasons.
 - 09:56–15:00 ET: the Modern H15 monitor may place protected Alpaca Paper orders. It

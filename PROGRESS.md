@@ -1,5 +1,82 @@
 # Progress
 
+## 2026-09-22 Release preparation and real read-only integration
+
+- Owner approved bundling the complete event-model worktree for branch/PR publication.
+- Fixed the full strict Mypy scope (495 source files), not only the previously targeted modules.
+- Added a red/green regression for Feishu CLI authorization JSON on stderr; diagnostics now
+  retain safe error type/code without leaking response messages. Current external blocker is
+  missing `base:record:read` (99991672), not missing Alpaca SIP access.
+- Independent deployment review found policy rebinding, release-local state reset and overlapping
+  scheduler risks. Installer now validates existing policy/persistent runs binding, rejects active
+  owners including supervisor/startup, and registers replacements disabled. Eight binding/cutover
+  tests pass; operational migration is still required, no runtime state was rewritten.
+- Real read-only probes: Paper ACTIVE with zero positions/open orders; SIP HTTP 200; Livermore
+  configured channel available. One clearly labelled Chinese integration message was delivered
+  and audited separately from trading evidence. No orders, Loop submissions or task cutover.
+- Existing Python runtime has five duplicate distributions. Created an isolated 3.12.6 release
+  environment with 74 requirement-resolved packages; dependency compatibility check passes.
+- Client checks: 33 Electron + 12 renderer tests, production build passed. Offline Paper drills
+  passed with zero broker calls/external writes. Details and remaining gates:
+  `docs/implementation/2026-09-22-release-validation.md`.
+- Final isolated release-runtime validation: **1327 passed in 122.75s**, Ruff and complete Mypy
+  **495 source files** passed; compileall, dependency compatibility and staged diff check passed.
+  Old runtime separately passed **1327 in 116.11s**. No production activation is claimed.
+
+## 2026-09-22 Follow-up: fresh event waves and immutable cross-wave lineage
+
+Status: local implementation and offline verification only; no deployment, broker action,
+external publication, Loop write or runtime/safety-setting change.
+
+- Added bounded `--wave` event discovery over the daily prechecked universe, including newly
+  arriving premarket events. Later revisions are excluded; materialization time stays truthful.
+  The previous overnight lock is never overwritten and empty current pools never reuse old ones.
+- Pass explicit IDs through candidates, RVOL, SIP caps, gates, forward ranking and opening
+  authorization. Validate accepted state, content hash, source, timestamp, row count and parent
+  IDs; gate inputs additionally verify dates, symbol coverage, RVOL cutoff and the bound daily pool.
+- Added independent `--reference-only` preparation/ledger identity, removing the first wave's
+  dependency on successful old overnight-news ingestion without falsely completing that job.
+- Cross-wave JSON now binds parent hashes and validates trade date, stage, aware generation time,
+  chronological order and exact parent bytes. Existing authorized Paper recovery remains intact;
+  missing historical lineage is not fabricated or retroactively patched.
+- Fixed rank coercion (boolean, fractional rank and non-finite values) and both previously
+  reported ranking type errors. Reused existing CLI/storage boundaries; no framework or threshold change.
+- Test-first reproductions covered missing explicit-ID contracts, news discovery, empty inputs,
+  parent mismatch, stale cutoff, cross-wave timestamps/hashes and invalid ranking values.
+- Final validation: `python -m pytest -q` **1318 passed in 96.72s**, exit 0, including the
+  explicit opening-source regression. Ruff, targeted Mypy across 12 production files and
+  `git -c core.safecrlf=false diff --check` passed. No live API acceptance is claimed.
+- Remaining operational acceptance: real API permissions, provider pagination/rate limits,
+  shares coverage and full-wave latency, followed by deployment under existing Paper gates.
+  Detailed report: `docs/implementation/2026-09-22-review-fixes.md`.
+
+## 2026-09-22 Local review: funnel timing, ranking and data integrity
+
+Status: fixes verified locally; no deployment, broker action, Loop submission or runtime-setting change.
+
+- Aligned the SIP credential window to 08:30–17:55 America/New_York, including DST;
+  each ranked wave supplies an explicit complete-minute RVOL cutoff capped at market open.
+- Added premarket `--lock-only`; reference preparation no longer invokes live RVOL or the
+  legacy selection/publication pipeline when called by the production funnel.
+- Windows scheduler/stage children are hidden and use explicit UTF-8 input/output environment.
+- Apply prior-wave repeat bonuses before TopN truncation; retain all hard-gate-eligible inputs
+  via an explicit forward-builder flag. First-wave capacity rejections are recorded, not failures.
+  Independent re-review caught dropped rejection lists at publication; first run and retry now
+  both project the frozen rejection list, with a verified red/green regression.
+- Derived market-cap availability is the latest of shares and price availability. Shared
+  5-minute aggregation stops at missing/non-finite VWAP or invalid volume instead of inventing VWAP.
+- Final-pool notification now says awaiting confirmation; it does not claim Paper has started.
+- Test-first evidence: initial new runtime regressions 9 failed; subsequent ranking/cap/signal
+  regressions 4 failed; outer executor encoding regression 1 failed before its fix.
+- Final validation after publication re-review: `python -m pytest -q` **1293 passed in 87.94s**;
+  `python -m ruff check .`
+  passed; `git -c core.safecrlf=false diff --check` passed. Five core files pass Mypy;
+  wider eight-file checking still reports two pre-existing errors in `research/intraday_wave_ranking.py`.
+- Known remaining findings: P1 wave inputs still use the overnight catalyst pool rather than
+  newly arriving events; P2 parent-wave date/time/hash provenance is incomplete. Do not treat
+  this patch as full production readiness. Scope, reproduction and next validation steps:
+  `docs/implementation/2026-09-22-review-fixes.md`.
+
 ## M96 Loop risk-policy temporal preflight - 2026-09-14
 
 Status: implemented locally; Windows producer rollout and a new immutable Task remain pending.

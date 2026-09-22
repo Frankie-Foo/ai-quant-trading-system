@@ -132,17 +132,27 @@ class LoopClient:
         return response.json()
 
     def submit_review(self, envelope: QuantReviewEnvelope, binding: LoopBinding) -> tuple[str, str]:
-        if envelope.risk_policy.get("status") != "available":
-            raise LoopPreconditionError(
-                "EFFECTIVE_MODERN_PLAN_UNAVAILABLE",
-                "review submission requires a hash-verified effective modern plan",
-            )
-        if envelope.execution_summary.get("status") == "unavailable":
-            raise LoopPreconditionError(
-                "BROKER_EXECUTION_EVIDENCE_UNAVAILABLE",
-                "review submission requires confirmed broker execution evidence",
-            )
-        validate_review_risk_policy_evidence(envelope)
+        # A daily review never authorizes broker orders.  It may therefore be
+        # submitted as factual research even when there was no executable plan
+        # or no broker reconciliation to attach.  Do not turn that absence into
+        # invented risk or fill facts.
+        no_order_review = (
+            envelope.risk_policy.get("status") != "available"
+            and envelope.execution_summary.get("orders_authorized") is False
+        )
+        if not no_order_review:
+            if envelope.risk_policy.get("status") != "available":
+                raise LoopPreconditionError(
+                    "EFFECTIVE_MODERN_PLAN_UNAVAILABLE",
+                    "order-capable review requires a hash-verified effective modern plan",
+                )
+            if envelope.execution_summary.get("status") == "unavailable":
+                raise LoopPreconditionError(
+                    "BROKER_EXECUTION_EVIDENCE_UNAVAILABLE",
+                    "order-capable review requires confirmed broker execution evidence",
+                )
+        if envelope.risk_policy.get("status") == "available":
+            validate_review_risk_policy_evidence(envelope)
         try:
             task_payload = build_loop_task(envelope, binding)
         except ValueError as exc:
@@ -405,6 +415,16 @@ def validate_loop_task_cohort(task_payload: dict[str, Any]) -> None:
         raise ValueError("Loop task requires exactly 10 Top10 adjudication decisions")
     if not isinstance(reviewed, list) or len(reviewed) != 10:
         raise ValueError("Loop task requires exactly 10 daily review verdicts")
+    source_kind = dynamic_rescan.get("source_kind")
+    if source_kind not in {"frozen_intraday_pool", "post_close_research_only"}:
+        raise ValueError("dynamic_rescan source_kind is invalid")
+    if source_kind == "post_close_research_only":
+        constraints = task_payload.get("constraints")
+        if (
+            not isinstance(constraints, dict)
+            or constraints.get("allow_order_execution") is not False
+        ):
+            raise ValueError("retrospective cohort must forbid order execution")
 
     def instruments(items: list[Any], field_name: str) -> tuple[str, ...]:
         result = tuple(
@@ -458,6 +478,49 @@ def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict
     decisions = envelope.top10_decisions
     frozen_pool = envelope.market_context.get("frozen_candidate_pool", {})
     morning_candidates = frozen_pool.get("candidates") or []
+    execution_has_broker_evidence = "fill_evidence_sha256" in envelope.execution_summary
+    if envelope.risk_policy.get("status") == "available" and (
+        frozen_pool.get("candidate_pool_complete") is True
+        or execution_has_broker_evidence
+    ) and (
+        frozen_pool.get("status") != "available"
+        or not isinstance(morning_candidates, list)
+        or len(morning_candidates) < 10
+    ):
+        # A retrospective, no-execution review may use the explicit research
+        # cohort. Once broker evidence exists, a missing morning cohort cannot
+        # be reconciled from post-close winners.
+        raise ValueError("Loop task requires at least 10 ranked candidates")
+    has_frozen_cohort = (
+        frozen_pool.get("status") == "available"
+        and isinstance(morning_candidates, list)
+        and len(morning_candidates) >= 10
+    )
+    if has_frozen_cohort:
+        source_kind = "frozen_intraday_pool"
+        ranked_candidates = [
+            {**item, "instrument": item["symbol"], "rank": rank}
+            for rank, item in enumerate(morning_candidates, start=1)
+        ]
+        universe = [item["symbol"] for item in morning_candidates]
+    else:
+        # A missing frozen pool cannot be reconstructed from after-close
+        # winners.  Keep the research cohort usable for Loop, but label it
+        # explicitly as retrospective so it can never be treated as a signal.
+        source_kind = "post_close_research_only"
+        ranked_candidates = [
+            {
+                "instrument": item.instrument,
+                "rank": item.rank,
+                "market_regime": item.market_regime,
+                "classification": item.classification,
+                "classification_source": item.classification_source,
+                "research_only": True,
+                **item.features,
+            }
+            for item in decisions
+        ]
+        universe = [item.instrument for item in decisions]
     primary = decisions[0]
     market_regime = str(envelope.market_context.get("market_regime") or "UNKNOWN")
     top10 = [
@@ -541,13 +604,11 @@ def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict
                 "market_scope": envelope.market_scope,
                 "as_of": envelope.as_of.isoformat(),
                 "available_at": envelope.as_of.isoformat(),
-                "trigger": "scheduled",
+                "trigger": "scheduled" if has_frozen_cohort else "post_close_research",
                 "trigger_evidence": {"review_event_id": envelope.event_id},
-                "universe": [item["symbol"] for item in morning_candidates],
-                "ranked_candidates": [
-                    {**item, "instrument": item["symbol"], "rank": rank}
-                    for rank, item in enumerate(morning_candidates, start=1)
-                ],
+                "source_kind": source_kind,
+                "universe": universe,
+                "ranked_candidates": ranked_candidates,
                 "top_n": 10,
                 "source_snapshot_ids": list(envelope.provenance.source_snapshot_ids),
                 "metadata": metadata,
@@ -580,6 +641,7 @@ def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict
                 "risk_policy": envelope.risk_policy,
                 "frozen_candidate_pool": frozen_pool,
                 "post_close_winners": envelope.market_context.get("post_close_winners", {}),
+                "intraday_waves": envelope.market_context.get("intraday_waves", {}),
                 "execution_summary": envelope.execution_summary,
                 "metrics": envelope.metrics,
                 "metric_semantics": {

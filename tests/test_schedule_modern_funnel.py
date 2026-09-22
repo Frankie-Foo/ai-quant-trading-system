@@ -53,9 +53,10 @@ def test_funnel_runs_each_stage_once_in_dependency_order(tmp_path: Path) -> None
     ledger = tmp_path / "funnel.sqlite3"
     executor = FakeExecutor()
 
-    first = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(8, 0))
-    duplicate = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(8, 1))
-    second = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 25))
+    first = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(8, 30))
+    duplicate = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(8, 31))
+    second = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 0))
+    final_rank = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 30))
     open_confirmation = run_tick(
         ledger_path=ledger,
         executor=executor,
@@ -65,10 +66,12 @@ def test_funnel_runs_each_stage_once_in_dependency_order(tmp_path: Path) -> None
     assert first.status is FunnelTickStatus.SUCCEEDED
     assert duplicate.status is FunnelTickStatus.ALREADY_SUCCEEDED
     assert second.status is FunnelTickStatus.SUCCEEDED
+    assert final_rank.status is FunnelTickStatus.SUCCEEDED
     assert open_confirmation.status is FunnelTickStatus.SUCCEEDED
     assert executor.calls == [
         FunnelStage.FIRST_WAVE,
         FunnelStage.SECOND_WAVE,
+        FunnelStage.FINAL_RANK,
         FunnelStage.OPEN_CONFIRMATION,
     ]
 
@@ -76,15 +79,16 @@ def test_funnel_runs_each_stage_once_in_dependency_order(tmp_path: Path) -> None
 def test_failed_stage_retries_only_inside_its_window(tmp_path: Path) -> None:
     ledger = tmp_path / "funnel.sqlite3"
     executor = FakeExecutor(fail_once=FunnelStage.SECOND_WAVE)
-    run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(8, 0))
+    run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(8, 30))
 
-    failed = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 25))
-    retried = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 26))
+    failed = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 0))
+    retried = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 1))
     outside = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 30))
 
     assert failed.status is FunnelTickStatus.FAILED
     assert retried.status is FunnelTickStatus.SUCCEEDED
-    assert outside.status is FunnelTickStatus.NOT_DUE
+    assert outside.status is FunnelTickStatus.SUCCEEDED
+    assert outside.stage is FunnelStage.FINAL_RANK
     assert executor.calls.count(FunnelStage.SECOND_WAVE) == 2
 
 
@@ -93,7 +97,7 @@ def test_missing_prerequisite_never_runs_a_later_stage(tmp_path: Path) -> None:
     result = run_tick(
         ledger_path=tmp_path / "funnel.sqlite3",
         executor=executor,
-        now_utc=_utc(9, 25),
+        now_utc=_utc(9, 0),
     )
     assert result.status is FunnelTickStatus.PREREQUISITE_MISSING
     assert executor.calls == []
@@ -104,12 +108,12 @@ def test_funnel_does_nothing_outside_windows_or_on_xnys_holiday(tmp_path: Path) 
     outside = run_tick(
         ledger_path=tmp_path / "weekday.sqlite3",
         executor=executor,
-        now_utc=_utc(9, 31),
+        now_utc=_utc(9, 46),
     )
     weekend = run_tick(
         ledger_path=tmp_path / "weekend.sqlite3",
         executor=executor,
-        now_utc=_utc(8, 0, day=23),
+        now_utc=_utc(8, 30, day=23),
     )
     assert outside.status is FunnelTickStatus.NOT_DUE
     assert weekend.status is FunnelTickStatus.NOT_TRADING_DAY
@@ -119,8 +123,9 @@ def test_funnel_does_nothing_outside_windows_or_on_xnys_holiday(tmp_path: Path) 
 def test_open_confirmation_window_ends_at_0945(tmp_path: Path) -> None:
     ledger = tmp_path / "funnel.sqlite3"
     executor = FakeExecutor()
-    run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(8, 0))
-    run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 25))
+    run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(8, 30))
+    run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 0))
+    run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 30))
     result = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 45))
     assert result.status is FunnelTickStatus.NOT_DUE
     assert FunnelStage.OPEN_CONFIRMATION not in executor.calls
@@ -225,8 +230,9 @@ def test_september_third_wave_pending_handoff_can_resume_without_selection(tmp_p
             now_utc=datetime(2026, 9, 3, hour, minute, tzinfo=EASTERN).astimezone(UTC),
         )
 
-    tick(8, 0)
-    tick(9, 25)
+    tick(8, 30)
+    tick(9, 0)
+    tick(9, 30)
     pending = tick(9, 35)
     assert pending.status.value == "handoff_pending"
     # Replay the old 9/3 bug: an eligible, unstarted receipt was locked as succeeded.
@@ -241,7 +247,7 @@ def test_september_third_wave_pending_handoff_can_resume_without_selection(tmp_p
     assert tick(10, 1).status.value == "monitoring"
     assert tick(15, 0).status is FunnelTickStatus.MONITORING
     assert tick(16, 0).status is FunnelTickStatus.NOT_DUE
-    assert len(commands) == 6
+    assert len(commands) == 7
 
 
 @pytest.mark.parametrize("timeout", [False, True])
@@ -304,7 +310,7 @@ def test_failed_open_without_authorization_preserves_original_error_after_window
         day_root.mkdir(parents=True)
         name = "open_decision.json" if artifact == "decision_only" else "open_confirmation.json"
         (day_root / name).write_text('{"candidates": [{"symbol": "PASS"}]}', encoding="utf-8")
-    for hour, minute in ((8, 0), (9, 25), (9, 35)):
+    for hour, minute in ((8, 30), (9, 0), (9, 30), (9, 35)):
         result = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(hour, minute))
     assert result.status is FunnelTickStatus.FAILED
     with sqlite3.connect(ledger) as connection:
@@ -320,7 +326,7 @@ def test_failed_open_without_authorization_preserves_original_error_after_window
         ).fetchone()
     assert after == before
     assert "99991400" in str(after)
-    assert len(commands) == 3
+    assert len(commands) == 4
 
 
 def test_no_trade_remains_terminal_and_scheduler_ignores_midnight_and_non_sessions(
@@ -328,7 +334,7 @@ def test_no_trade_remains_terminal_and_scheduler_ignores_midnight_and_non_sessio
 ) -> None:
     ledger = tmp_path / "funnel.sqlite3"
     executor = FakeExecutor()
-    for hour, minute in ((8, 0), (9, 25), (9, 35)):
+    for hour, minute in ((8, 30), (9, 0), (9, 30), (9, 35)):
         assert (
             run_tick(
                 ledger_path=ledger,
@@ -356,4 +362,4 @@ def test_no_trade_remains_terminal_and_scheduler_ignores_midnight_and_non_sessio
         )
     with sqlite3.connect(ledger) as connection:
         assert connection.execute("SELECT * FROM funnel_runs ORDER BY stage").fetchall() == original
-    assert len(executor.calls) == 3
+    assert len(executor.calls) == 4

@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import io
 import json
 import subprocess
@@ -8,6 +9,8 @@ import traceback
 from contextlib import redirect_stdout
 from datetime import UTC, date, datetime, timedelta, tzinfo
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import polars as pl
 import pytest
@@ -40,6 +43,38 @@ from scripts.run_modern_funnel_stage import (
 )
 
 NOW = datetime(2026, 8, 24, 13, 25, tzinfo=UTC)
+
+
+def _wave_fixture(
+    root: Path, name: str, candidates: list[dict[str, Any]],
+    rejected: list[dict[str, Any]] | None = None,
+) -> None:
+    stages = {
+        "first_wave_pool.json": ("first_wave", "12:30", ()),
+        "second_wave_pool.json": ("second_wave", "13:00", ("first_wave_pool.json",)),
+        "final_wave_pool.json": (
+            "final_rank", "13:30", ("first_wave_pool.json", "second_wave_pool.json"),
+        ),
+        "open_decision.json": ("open_decision", "13:35", ("final_wave_pool.json",)),
+    }
+    stage, clock, parents = stages[name]
+    for parent in parents:
+        if not (root / parent).exists():
+            _wave_fixture(root, parent, candidates)
+    (root / name).write_text(json.dumps({
+        "schema_version": f"modern_funnel.{stage}.v1", "trade_date": "2026-08-24",
+        "generated_at_utc": f"2026-08-24T{clock}:00Z", "candidates": candidates,
+        "rejected": rejected or [], "strategy_context": {},
+        "prior_wave_hashes": {
+            parent: hashlib.sha256((root / parent).read_bytes()).hexdigest() for parent in parents
+        },
+    }), encoding="utf-8")
+
+
+@pytest.fixture(autouse=True)
+def _paper_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPACA_PAPER_KEY_ID", "fixture-paper-key")
+    monkeypatch.setenv("ALPACA_PAPER_SECRET_KEY", "fixture-paper-secret")
 
 
 def _clock(monkeypatch: pytest.MonkeyPatch, now: datetime) -> None:
@@ -487,7 +522,17 @@ def test_rejected_name_is_a_feishu_state_transition_with_reason() -> None:
 
 def test_stage_event_time_is_deterministic_and_dst_aware() -> None:
     assert _stage_observed_at(date(2026, 8, 24), FunnelStage.FIRST_WAVE) == datetime(
-        2026, 8, 24, 12, 0, tzinfo=UTC
+        2026, 8, 24, 12, 30, tzinfo=UTC
+    )
+
+
+def test_empty_wave_messages_state_no_candidate() -> None:
+    assert _first_wave_message([]).endswith("无候选：未出现同时满足硬门槛的标的。")
+    assert stage_runner._ranked_wave_message(
+        FunnelStage.SECOND_WAVE, []
+    ).endswith("无候选：未出现同时满足硬门槛的标的。")
+    assert _stage_observed_at(date(2026, 8, 24), FunnelStage.FINAL_RANK) == datetime(
+        2026, 8, 24, 13, 30, tzinfo=UTC
     )
     assert _stage_observed_at(date(2026, 8, 24), FunnelStage.OPEN_CONFIRMATION) == datetime(
         2026, 8, 24, 13, 35, tzinfo=UTC
@@ -534,7 +579,6 @@ def test_first_wave_retry_reuses_frozen_artifact(
         raise AssertionError("retry must not regenerate the frozen pool")
 
     monkeypatch.setattr(stage_runner, "_run_module", unexpected)
-    monkeypatch.setattr(stage_runner, "_latest_pool", unexpected)
     monkeypatch.setattr(stage_runner, "_publish_stage", lambda **_kwargs: (("rec-1",), "msg-1"))
 
     receipt = stage_runner._first_wave(args, day_root)
@@ -566,8 +610,9 @@ def test_frozen_artifact_tolerates_retry_timestamp_only(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize("publish_stage", [FunnelStage.FIRST_WAVE, FunnelStage.FINAL_RANK])
 def test_publish_stage_keeps_selection_when_feishu_is_down(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, publish_stage: FunnelStage,
 ) -> None:
     class Push:
         def __init__(self) -> None:
@@ -582,7 +627,7 @@ def test_publish_stage_keeps_selection_when_feishu_is_down(
 
     push = Push()
     monkeypatch.setattr(
-        stage_runner.FeishuBaseEventClient,
+        FeishuBaseEventClient,
         "from_environment",
         lambda _environment: (_ for _ in ()).throw(RuntimeError("Base unavailable")),
     )
@@ -590,7 +635,7 @@ def test_publish_stage_keeps_selection_when_feishu_is_down(
 
     record_ids, message_id = stage_runner._publish_stage(
         trade_date=date(2026, 8, 24),
-        stage=FunnelStage.FIRST_WAVE,
+        stage=publish_stage,
         candidates=[
             {
                 **_candidate("PASS"),
@@ -605,6 +650,9 @@ def test_publish_stage_keeps_selection_when_feishu_is_down(
     assert record_ids == ()
     assert message_id == "message-1"
     assert "飞书 Base 同步失败" in push.messages[0]
+    if publish_stage is FunnelStage.FINAL_RANK:
+        assert "等待开盘确认" in push.messages[0]
+        assert "已进入Paper开盘盯盘" not in push.messages[0]
 
 
 def test_second_wave_retry_does_not_refetch_market_data(
@@ -612,19 +660,7 @@ def test_second_wave_retry_does_not_refetch_market_data(
 ) -> None:
     day_root = tmp_path / "2026-08-24"
     day_root.mkdir()
-    (day_root / "first_wave_pool.json").write_text(
-        json.dumps({"candidates": [_candidate("PASS")]}), encoding="utf-8"
-    )
-    (day_root / "second_wave_pool.json").write_text(
-        json.dumps(
-            {
-                "candidates": [_candidate("PASS")],
-                "rejected": [],
-                "generated_at_utc": "2026-08-24T13:25:00+00:00",
-            }
-        ),
-        encoding="utf-8",
-    )
+    _wave_fixture(day_root, "second_wave_pool.json", [_candidate("PASS")])
     args = argparse.Namespace(
         trade_date=date(2026, 8, 24),
         data_root=tmp_path / "data",
@@ -635,12 +671,106 @@ def test_second_wave_retry_does_not_refetch_market_data(
         raise AssertionError("retry must not refetch market data")
 
     monkeypatch.setattr(stage_runner, "fetch_bars", unexpected)
-    monkeypatch.setattr(stage_runner, "fetch_quotes", unexpected)
     monkeypatch.setattr(stage_runner, "_publish_stage", lambda **_kwargs: (("rec-1",), "msg-1"))
 
     receipt = stage_runner._second_wave(args, day_root)
 
     assert receipt["livermore_message_id"] == "msg-1"
+
+
+def test_second_wave_refreshes_when_first_wave_is_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    day_root = tmp_path / "2026-08-24"
+    day_root.mkdir()
+    _clock(monkeypatch, datetime(2026, 8, 24, 13, 0, tzinfo=UTC))
+    _wave_fixture(day_root, "first_wave_pool.json", [])
+    args = argparse.Namespace(
+        trade_date=date(2026, 8, 24), data_root=tmp_path / "data", state_root=tmp_path,
+    )
+    calls: list[tuple[dict[str, object], ...]] = []
+
+    def ranked(
+        _args: object,
+        **kwargs: object,
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]], str]:
+        waves = kwargs["prior_waves"]
+        assert isinstance(waves, tuple)
+        calls.append(waves)
+        return [_candidate("NEW")], [], "snapshot-2"
+
+    monkeypatch.setattr(stage_runner, "_rank_live_pool", ranked)
+    monkeypatch.setattr(stage_runner, "_publish_stage", lambda **_kwargs: ((), "msg-1"))
+
+    receipt = stage_runner._second_wave(args, day_root)
+
+    assert receipt["livermore_message_id"] == "msg-1"
+    assert len(calls) == 1
+    payload = json.loads((day_root / "second_wave_pool.json").read_text(encoding="utf-8"))
+    assert payload["candidates"] == [_candidate("NEW")]
+
+
+def test_final_rank_refreshes_when_second_wave_is_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    day_root = tmp_path / "2026-08-24"
+    day_root.mkdir()
+    _clock(monkeypatch, datetime(2026, 8, 24, 13, 30, tzinfo=UTC))
+    _wave_fixture(day_root, "second_wave_pool.json", [])
+    args = argparse.Namespace(
+        trade_date=date(2026, 8, 24), data_root=tmp_path / "data", state_root=tmp_path,
+    )
+    monkeypatch.setattr(
+        stage_runner,
+        "_rank_live_pool",
+        lambda _args, **_kwargs: ([_candidate("LATE")], [], "snapshot-3"),
+    )
+    monkeypatch.setattr(stage_runner, "_publish_stage", lambda **_kwargs: ((), "msg-1"))
+
+    receipt = stage_runner._final_rank(args, day_root)
+
+    assert receipt["livermore_message_id"] == "msg-1"
+    payload = json.loads((day_root / "final_wave_pool.json").read_text(encoding="utf-8"))
+    assert payload["candidates"] == [_candidate("LATE")]
+
+
+def test_final_rank_rejects_modified_parent_before_refresh_or_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _wave_fixture(tmp_path, "second_wave_pool.json", [])
+    parent = tmp_path / "first_wave_pool.json"
+    parent.write_bytes(parent.read_bytes() + b" ")
+    args = argparse.Namespace(trade_date=date(2026, 8, 24), data_root=tmp_path, state_root=tmp_path)
+    monkeypatch.setattr(stage_runner, "_rank_live_pool", lambda *a, **k: pytest.fail("refresh"))
+    monkeypatch.setattr(stage_runner, "_publish_stage", lambda *a, **k: pytest.fail("publish"))
+    with pytest.raises(ValueError, match="hash"):
+        stage_runner._final_rank(args, tmp_path)
+
+
+def test_rank_live_pool_records_empty_gate_without_forward_builder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trade_date = date(2026, 8, 24)
+    gate_path = tmp_path / "gates.parquet"
+    pl.DataFrame({"pass_gate": [False], "rvol": [0.0]}).write_parquet(gate_path)
+    args = argparse.Namespace(trade_date=trade_date, data_root=tmp_path / "data")
+    monkeypatch.setattr(
+        stage_runner, "_refresh_selection_inputs",
+        lambda *a, **k: (pl.read_parquet(gate_path), SimpleNamespace(dataset_id="gate-empty")),
+    )
+    monkeypatch.setattr(
+        stage_runner,
+        "_run_module",
+        lambda *_args, **_kwargs: pytest.fail("empty gates must not build a forward pool"),
+    )
+
+    selected, rejected, snapshot_id = stage_runner._rank_live_pool(
+        args, prior_waves=(), limit=20, include_lock=True,
+    )
+
+    assert selected == []
+    assert rejected == []
+    assert snapshot_id == "gate-empty"
 
 
 def test_open_retry_reuses_frozen_no_trade_decision(
@@ -649,18 +779,9 @@ def test_open_retry_reuses_frozen_no_trade_decision(
     _clock(monkeypatch, datetime(2026, 8, 24, 13, 35, tzinfo=UTC))
     day_root = tmp_path / "2026-08-24"
     day_root.mkdir()
-    (day_root / "second_wave_pool.json").write_text(
-        json.dumps({"candidates": [_candidate("FAIL")]}), encoding="utf-8"
-    )
-    (day_root / "open_decision.json").write_text(
-        json.dumps(
-            {
-                "candidates": [],
-                "rejected": [{"symbol": "FAIL", "reasons": ["开盘承接失败"]}],
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    _wave_fixture(day_root, "final_wave_pool.json", [_candidate("FAIL")])
+    _wave_fixture(
+        day_root, "open_decision.json", [], [{"symbol": "FAIL", "reasons": ["开盘承接失败"]}],
     )
     args = argparse.Namespace(
         trade_date=date(2026, 8, 24),
@@ -772,7 +893,11 @@ def test_scheduler_blocks_live_monitor_with_expired_lease_without_relaunch(
     commands: list[list[str]] = []
     executor = _integrated_executor(tmp_path, monkeypatch, commands)
     ledger = tmp_path / "funnel.sqlite3"
-    for prior in (now.replace(hour=12, minute=0), now.replace(minute=25)):
+    for prior in (
+        now.replace(hour=12, minute=30),
+        now.replace(hour=13, minute=0),
+        now.replace(hour=13, minute=30),
+    ):
         run_tick(ledger_path=ledger, executor=executor, now_utc=prior)
     result = run_tick(ledger_path=ledger, executor=executor, now_utc=now)
 
@@ -814,7 +939,11 @@ def test_scheduler_blocks_reused_pid_with_wrong_monitor_source(
     commands: list[list[str]] = []
     executor = _integrated_executor(tmp_path, monkeypatch, commands)
     ledger = tmp_path / "funnel.sqlite3"
-    for prior in (now.replace(hour=12, minute=0), now.replace(minute=25)):
+    for prior in (
+        now.replace(hour=12, minute=30),
+        now.replace(hour=13, minute=0),
+        now.replace(hour=13, minute=30),
+    ):
         run_tick(ledger_path=ledger, executor=executor, now_utc=prior)
 
     result = run_tick(ledger_path=ledger, executor=executor, now_utc=now)
@@ -984,8 +1113,9 @@ def test_scheduler_launcher_recovery_uses_frozen_authorization_until_session_clo
         _clock(monkeypatch, now)
         return run_tick(ledger_path=ledger, executor=executor, now_utc=now).status.value
 
-    tick(8, 0)
-    tick(9, 25)
+    tick(8, 30)
+    tick(9, 0)
+    tick(9, 30)
     assert tick(9, 35) == ("failed" if initial_failure else "handoff_pending")
     events.clear()
     fail_startup = False
@@ -1177,7 +1307,11 @@ def test_launcher_proves_unstored_children_from_readonly_same_day_entry_parent_q
     commands: list[list[str]] = []
     executor = _integrated_executor(tmp_path, monkeypatch, commands)
     ledger = tmp_path / "funnel.sqlite3"
-    for prior in (now.replace(hour=12, minute=0), now.replace(hour=13, minute=25)):
+    for prior in (
+        now.replace(hour=12, minute=30),
+        now.replace(hour=13, minute=0),
+        now.replace(hour=13, minute=30),
+    ):
         run_tick(ledger_path=ledger, executor=executor, now_utc=prior)
     result = run_tick(
         ledger_path=ledger, executor=executor, now_utc=now.replace(hour=13, minute=35)

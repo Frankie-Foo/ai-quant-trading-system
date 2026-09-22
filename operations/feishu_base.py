@@ -45,7 +45,8 @@ class FeishuCliError(FeishuBaseError):
         self, error_type: object = "unknown", code: object = None, exit_code: int | None = None,
     ) -> None:
         known_types = {
-            "unknown", "api_error", "auth_error", "permission_denied", "rate_limit",
+            "unknown", "api_error", "auth_error", "authorization", "permission_denied",
+            "rate_limit",
             "validation_error", "network_error", "timeout", "invalid_json",
             "invalid_response", "command_error", "os_error",
         }
@@ -498,10 +499,14 @@ class FeishuBaseEventClient:
                 timeout=45,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
             )
-            if len(completed.stdout or "") > 2_000_000:
+            # lark-cli emits structured authorization failures on stderr.
+            output = completed.stdout or ""
+            if completed.returncode != 0 and not output.strip():
+                output = completed.stderr or ""
+            if len(output) > 2_000_000:
                 raise FeishuCliError("invalid_response", exit_code=completed.returncode)
             try:
-                payload = json.loads(completed.stdout or "{}")
+                payload = json.loads(output or "{}")
             except (ValueError, RecursionError):
                 raise FeishuCliError("invalid_json", exit_code=completed.returncode) from None
             if not isinstance(payload, dict):

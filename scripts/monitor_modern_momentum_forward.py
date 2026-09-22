@@ -21,6 +21,8 @@ from operations.local_env import load_project_env, project_data_root
 from research.modern_momentum import (
     ModernMomentumConfig,
     latest_modern_momentum_signal,
+    latest_modern_pullback_shadow_signal,
+    modern_pullback_shadow_manifest,
     modern_strategy_manifest,
 )
 
@@ -80,6 +82,7 @@ def main() -> None:
                     "stop_at_utc": stop_at,
                     "orders_enabled": False,
                     "strategy_manifest": modern_strategy_manifest(config),
+                    "pullback_shadow_manifest": modern_pullback_shadow_manifest(),
                 },
                 default=str,
             )
@@ -94,6 +97,7 @@ def main() -> None:
         "symbols": symbols,
         "mode": "signal_observation_only",
         "strategy_manifest": modern_strategy_manifest(config),
+        "pullback_shadow_manifest": modern_pullback_shadow_manifest(),
         "events": [],
         "message_ids": [],
         "orders_enabled": False,
@@ -145,26 +149,47 @@ def main() -> None:
                     asof_utc=now,
                     relative_spread=quote.relative_spread,
                 )
-                if signal is None:
-                    continue
-                event = {
-                    "type": "shadow_signal",
-                    "symbol": symbol,
-                    **asdict(signal),
-                    "observed_at_utc": now,
-                    "quote_provenance": quote.provenance,
-                    "entry_relative_spread": quote.relative_spread,
-                    "orders_enabled": False,
-                }
-                events.append(event)
-                body = (
-                    f"【现代H15动量｜当前信号】{symbol}\n"
-                    f"1分钟收盘参考价：${signal.entry_reference:.2f}；"
-                    f"止损参考：${signal.stop_level:.2f}；"
-                    f"含成本止损比例：{signal.all_in_stop_pct:.2%}。\n"
-                    "仅前向信号观察，无成交或盈亏认定，未提交Alpaca订单。"
+                if signal is not None:
+                    event = {
+                        "type": "shadow_signal",
+                        "symbol": symbol,
+                        **asdict(signal),
+                        "observed_at_utc": now,
+                        "quote_provenance": quote.provenance,
+                        "entry_relative_spread": quote.relative_spread,
+                        "orders_enabled": False,
+                    }
+                    events.append(event)
+                    body = (
+                        f"【现代H15动量｜当前信号】{symbol}\n"
+                        f"1分钟收盘参考价：${signal.entry_reference:.2f}；"
+                        f"止损参考：${signal.stop_level:.2f}；"
+                        f"含成本止损比例：{signal.all_in_stop_pct:.2%}。\n"
+                        "仅前向信号观察，无成交或盈亏认定，未提交Alpaca订单。"
+                    )
+                    message_ids.append(client.push(body))
+                pullback = latest_modern_pullback_shadow_signal(
+                    symbol_bars,
+                    session_open_utc=opened,
+                    prior_close=prior_closes[symbol],
+                    market_cap=market_caps[symbol],
+                    premarket_rvol=rvols[symbol],
+                    config=config,
+                    asof_utc=now,
+                    relative_spread=quote.relative_spread,
                 )
-                message_ids.append(client.push(body))
+                if pullback is not None:
+                    events.append(
+                        {
+                            "type": "pullback_acceptance_shadow_signal",
+                            "symbol": symbol,
+                            **asdict(pullback),
+                            "observed_at_utc": now,
+                            "quote_provenance": quote.provenance,
+                            "entry_relative_spread": quote.relative_spread,
+                            "orders_enabled": False,
+                        }
+                    )
             state.update(
                 {
                     "events": events,

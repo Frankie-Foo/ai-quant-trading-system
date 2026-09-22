@@ -16,7 +16,7 @@ from schedule.state import JobLedger, JobStatus
 def test_premarket_phase_times_are_explicit_beijing_deadlines() -> None:
     lock, selection = phase_times(date(2026, 7, 21))
     assert lock == datetime(2026, 7, 21, 0, 0, tzinfo=UTC)
-    assert selection == datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+    assert selection == datetime(2026, 7, 21, 13, 0, tzinfo=UTC)
 
 
 def test_tick_resolves_current_session_after_lock_and_none_before() -> None:
@@ -184,7 +184,7 @@ def test_feishu_projection_failure_does_not_discard_completed_selection(
     monkeypatch.setattr(premarket, "_selection_stage", lambda *_args: ("selection",))
     monkeypatch.setattr(premarket, "_shadow_stage", lambda *_args: ("shadow",))
     monkeypatch.setattr(
-        premarket.FeishuBaseEventClient,
+        FeishuBaseEventClient,
         "from_environment",
         lambda _environment: cast(FeishuBaseEventClient, object()),
     )

@@ -129,6 +129,7 @@ def build_review_envelope(
     fill_evidence_sha256: str | None = None,
     review_context_path: Path | None = None,
     review_context_sha256: str | None = None,
+    intraday_waves: dict[str, Any] | None = None,
     synthetic: bool = False,
 ) -> QuantReviewEnvelope:
     # Generic kernel configuration is not evidence of the effective modern plan.
@@ -181,6 +182,7 @@ def build_review_envelope(
     frozen_pool: dict[str, Any] = {
         "status": "unavailable", "count": None, "candidates": None,
         "semantics": "complete_frozen_morning_pool",
+        "candidate_pool_complete": None,
     }
     factual_execution = {"orders_authorized": False, **unavailable_execution()}
     if (effective_plan_path is None) != (effective_plan_sha256 is None):
@@ -250,6 +252,7 @@ def build_review_envelope(
                 available_at=plan.candidate_pool_available_at_utc.isoformat()
                 if plan.candidate_pool_available_at_utc is not None else None,
             )
+        frozen_pool["candidate_pool_complete"] = plan.candidate_pool_complete
         factual_execution = build_factual_execution_summary(
             plan_path=effective_plan_path, plan_sha256=effective_plan_sha256,
             trade_date=trade_date, as_of=as_of,
@@ -401,6 +404,12 @@ def build_review_envelope(
                 "symbols": frame["symbol"].to_list(),
                 "source_snapshot_id": opportunity_snapshot.dataset_id,
                 "semantics": "after_close_opportunity_ranking_not_morning_candidate_pool",
+            },
+            "intraday_waves": intraday_waves or {
+                "status": "unavailable",
+                "missing_stages": ["08:30_top20", "09:00_top20", "09:30_top10"],
+                "waves": [],
+                "semantics": "frozen_intraday_wave_snapshots_not_supplied",
             },
         },
         top10_decisions=tuple(decisions),

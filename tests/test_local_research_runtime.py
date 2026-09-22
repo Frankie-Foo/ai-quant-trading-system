@@ -273,12 +273,15 @@ def test_configured_local_runtime_delegates_once_to_pipeline(
 
 
 def test_market_phase_separates_selection_review_and_waiting() -> None:
-    selection = market_phase(datetime(2026, 8, 3, 12, 5, tzinfo=UTC))
+    selection = market_phase(datetime(2026, 8, 3, 12, 35, tzinfo=UTC))
+    winter_selection = market_phase(datetime(2026, 12, 1, 13, 35, tzinfo=UTC))
     review = market_phase(datetime(2026, 7, 31, 20, 21, tzinfo=UTC))
     waiting = market_phase(datetime(2026, 8, 3, 11, 30, tzinfo=UTC))
 
     assert selection["kind"] == "selection"
     assert selection["trade_date"] == "2026-08-03"
+    assert winter_selection["kind"] == "selection"
+    assert winter_selection["trade_date"] == "2026-12-01"
     assert review["kind"] == "post_close_review"
     assert review["trade_date"] == "2026-07-31"
     assert waiting["kind"] == "waiting"
@@ -315,7 +318,7 @@ def test_scheduler_runs_only_one_exchange_clock_stage(
     pipeline = ScheduledResearchPipeline()
 
     selection = pipeline.run_due(
-        now_utc=datetime(2026, 8, 3, 12, 5, tzinfo=UTC),
+        now_utc=datetime(2026, 8, 3, 12, 35, tzinfo=UTC),
         data_root=tmp_path / "data",
         runs_root=tmp_path / "runs",
     )
@@ -363,7 +366,7 @@ def test_runtime_rejects_selection_outside_its_exchange_window(tmp_path: Path) -
     accepted = runtime.submit_workflow(
         "run_today",
         date(2026, 8, 3),
-        datetime(2026, 8, 3, 12, 5, tzinfo=UTC),
+        datetime(2026, 8, 3, 12, 35, tzinfo=UTC),
     )
 
     assert blocked["accepted"] is False

@@ -152,6 +152,8 @@ def test_desk_exposes_ranked_selection_jobs_and_maturity_without_secrets(
     selection = result["selection"]
     assert isinstance(selection, dict)
     assert selection["status"] == "ready"
+    assert selection["expected_at_eastern"] == "08:30"
+    assert selection["expected_at_beijing"] == "20:30"
     assert selection["snapshot_id"] == snapshot_id
     assert selection["pass_count"] == 2
     candidates = selection["candidates"]

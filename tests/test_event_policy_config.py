@@ -3,6 +3,7 @@
 import json
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -15,7 +16,7 @@ from kernel.event_policy import EventPolicy, load_event_policy
 POLICY_FILE = Path(__file__).resolve().parents[1] / "config/event_intraday_policy.v1.json"
 
 
-def test_candidate_loads_shadow_with_versioned_risk_and_time_rules():
+def test_candidate_loads_shadow_with_versioned_risk_and_time_rules() -> None:
     policy = load_event_policy(POLICY_FILE)
     assert policy.schema_version == "event_intraday_policy.v1"
     assert policy.status == "shadow"
@@ -29,7 +30,7 @@ def test_candidate_loads_shadow_with_versioned_risk_and_time_rules():
     )
 
 
-def test_candidate_contains_all_risk_safety_limits():
+def test_candidate_contains_all_risk_safety_limits() -> None:
     policy = load_event_policy(POLICY_FILE)
     assert policy.symbol_notional_fraction == 0.35
     assert policy.gross_notional_fraction == 1.0
@@ -90,13 +91,13 @@ def test_candidate_contains_all_risk_safety_limits():
         {"cost_reserve_fraction": 0.02},
     ],
 )
-def test_config_rejects_unsafe_or_inconsistent_values(update):
+def test_config_rejects_unsafe_or_inconsistent_values(update: dict[str, object]) -> None:
     payload = json.loads(POLICY_FILE.read_text(encoding="utf-8"))
     with pytest.raises(ValidationError):
         EventPolicy.model_validate({**payload, **update})
 
 
-def test_immutable_policy_and_canonical_hash_are_shared_across_modules():
+def test_immutable_policy_and_canonical_hash_are_shared_across_modules() -> None:
     policy = load_event_policy(POLICY_FILE)
     with pytest.raises(ValidationError):
         policy.capital_cap_usd = 1
@@ -131,13 +132,13 @@ def test_immutable_policy_and_canonical_hash_are_shared_across_modules():
     ],
 )
 def test_risk_budget_uses_cap_opening_and_current_equity_not_buying_power(
-    opening,
-    current,
-    base,
-    symbol,
-    first,
-    second,
-):
+    opening: float,
+    current: float,
+    base: float,
+    symbol: float,
+    first: float,
+    second: float,
+) -> None:
     policy = load_event_policy(POLICY_FILE)
     budget = policy.risk_budget(opening_equity_usd=opening, current_equity_usd=current)
     assert budget.risk_base_usd == base
@@ -151,9 +152,9 @@ def test_risk_budget_uses_cap_opening_and_current_equity_not_buying_power(
         assert budget.portfolio_risk_usd == 3000
         assert budget.daily_loss_usd == 3000
     with pytest.raises((AttributeError, ValidationError)):
-        budget.risk_base_usd = 1
+        budget.risk_base_usd = 1  # type: ignore[misc]  # Deliberate immutability violation.
     with pytest.raises(TypeError):
-        policy.risk_budget(
+        policy.risk_budget(  # type: ignore[call-arg]  # Unsupported argument must fail.
             opening_equity_usd=opening, current_equity_usd=current, buying_power=800000
         )
 
@@ -162,13 +163,15 @@ def test_risk_budget_uses_cap_opening_and_current_equity_not_buying_power(
 @pytest.mark.parametrize(
     "bad", [-1, float("nan"), float("inf"), -float("inf"), True, "200000", None]
 )
-def test_equity_inputs_must_be_strict_finite_nonnegative_numbers(field, bad):
-    values = {"opening_equity_usd": 200000, "current_equity_usd": 200000, field: bad}
+def test_equity_inputs_must_be_strict_finite_nonnegative_numbers(field: str, bad: object) -> None:
+    values: dict[str, Any] = {
+        "opening_equity_usd": 200000, "current_equity_usd": 200000, field: bad,
+    }
     with pytest.raises(ValueError):
         load_event_policy(POLICY_FILE).risk_budget(**values)
 
 
-def test_attempt_budget_never_resets_consumed_losses_costs_or_pending_risk():
+def test_attempt_budget_never_resets_consumed_losses_costs_or_pending_risk() -> None:
     budget = load_event_policy(POLICY_FILE).risk_budget(
         opening_equity_usd=200000,
         current_equity_usd=200000,
@@ -203,14 +206,16 @@ def test_attempt_budget_never_resets_consumed_losses_costs_or_pending_risk():
     )
     for attempt in [0, 3, True, 1.0, "1"]:
         with pytest.raises(ValueError):
-            budget.available_attempt_risk(attempt=attempt, **committed)
+            # Deliberately invalid runtime input; static rejection is also expected.
+            budget.available_attempt_risk(attempt=attempt, **committed)  # type: ignore[arg-type]
     for field in committed:
         for bad in [-1, float("nan"), float("inf"), True, "0"]:
             with pytest.raises(ValueError):
-                budget.available_attempt_risk(attempt=2, **{**committed, field: bad})
+                invalid: dict[str, Any] = {**committed, field: bad}
+                budget.available_attempt_risk(attempt=2, **invalid)
 
 
-def calendar_session(day):
+def calendar_session(day: date) -> event_policy.MarketSession:
     """Use the existing official-calendar adapter, never a weekday approximation."""
     schedule = build_xnys_schedule(day, day)
     return event_policy.MarketSession.model_validate(schedule.row(0, named=True))
@@ -226,7 +231,9 @@ def calendar_session(day):
         (date(2026, 11, 27), 15, 17, "17:50"),
     ],
 )
-def test_calendar_session_windows_dst_half_days_and_exact_boundaries(day, start, cutoff, flatten):
+def test_calendar_session_windows_dst_half_days_and_exact_boundaries(
+    day: date, start: int, cutoff: int, flatten: str,
+) -> None:
     policy = load_event_policy(POLICY_FILE)
     session = calendar_session(day)
     window = policy.session_window(session)
@@ -256,7 +263,7 @@ def test_calendar_session_windows_dst_half_days_and_exact_boundaries(day, start,
 
 
 @pytest.mark.parametrize("day", [date(2026, 9, 7), date(2026, 9, 13)])
-def test_no_calendar_session_means_no_entry_not_a_weekday_guess(day):
+def test_no_calendar_session_means_no_entry_not_a_weekday_guess(day: date) -> None:
     assert build_xnys_schedule(day, day).is_empty()
     policy = load_event_policy(POLICY_FILE)
     now = datetime(day.year, day.month, day.day, 14, tzinfo=UTC)
@@ -267,7 +274,7 @@ def test_no_calendar_session_means_no_entry_not_a_weekday_guess(day):
         policy.must_flatten_at(now, None)
 
 
-def test_market_time_rejects_naive_and_mismatched_session_dates():
+def test_market_time_rejects_naive_and_mismatched_session_dates() -> None:
     policy = load_event_policy(POLICY_FILE)
     session = calendar_session(date(2026, 9, 14))
     for method in [policy.entry_allowed_at, policy.must_flatten_at]:
@@ -279,10 +286,10 @@ def test_market_time_rejects_naive_and_mismatched_session_dates():
         policy.entry_allowed_at(datetime(2026, 9, 14, 10), None)
 
 
-def test_session_rejects_missing_provenance_naive_or_inconsistent_calendar_data():
+def test_session_rejects_missing_provenance_naive_or_inconsistent_calendar_data() -> None:
     session = calendar_session(date(2026, 9, 14))
     payload = session.model_dump()
-    for update in [
+    updates: list[dict[str, object]] = [
         {"market_open_utc": datetime(2026, 9, 14, 13, 30)},
         {"market_close_utc": session.market_open_utc},
         {"trade_date": date(2026, 9, 15)},
@@ -291,7 +298,8 @@ def test_session_rejects_missing_provenance_naive_or_inconsistent_calendar_data(
         {"source": " "},
         {"source_version": ""},
         {"unknown": 1},
-    ]:
+    ]
+    for update in updates:
         with pytest.raises(ValidationError):
             event_policy.MarketSession.model_validate({**payload, **update})
     localized = event_policy.MarketSession.model_validate(
@@ -306,9 +314,12 @@ def test_session_rejects_missing_provenance_naive_or_inconsistent_calendar_data(
     assert localized == session
 
 
-def test_public_copy_cannot_bypass_candidate_or_session_validation():
+def test_public_copy_cannot_bypass_candidate_or_session_validation() -> None:
     policy = load_event_policy(POLICY_FILE)
-    for update in [{"status": "approved"}, {"capital_cap_usd": float("nan")}, {"unknown": 1}]:
+    updates: list[dict[str, object]] = [
+        {"status": "approved"}, {"capital_cap_usd": float("nan")}, {"unknown": 1},
+    ]
+    for update in updates:
         with pytest.raises(ValidationError):
             policy.model_copy(update=update)
     tighter = policy.model_copy(update={"max_quote_age_seconds": 1.0}, deep=True)
@@ -328,14 +339,16 @@ def test_public_copy_cannot_bypass_candidate_or_session_validation():
         '{"schema_version":"event_intraday_policy.v1"}',
     ],
 )
-def test_loader_rejects_nonobject_incomplete_and_malformed_json(tmp_path, content):
+def test_loader_rejects_nonobject_incomplete_and_malformed_json(
+    tmp_path: Path, content: str,
+) -> None:
     path = tmp_path / "invalid.json"
     path.write_text(content, encoding="utf-8")
     with pytest.raises(ValueError):
         load_event_policy(path)
 
 
-def test_loader_rejects_duplicate_keys_and_nonfinite_json(tmp_path):
+def test_loader_rejects_duplicate_keys_and_nonfinite_json(tmp_path: Path) -> None:
     content = POLICY_FILE.read_text(encoding="utf-8")
     path = tmp_path / "invalid.json"
     for invalid in [
@@ -348,13 +361,13 @@ def test_loader_rejects_duplicate_keys_and_nonfinite_json(tmp_path):
             load_event_policy(path)
 
 
-def test_omitted_status_defaults_to_shadow_with_identical_hash():
+def test_omitted_status_defaults_to_shadow_with_identical_hash() -> None:
     policy = load_event_policy(POLICY_FILE)
     payload = policy.model_dump(exclude={"status"})
     assert EventPolicy.model_validate(payload).policy_hash == policy.policy_hash
 
 
-def test_conservative_time_overrides_and_explicit_late_session_open():
+def test_conservative_time_overrides_and_explicit_late_session_open() -> None:
     policy = load_event_policy(POLICY_FILE).model_copy(
         update={
             "entry_start_et": "10:30",

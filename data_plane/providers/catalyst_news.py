@@ -4,12 +4,15 @@ import os
 import re
 import time
 from datetime import UTC, datetime
+from typing import Literal
 
 import httpx
 import polars as pl
 from pydantic import SecretStr
 
-from data_plane.catalysts import canonicalize_catalysts, empty_catalyst_frame
+from data_plane.catalysts import CATALYST_COLUMNS, canonicalize_catalysts, empty_catalyst_frame
+from data_plane.contracts import EventObservation, EventRevision
+from data_plane.event_ledger import EventLedger
 from data_plane.http import DownloadError, QueryValue, get_json
 from data_plane.providers.alpaca import PLATFORM_API_VERSION, platform_access_from_env
 from data_plane.providers.alpaca_direct import DirectAlpacaMarketDataClient
@@ -91,8 +94,13 @@ def fetch_alpaca_news_direct(
     *,
     symbols: tuple[str, ...],
     chunk_size: int = 50,
+    client: DirectAlpacaMarketDataClient | None = None,
 ) -> pl.DataFrame:
-    """Temporary direct Alpaca fallback; credentials stay in the child process."""
+    """Fetch headline/summary; an injected client stays owned by its caller.
+
+    Existing callers retain environment-based construction. Explicit callers can
+    supply a read-only client without reading or promoting process credentials.
+    """
 
     _validate_window(start_utc, end_utc)
     normalized = tuple(sorted({symbol.strip().upper() for symbol in symbols if symbol.strip()}))
@@ -100,22 +108,24 @@ def fetch_alpaca_news_direct(
         return empty_catalyst_frame()
     if not 1 <= chunk_size <= 100:
         raise ValueError("chunk_size must be between 1 and 100")
-    key_id = (
-        os.getenv("ALPACA_API_KEY_ID", "").strip()
-        or os.getenv("ALPACA_API_KEY", "").strip()
-        or os.getenv("APCA_API_KEY_ID", "").strip()
-    )
-    secret_key = (
-        os.getenv("ALPACA_API_SECRET_KEY", "").strip()
-        or os.getenv("ALPACA_SECRET_KEY", "").strip()
-        or os.getenv("APCA_API_SECRET_KEY", "").strip()
-    )
-    if not key_id or not secret_key:
-        raise DownloadError("direct Alpaca credentials are missing")
-    client = DirectAlpacaMarketDataClient(
-        key_id=SecretStr(key_id), secret_key=SecretStr(secret_key)
-    )
-    merged: dict[str, dict[str, object]] = {}
+    owns_client = client is None
+    if client is None:
+        key_id = (
+            os.getenv("ALPACA_API_KEY_ID", "").strip()
+            or os.getenv("ALPACA_API_KEY", "").strip()
+            or os.getenv("APCA_API_KEY_ID", "").strip()
+        )
+        secret_key = (
+            os.getenv("ALPACA_API_SECRET_KEY", "").strip()
+            or os.getenv("ALPACA_SECRET_KEY", "").strip()
+            or os.getenv("APCA_API_SECRET_KEY", "").strip()
+        )
+        if not key_id or not secret_key:
+            raise DownloadError("direct Alpaca credentials are missing")
+        client = DirectAlpacaMarketDataClient(
+            key_id=SecretStr(key_id), secret_key=SecretStr(secret_key)
+        )
+    merged: dict[tuple[object, ...], dict[str, object]] = {}
     try:
         for offset in range(0, len(normalized), chunk_size):
             for article in client.fetch_news(
@@ -123,9 +133,14 @@ def fetch_alpaca_news_direct(
                 start_utc=start_utc,
                 end_utc=end_utc,
             ):
-                existing = merged.get(article.article_id)
+                # Do not merge changed text into an earlier observation timestamp.
+                version_key = (
+                    article.article_id, article.created_at_utc, article.updated_at_utc,
+                    article.headline, article.summary, article.source, article.url,
+                )
+                existing = merged.get(version_key)
                 if existing is None:
-                    merged[article.article_id] = {
+                    merged[version_key] = {
                         "source": "alpaca.news.benzinga",
                         "source_event_id": article.article_id,
                         "event_type": "news",
@@ -151,8 +166,11 @@ def fetch_alpaca_news_direct(
                     existing["symbols"] = sorted(
                         {str(item) for item in existing_symbols} | set(article.symbols)
                     )
+                    # The merged symbol set was not fully known at the first chunk.
+                    existing["retrieved_utc"] = datetime.now(UTC)
     finally:
-        client.close()
+        if owns_client:
+            client.close()
     frame = canonicalize_catalysts(
         pl.DataFrame(tuple(merged.values()))
         if merged
@@ -256,3 +274,44 @@ def _validate_window(start_utc: datetime, end_utc: datetime) -> None:
         raise ValueError("news bounds must be timezone-aware")
     if end_utc <= start_utc:
         raise ValueError("news end must be after start")
+
+
+def ingest_catalyst_events(
+    frame: pl.DataFrame,
+    *,
+    ledger: EventLedger,
+    origin: Literal["forward", "historical", "manual"],
+) -> tuple[EventRevision, ...]:
+    """Persist canonical provider text/evidence, without fetching or filling first-seen.
+
+    Alpaca's current provider returns headline/summary, not full article content.
+    Dates are validated directly; naive inputs must not gain an invented timezone.
+    """
+    if origin not in ("forward", "historical", "manual"):
+        raise ValueError("invalid event origin")
+    missing = sorted(set(CATALYST_COLUMNS) - set(frame.columns))
+    if missing:
+        raise ValueError(f"missing canonical catalyst columns: {missing}")
+    observations = []
+    for row in frame.iter_rows(named=True):
+        observations.append(EventObservation.model_validate({
+            "source": row["source"],
+            "source_event_id": row["source_event_id"],
+            "symbols": row["symbols"],
+            "headline": row["headline"],
+            "summary": row["summary"],
+            "published_at": row["published_utc"],
+            "updated_at": row["updated_utc"],
+            "first_seen_at": row["retrieved_utc"],
+            "source_url": row["url"],
+            "source_type": row["event_type"],
+            "origin": origin,
+            "publisher": row["publisher"],
+            "event_subtype": row["event_subtype"],
+            "cik": row["cik"],
+            "accession_number": row["accession_number"],
+            "form_items": row["form_items"],
+            "tags": row["tags"],
+            "provenance": row["provenance"],
+        }))
+    return ledger.append_many(observations)
