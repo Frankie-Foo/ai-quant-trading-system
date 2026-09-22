@@ -1,5 +1,14 @@
 # Progress
 
+## 2026-09-22 Linux CI compatibility follow-up
+
+- First remote run passed Python tests, Ruff, client checks and dependency audit, but Linux
+  Mypy rejected two Windows-only `CREATE_NO_WINDOW` references in the new release tests.
+  Reused the existing `getattr(..., 0)` convention; Windows hiding behavior is unchanged.
+  This is a test portability correction, not a disabled check or execution-policy change.
+- Fresh verification: release/Paper regression tests **70 passed in 8.94s**; strict Mypy
+  targeting Linux and Windows each passed **495 files**; Ruff and diff check passed.
+
 ## 2026-09-22 Main synchronization for event release PR
 
 - Merged main's daily Top10 integrity/type-narrowing changes into the feature branch,

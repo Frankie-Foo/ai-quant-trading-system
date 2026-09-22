@@ -34,7 +34,8 @@ def test_release_requires_same_persistent_state_and_preserves_policy(tmp_path: P
             "powershell", "-NoProfile", "-NonInteractive", "-Command",
             "New-Item -ItemType Junction -Path $env:TEST_RUNS -Target $env:TEST_STATE | Out-Null",
         ], env={**os.environ, "TEST_RUNS": str(release / "runs"), "TEST_STATE": str(state)},
-            check=True, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            check=True, capture_output=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     else:
         (release / "runs").symlink_to(state, target_is_directory=True)
     result = validate_release_binding(release, state, active)
@@ -89,5 +90,5 @@ def test_cutover_guard_rejects_active_owners_without_stopping_them(fault: str) -
     result = subprocess.run([
         "powershell", "-NoProfile", "-NonInteractive", "-Command", command,
     ], env={**os.environ, "TEST_INSTALLER": str(source), "TEST_FAULT": fault},
-        capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     assert result.returncode == (0 if fault == "none" else 1)
