@@ -1,5 +1,19 @@
 # Progress
 
+## 2026-09-22 Main synchronization for event release PR
+
+- Merged main's daily Top10 integrity/type-narrowing changes into the feature branch,
+  resolving four conflicts without changing main directly. Sequential section type checks
+  and full frozen-pool audit assertions retained.
+- Preserved the stricter event-branch behavior: frozen intraday ranking/adjudication use the
+  same first ten symbols; no-execution retrospective fallback is explicitly research-only.
+  Broker evidence cannot be paired with a fabricated/missing morning pool. Cohort membership,
+  verdict consistency, SignalContract and risk-evidence checks remain enabled.
+- Focused Loop integration + merge regressions: **58 passed in 13.31s**. Final merged-tree
+  isolated-runtime validation: **1327 passed in 90.79s**, whole-repository Ruff and strict
+  Mypy (495 files) passed; Paper safety drills passed with zero external calls/writes.
+  Independent merge re-review found no new blocker. Production cutover remains gated.
+
 ## 2026-09-22 Release preparation and real read-only integration
 
 - Owner approved bundling the complete event-model worktree for branch/PR publication.
@@ -2475,6 +2489,9 @@ Status: offline implementation and verification; no production activation.
 - Daily Top10 membership may change between trading sessions, but a single review now
   derives dynamic ranking, forced adjudication and daily verdicts from one immutable
   cohort. The payload records a deterministic cohort ID and decision trading date.
+- The frozen morning execution pool remains a separate daily-review fact and is no
+  longer serialized as the dynamic research ranking; this removes the production
+  mixed-cohort source while preserving the actual execution scope for audit.
 - The trading-system adapter rejects missing, duplicate or cross-section instruments
   and verdict drift before any remote Task request. Historical 1d/5d/20d observations
   remain separate Outcome submissions and never replace the current day's candidates.

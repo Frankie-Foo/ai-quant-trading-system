@@ -74,6 +74,10 @@ Top10 是当日候选批次，不要求跨交易日保持相同。每个 Task �
 一致。生产器为三段数据写入同一个 `decision_cohort_id` 和 `decision_trading_date`，并在发起
 HTTP 请求前再次校验；Loop 创建 Task 时执行同样校验，错配直接返回 422，不再等到 Run 中途
 失败。前一日 Top10 不得混入今日候选；它们的到期表现只通过下述 Outcome 链路独立回填。
+盘前冻结池与盘后赢家保留为不同来源，不能互相补造。当冻结池完整时，动态排名和精判
+取同一冻结批次，`source_kind=frozen_intraday_pool`；没有可用冻结池且允许纯研究复盘时，
+使用显式 `post_close_research_only`，禁止执行。存在券商证据却缺少应有的冻结池时阻断。
+完整盘前池另外保存在 `daily_review.frozen_candidate_pool`，盘后涨幅统计保持独立研究口径。
 
 ## 延迟 Outcome
 

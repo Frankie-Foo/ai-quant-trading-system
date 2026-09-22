@@ -446,6 +446,7 @@ def test_review_carries_factual_summary_and_full_pool_without_winner_selection_b
     review = task["input_data"]["daily_review"]
     assert review["frozen_candidate_pool"]["count"] == 15
     assert len(task["input_data"]["dynamic_rescan"]["ranked_candidates"]) == 15
+    assert len(review["frozen_candidate_pool"]["candidates"]) == 15
     assert review["execution_summary"]["realized_net_pnl"] == 78
     assert review["execution_summary"]["strategy_sha256"] == (
         review["risk_policy"]["evidence"]["strategy_sha256"]
