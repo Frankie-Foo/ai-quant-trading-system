@@ -236,6 +236,14 @@ class FeishuBaseEventClient:
         environment: Mapping[str, str] | None = None,
         **kwargs: Any,
     ) -> FeishuBaseEventClient | None:
+        values = os.environ if environment is None else environment
+        provider = values.get("AI_QUANT_INVESTMENT_PROVIDER", "feishu").strip().lower()
+        if provider == "vps-work":
+            from operations.vps_investment_base import VpsInvestmentClient, VpsInvestmentSettings
+
+            return VpsInvestmentClient(VpsInvestmentSettings.from_environment(values), **kwargs)
+        if provider != "feishu":
+            raise ValueError("unsupported investment record provider")
         settings = FeishuBaseSettings.from_environment(environment)
         return None if settings is None else cls(settings, **kwargs)
 

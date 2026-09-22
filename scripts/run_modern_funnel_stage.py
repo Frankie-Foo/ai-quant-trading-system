@@ -598,7 +598,7 @@ def _publish_stage(
     try:
         base = FeishuBaseEventClient.from_environment(os.environ)
         if base is None:
-            raise RuntimeError("dedicated investment Feishu Base is unavailable")
+            raise RuntimeError("dedicated investment record store is unavailable")
         record_ids = tuple(
             base.record_event(
                 InvestmentTable.SELECTION,
@@ -656,7 +656,7 @@ def _publish_stage(
     if stage in {FunnelStage.FIRST_WAVE, FunnelStage.SECOND_WAVE, FunnelStage.FINAL_RANK}:
         body += "\n\n仅Alpaca Paper模拟盘；本消息不代表已经成交。"
     if feishu_failed:
-        body += "\n飞书 Base 同步失败：本地审计已保留，请检查连接后补写。"
+        body += "\n投资记录同步失败：本地审计已保留，请检查连接后补写。"
     ledger = AutonomousNotificationLedger(
         state_root / trade_date.isoformat() / "funnel-notifications.sqlite3"
     )

@@ -649,7 +649,7 @@ def test_publish_stage_keeps_selection_when_feishu_is_down(
 
     assert record_ids == ()
     assert message_id == "message-1"
-    assert "飞书 Base 同步失败" in push.messages[0]
+    assert "投资记录同步失败" in push.messages[0]
     if publish_stage is FunnelStage.FINAL_RANK:
         assert "等待开盘确认" in push.messages[0]
         assert "已进入Paper开盘盯盘" not in push.messages[0]
