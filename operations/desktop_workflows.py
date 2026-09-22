@@ -625,9 +625,10 @@ class DesktopWorkflowManager:
                     (*common, "--massive-pace-seconds", "0.25"),
                 ),
                 CommandSpec("scripts.build_premarket_rvol", common),
+                CommandSpec("scripts.refresh_event_sip_market_caps", common),
                 CommandSpec(
                     "scripts.build_selection_gates",
-                    (*common, "--massive-pace-seconds", "0.25"),
+                    common,
                 ),
             )
         return (
@@ -687,10 +688,11 @@ class DesktopWorkflowManager:
             "session_date",
             trade_date,
         ):
+            commands.append(CommandSpec("scripts.refresh_event_sip_market_caps", common))
             commands.append(
                 CommandSpec(
                     "scripts.build_selection_gates",
-                    (*common, "--massive-pace-seconds", "0.25"),
+                    common,
                 )
             )
         return tuple(commands)

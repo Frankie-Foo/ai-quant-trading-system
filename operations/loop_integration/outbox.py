@@ -62,7 +62,7 @@ class LoopOutbox:
         self,
         *,
         event_id: str,
-        event_type: Literal["daily_review", "outcome"],
+        event_type: Literal["daily_review", "outcome", "event_review"],
         payload: dict[str, Any],
         payload_sha256: str,
     ) -> OutboxItem:
@@ -119,6 +119,42 @@ class LoopOutbox:
         self._finish(
             event_id,
             status="delivered",
+            error_code=None,
+            remote_task_id=remote_task_id,
+            remote_run_id=remote_run_id,
+        )
+
+    def mark_remote_processing(
+        self,
+        event_id: str,
+        *,
+        remote_task_id: str,
+        remote_run_id: str,
+    ) -> None:
+        """Persist remote acceptance without claiming the remote workflow completed."""
+        if not remote_task_id or not remote_run_id:
+            raise ValueError("remote processing requires task and run identifiers")
+        self._finish(
+            event_id,
+            status="remote_processing",
+            error_code=None,
+            remote_task_id=remote_task_id,
+            remote_run_id=remote_run_id,
+        )
+
+    def mark_remote_completed(
+        self,
+        event_id: str,
+        *,
+        remote_task_id: str,
+        remote_run_id: str,
+    ) -> None:
+        """Record a fetched remote terminal success receipt."""
+        if not remote_task_id or not remote_run_id:
+            raise ValueError("remote completion requires task and run identifiers")
+        self._finish(
+            event_id,
+            status="remote_completed",
             error_code=None,
             remote_task_id=remote_task_id,
             remote_run_id=remote_run_id,

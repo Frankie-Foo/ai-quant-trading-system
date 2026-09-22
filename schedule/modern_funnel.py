@@ -1,4 +1,4 @@
-"""Durable, exchange-time scheduler for the three-stage intraday funnel."""
+"""Durable, exchange-time scheduler for the four-checkpoint intraday funnel."""
 
 from __future__ import annotations
 
@@ -22,13 +22,13 @@ from operations.autonomous_selection_handoff import load_open_confirmation
 from operations.feishu_base import FeishuCliError
 
 EASTERN = ZoneInfo("America/New_York")
-BEIJING = ZoneInfo("Asia/Shanghai")
 LEASE_DURATION = timedelta(minutes=15)
 
 
 class FunnelStage(StrEnum):
     FIRST_WAVE = "first_wave"
     SECOND_WAVE = "second_wave"
+    FINAL_RANK = "final_rank"
     OPEN_CONFIRMATION = "open_confirmation"
 
 
@@ -115,6 +115,8 @@ class ProductionFunnelExecutor:
                 cwd=self.root,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
                 timeout=3600,
                 check=False,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
@@ -175,10 +177,12 @@ def _last_json_object(stdout: str) -> dict[str, object]:
 
 
 def _stage_for(local_time: time) -> FunnelStage | None:
-    if time(8) <= local_time < time(9, 25):
+    if time(8, 30) <= local_time < time(9):
         return FunnelStage.FIRST_WAVE
-    if time(9, 25) <= local_time < time(9, 30):
+    if time(9) <= local_time < time(9, 30):
         return FunnelStage.SECOND_WAVE
+    if time(9, 30) <= local_time < time(9, 35):
+        return FunnelStage.FINAL_RANK
     if time(9, 35) <= local_time < time(9, 45):
         return FunnelStage.OPEN_CONFIRMATION
     return None
@@ -188,7 +192,8 @@ def _prerequisite(stage: FunnelStage) -> FunnelStage | None:
     return {
         FunnelStage.FIRST_WAVE: None,
         FunnelStage.SECOND_WAVE: FunnelStage.FIRST_WAVE,
-        FunnelStage.OPEN_CONFIRMATION: FunnelStage.SECOND_WAVE,
+        FunnelStage.FINAL_RANK: FunnelStage.SECOND_WAVE,
+        FunnelStage.OPEN_CONFIRMATION: FunnelStage.FINAL_RANK,
     }[stage]
 
 
@@ -315,7 +320,6 @@ def run_tick(
     ledger_path: Path,
     executor: FunnelStageExecutor,
     now_utc: datetime | None = None,
-    first_wave_not_before_beijing: time | None = None,
 ) -> FunnelTickResult:
     """Publish once; supervise eligible execution without claiming trading success."""
     current = now_utc or datetime.now(UTC)
@@ -329,12 +333,6 @@ def run_tick(
         return FunnelTickResult(FunnelTickStatus.NOT_TRADING_DAY)
 
     stage = _stage_for(eastern.time().replace(tzinfo=None))
-    if (
-        stage is FunnelStage.FIRST_WAVE
-        and first_wave_not_before_beijing is not None
-        and current.astimezone(BEIJING).time() < first_wave_not_before_beijing
-    ):
-        return FunnelTickResult(FunnelTickStatus.NOT_DUE, stage)
     resume_only = stage is None and time(9, 45) <= eastern.time() and current < session_close
     if stage is None and not resume_only:
         return FunnelTickResult(FunnelTickStatus.NOT_DUE)
@@ -402,24 +400,12 @@ def run_tick(
         return FunnelTickResult(status, stage)
 
 
-def _beijing_time(value: str) -> time:
-    if re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", value) is None:
-        raise argparse.ArgumentTypeError("time must use HH:MM (00:00..23:59)")
-    return time.fromisoformat(value)
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--ledger-path",
         type=Path,
         default=Path(__file__).resolve().parents[1] / "runs" / "modern-funnel.sqlite3",
-    )
-    parser.add_argument(
-        "--first-wave-not-before-beijing",
-        type=_beijing_time,
-        metavar="HH:MM",
-        help="Gate FIRST_WAVE by Beijing wall time; does not change snapshot cutoffs or recovery.",
     )
     return parser
 
@@ -430,7 +416,6 @@ def main() -> int:
     result = run_tick(
         ledger_path=args.ledger_path,
         executor=ProductionFunnelExecutor(root=root),
-        first_wave_not_before_beijing=args.first_wave_not_before_beijing,
     )
     print(
         json.dumps(

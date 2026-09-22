@@ -20,6 +20,7 @@ $env:AI_QUANT_RUNTIME_ENV_FILE = $runtimeEnvironment
 $env:AI_QUANT_DATA_ROOT = $sharedData
 $env:AI_QUANT_ACTIVE_POLICY_FILE = $activePolicy
 $env:AI_QUANT_CHALLENGER_POLICY_FILE = $challengerPolicy
+$env:AI_QUANT_LOOP_NATIVE_RUN_ROOT = $runs
 $env:AI_QUANT_PAPER_RUNTIME_CONFIRMED = "false"
 & $python -m schedule.postmarket `
     1>> (Join-Path $runs "postmarket_scheduler.out.log") `

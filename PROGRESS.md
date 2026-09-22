@@ -1,5 +1,136 @@
 # Progress
 
+## 2026-09-22 Linux CI compatibility follow-up
+
+- First remote run passed Python tests, Ruff, client checks and dependency audit, but Linux
+  Mypy rejected two Windows-only `CREATE_NO_WINDOW` references in the new release tests.
+  Reused the existing `getattr(..., 0)` convention; Windows hiding behavior is unchanged.
+  This is a test portability correction, not a disabled check or execution-policy change.
+- Fresh verification: release/Paper regression tests **70 passed in 8.94s**; strict Mypy
+  targeting Linux and Windows each passed **495 files**; Ruff and diff check passed.
+
+## 2026-09-22 Main synchronization for event release PR
+
+- Merged main's daily Top10 integrity/type-narrowing changes into the feature branch,
+  resolving four conflicts without changing main directly. Sequential section type checks
+  and full frozen-pool audit assertions retained.
+- Preserved the stricter event-branch behavior: frozen intraday ranking/adjudication use the
+  same first ten symbols; no-execution retrospective fallback is explicitly research-only.
+  Broker evidence cannot be paired with a fabricated/missing morning pool. Cohort membership,
+  verdict consistency, SignalContract and risk-evidence checks remain enabled.
+- Focused Loop integration + merge regressions: **58 passed in 13.31s**. Final merged-tree
+  isolated-runtime validation: **1327 passed in 90.79s**, whole-repository Ruff and strict
+  Mypy (495 files) passed; Paper safety drills passed with zero external calls/writes.
+  Independent merge re-review found no new blocker. Production cutover remains gated.
+
+## 2026-09-22 Release preparation and real read-only integration
+
+- Owner approved bundling the complete event-model worktree for branch/PR publication.
+- Fixed the full strict Mypy scope (495 source files), not only the previously targeted modules.
+- Added a red/green regression for Feishu CLI authorization JSON on stderr; diagnostics now
+  retain safe error type/code without leaking response messages. Current external blocker is
+  missing `base:record:read` (99991672), not missing Alpaca SIP access.
+- Independent deployment review found policy rebinding, release-local state reset and overlapping
+  scheduler risks. Installer now validates existing policy/persistent runs binding, rejects active
+  owners including supervisor/startup, and registers replacements disabled. Eight binding/cutover
+  tests pass; operational migration is still required, no runtime state was rewritten.
+- Real read-only probes: Paper ACTIVE with zero positions/open orders; SIP HTTP 200; Livermore
+  configured channel available. One clearly labelled Chinese integration message was delivered
+  and audited separately from trading evidence. No orders, Loop submissions or task cutover.
+- Existing Python runtime has five duplicate distributions. Created an isolated 3.12.6 release
+  environment with 74 requirement-resolved packages; dependency compatibility check passes.
+- Client checks: 33 Electron + 12 renderer tests, production build passed. Offline Paper drills
+  passed with zero broker calls/external writes. Details and remaining gates:
+  `docs/implementation/2026-09-22-release-validation.md`.
+- Final isolated release-runtime validation: **1327 passed in 122.75s**, Ruff and complete Mypy
+  **495 source files** passed; compileall, dependency compatibility and staged diff check passed.
+  Old runtime separately passed **1327 in 116.11s**. No production activation is claimed.
+
+## 2026-09-22 Follow-up: fresh event waves and immutable cross-wave lineage
+
+Status: local implementation and offline verification only; no deployment, broker action,
+external publication, Loop write or runtime/safety-setting change.
+
+- Added bounded `--wave` event discovery over the daily prechecked universe, including newly
+  arriving premarket events. Later revisions are excluded; materialization time stays truthful.
+  The previous overnight lock is never overwritten and empty current pools never reuse old ones.
+- Pass explicit IDs through candidates, RVOL, SIP caps, gates, forward ranking and opening
+  authorization. Validate accepted state, content hash, source, timestamp, row count and parent
+  IDs; gate inputs additionally verify dates, symbol coverage, RVOL cutoff and the bound daily pool.
+- Added independent `--reference-only` preparation/ledger identity, removing the first wave's
+  dependency on successful old overnight-news ingestion without falsely completing that job.
+- Cross-wave JSON now binds parent hashes and validates trade date, stage, aware generation time,
+  chronological order and exact parent bytes. Existing authorized Paper recovery remains intact;
+  missing historical lineage is not fabricated or retroactively patched.
+- Fixed rank coercion (boolean, fractional rank and non-finite values) and both previously
+  reported ranking type errors. Reused existing CLI/storage boundaries; no framework or threshold change.
+- Test-first reproductions covered missing explicit-ID contracts, news discovery, empty inputs,
+  parent mismatch, stale cutoff, cross-wave timestamps/hashes and invalid ranking values.
+- Final validation: `python -m pytest -q` **1318 passed in 96.72s**, exit 0, including the
+  explicit opening-source regression. Ruff, targeted Mypy across 12 production files and
+  `git -c core.safecrlf=false diff --check` passed. No live API acceptance is claimed.
+- Remaining operational acceptance: real API permissions, provider pagination/rate limits,
+  shares coverage and full-wave latency, followed by deployment under existing Paper gates.
+  Detailed report: `docs/implementation/2026-09-22-review-fixes.md`.
+
+## 2026-09-22 Local review: funnel timing, ranking and data integrity
+
+Status: fixes verified locally; no deployment, broker action, Loop submission or runtime-setting change.
+
+- Aligned the SIP credential window to 08:30–17:55 America/New_York, including DST;
+  each ranked wave supplies an explicit complete-minute RVOL cutoff capped at market open.
+- Added premarket `--lock-only`; reference preparation no longer invokes live RVOL or the
+  legacy selection/publication pipeline when called by the production funnel.
+- Windows scheduler/stage children are hidden and use explicit UTF-8 input/output environment.
+- Apply prior-wave repeat bonuses before TopN truncation; retain all hard-gate-eligible inputs
+  via an explicit forward-builder flag. First-wave capacity rejections are recorded, not failures.
+  Independent re-review caught dropped rejection lists at publication; first run and retry now
+  both project the frozen rejection list, with a verified red/green regression.
+- Derived market-cap availability is the latest of shares and price availability. Shared
+  5-minute aggregation stops at missing/non-finite VWAP or invalid volume instead of inventing VWAP.
+- Final-pool notification now says awaiting confirmation; it does not claim Paper has started.
+- Test-first evidence: initial new runtime regressions 9 failed; subsequent ranking/cap/signal
+  regressions 4 failed; outer executor encoding regression 1 failed before its fix.
+- Final validation after publication re-review: `python -m pytest -q` **1293 passed in 87.94s**;
+  `python -m ruff check .`
+  passed; `git -c core.safecrlf=false diff --check` passed. Five core files pass Mypy;
+  wider eight-file checking still reports two pre-existing errors in `research/intraday_wave_ranking.py`.
+- Known remaining findings: P1 wave inputs still use the overnight catalyst pool rather than
+  newly arriving events; P2 parent-wave date/time/hash provenance is incomplete. Do not treat
+  this patch as full production readiness. Scope, reproduction and next validation steps:
+  `docs/implementation/2026-09-22-review-fixes.md`.
+
+## M96 Loop risk-policy temporal preflight - 2026-09-14
+
+Status: implemented locally; Windows producer rollout and a new immutable Task remain pending.
+
+- Added a typed risk-policy evidence contract that keeps evidence formation/availability separate
+  from a future `authorization_effective_at` plan activation time.
+- The official Loop client now rejects missing, naive, future-available or reversed evidence
+  timestamps before any contract lookup or remote Task creation, and the Outbox records the
+  existing `blocked_precondition` terminal state.
+- Loop's `available_at >= effective_at` future-information invariant remains unchanged; failed
+  immutable Tasks must not be edited or retried with mutated input.
+- Verification: focused `tests/test_loop_integration.py` passed 20 tests; the full suite passed
+  798 tests with the optional Active Policy override explicitly empty. Ruff, compileall,
+  `git diff --check` and strict Mypy for the new evidence contract passed. Broader strict Mypy
+  still reports four pre-existing errors in decision-action inference and response unpacking.
+
+## M95 Loop SignalContract submit preflight - 2026-09-10
+
+Status: implemented locally; production deployment and replacement Task creation remain pending.
+
+- The official Loop client now evaluates the final Task signal against the exact active,
+  hash-verified remote SignalContract before creating a Task.
+- Missing required features, unsupported signal types, stale events and future information fail
+  closed with explicit evidence; no remote Task is created.
+- Historical owner-attested producers must use the same client and retain missing market facts as
+  blocked preconditions. The implementation does not invent or backfill absent market evidence.
+- Verification: `tests/test_loop_integration.py` passed (29 tests); Ruff, strict Mypy and
+  `git diff --check` passed. The repository suite passed 1106 tests with 2 platform skips when
+  the unrelated order-sensitive SQLite byte-identity test was deselected. That test passed in
+  isolation but failed in full-suite order at SQLite header byte 27; it was not changed here.
+
 ## M94 Deterministic Loop review provenance - 2026-09-05
 
 Status: implemented locally; Loop submission remains blocked pending machine-local binding,
@@ -2377,3 +2508,43 @@ Status: offline implementation and verification; no production activation.
   with missing and unexpected symbols instead of failing after a Run has staged data.
 - Verification: trading-system Loop integration tests passed `16`; Loop contract bridge
   tests passed `8`; Ruff passed on all changed Python files in both repositories.
+
+## M0 — Loop baseline merge conflict resolution (2026-09-14)
+
+- Resolved the five Loop/progress conflicts between main `c2e5966` and
+  feature/loop `d6ce9e7` without replacing the main tree. Retained native-plan
+  hash verification, factual broker execution, unknown fee/net-PnL nulls,
+  legacy research return semantics and confirmed-no-trade-only realized zero.
+- Retained DecisionIntent, SignalContract preflight, strict daily cohort
+  membership/verdict checks, RiskPolicyEvidence and Outcome sync states.
+  `execution_summary.status=unavailable` blocks before any Loop request with
+  `BROKER_EXECUTION_EVIDENCE_UNAVAILABLE`; normal submission fixtures use a
+  confirmed empty broker ledger, not missing execution evidence.
+- Missing or fewer-than-ten frozen morning candidates remain local audit
+  envelopes only: build rejects and submit records `TOP10_COHORT_INCOMPATIBLE`.
+  No winner replacement or production synthetic pool is introduced. For complete
+  pools, decisions and their provenance come from the first ten frozen candidates;
+  missing verdict/classification/OPE facts fail closed rather than borrowing facts
+  from post-close winners. Missing instrument returns remain null. Existing
+  post-close research metrics are retained and explicitly labeled as that cohort,
+  not the morning adjudication cohort.
+- Source observation uses frozen context availability; authorization activation
+  is retained separately as `authorization_effective_at`. Availability is never
+  shifted backward to accommodate later trading authorization.
+- Event Outcomes are delivered and their statuses reported before reading the
+  strategy execution index. Event-only assignments do not load that index.
+  Strategy date/hash evidence misses remain pending with WAITING_DATA. Delivery
+  failures retain their original exception if diagnostic reporting also fails;
+  stage-only and idempotent replay behavior are covered.
+- Fresh offline verification: all `tests/test_loop*.py` passed, **96 passed in
+  13.01s** (PowerShell Get-ChildItem file list, Python 3.12 runtime). The new merge
+  regression file contains 14 passing cases. Broker guard mutation check: removing
+  the guard produced the expected local fake-request failure; restoring it passed.
+  Ruff and strict mypy passed for client, contracts, review_builder,
+  outcome_reporter and the two integration/regression test files (6 files).
+- Only the five conflict files and `tests/test_loop_merge_regressions.py` were
+  edited by this worker; auto-merged contracts were checked, not rewritten.
+  No network, .env, scheduler, broker operation or commit. Other workers' files
+  are untouched. Independent review tooling is unavailable in this task; main
+  agent owns independent review, final integrated checks and the merge commit.
+  These fixtures are not production-data or remote acceptance evidence.

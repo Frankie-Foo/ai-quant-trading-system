@@ -46,8 +46,8 @@ shadow_arbitration:
 guardrails:
   daily_loss_limit: 0.015
   lock_time_beijing: "08:00"
-  selection_time_beijing: "20:00"
-  noise_cutoff_beijing: "20:30"
+  selection_time_beijing: "21:00"
+  noise_cutoff_beijing: "21:15"
 scheduler:
   premarket_retry_minutes: 30
   premarket_max_attempts: 24

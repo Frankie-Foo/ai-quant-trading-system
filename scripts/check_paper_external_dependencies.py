@@ -13,7 +13,7 @@ from pydantic import SecretStr
 from execution.alpaca_paper import DirectAlpacaPaperBroker
 from operations.feishu_base import FeishuBaseEventClient
 from operations.livermore_push import LivermorePushClient, configured_identity
-from operations.local_env import load_project_env
+from operations.local_env import alpaca_paper_credentials, load_project_env
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,9 +33,10 @@ def main() -> int:
         load_dotenv(args.env_file, override=False)
         load_project_env(ROOT)
 
+    key_id, secret_key = alpaca_paper_credentials(os.environ)
     broker = DirectAlpacaPaperBroker(
-        key_id=SecretStr(os.getenv("ALPACA_PAPER_KEY_ID", "")),
-        secret_key=SecretStr(os.getenv("ALPACA_PAPER_SECRET_KEY", "")),
+        key_id=key_id,
+        secret_key=secret_key,
         writes_enabled=False,
     )
     try:
@@ -70,7 +71,8 @@ def main() -> int:
                 "alpaca_broker": broker.broker_identity,
                 "alpaca_base_url": broker.base_url,
                 "account_status": account.status,
-                "feishu_tables_checked": sorted(checked_tables),
+                "investment_provider": os.getenv("AI_QUANT_INVESTMENT_PROVIDER", "feishu"),
+                "investment_tables_checked": sorted(checked_tables),
                 "livermore_app_id": app_id,
                 "livermore_channel_id": channel_id,
                 "orders_submitted": 0,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -39,6 +41,9 @@ def test_run_child_is_shell_free_and_returns_bounded_result(
                 "cwd": tmp_path,
                 "capture_output": True,
                 "text": True,
+                "encoding": "utf-8",
+                "env": {**os.environ, "PYTHONIOENCODING": "utf-8"},
+                "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 "timeout": 30,
                 "check": False,
             },

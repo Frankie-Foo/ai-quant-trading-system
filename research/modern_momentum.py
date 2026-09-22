@@ -81,6 +81,45 @@ class ReentrySignal:
     signal_ts_utc: datetime
 
 
+@dataclass(frozen=True)
+class PullbackAcceptanceSignal:
+    """Shadow-only first entry after a completed high-level pullback reclaim."""
+
+    signal_ts_utc: datetime
+    entry_reference: float
+    structural_stop: float
+    h15: float
+    macd: float
+    premarket_rvol: float
+    all_in_stop_pct: float
+    support_ts_utc: datetime
+
+
+def modern_pullback_shadow_manifest() -> dict[str, Any]:
+    """Describe the non-executable pullback challenger without changing production."""
+    effective = {
+        "minimum_delay_minutes": 30,
+        "bar_minutes": 5,
+        "minimum_reclaim_to_support_volume_ratio": 0.8,
+        "require_support_volume_contraction": True,
+        "require_rising_vwap": True,
+        "require_higher_lows": True,
+        "require_positive_strengthening_macd": True,
+        "maximum_entry_relative_spread": 0.0025,
+        "max_all_in_stop_pct": 0.02,
+        "target_r": 3.0,
+    }
+    encoded = json.dumps(effective, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return {
+        "schema_version": "modern_pullback_shadow_manifest.v1",
+        "strategy_version": "modern-h15-pullback-acceptance-shadow.v1",
+        "status": "shadow",
+        "orders_enabled": False,
+        "effective_config": effective,
+        "config_sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+    }
+
+
 def modern_entry_allowed(
     *,
     session_open_utc: datetime,
@@ -395,6 +434,91 @@ def latest_modern_momentum_signal(
         session_open_utc=session_open_utc,
         config=config,
         relative_spread=relative_spread,
+    )
+
+
+def latest_modern_pullback_shadow_signal(
+    bars: pl.DataFrame,
+    *,
+    session_open_utc: datetime,
+    prior_close: float,
+    market_cap: float,
+    premarket_rvol: float,
+    config: ModernMomentumConfig,
+    asof_utc: datetime,
+    relative_spread: float | None = None,
+) -> PullbackAcceptanceSignal | None:
+    """Evaluate a non-executable H15 pullback/reclaim first-entry challenger.
+
+    Only the newest completed five-minute bar may create a signal. The branch
+    reuses production universe, time, spread, and risk gates, while replacing
+    a chased H15 reference with the local reclaim close.
+    """
+    if asof_utc.tzinfo is None or session_open_utc.tzinfo is None:
+        raise ValueError("session_open_utc and asof_utc must be timezone-aware")
+    if bars.is_empty():
+        return None
+    complete_minute = asof_utc.replace(second=0, microsecond=0)
+    if complete_minute < session_open_utc + timedelta(minutes=30):
+        return None
+    prepared_bars = bars.filter(pl.col("ts_utc") + timedelta(minutes=1) <= complete_minute)
+    prepared = _signal_inputs(
+        prepared_bars,
+        session_open_utc=session_open_utc,
+        prior_close=prior_close,
+        market_cap=market_cap,
+        premarket_rvol=premarket_rvol,
+        config=config,
+    )
+    if prepared is None:
+        return None
+    rows, macd, h15 = prepared
+    if rows[-1]["ts_utc"] + timedelta(minutes=1) != complete_minute:
+        return None
+    fives = _five_minute_bars(prepared_bars, session_open_utc=session_open_utc)
+    if len(fives) < 6 or fives[-1].ts_utc + timedelta(minutes=5) != complete_minute:
+        return None
+    washout, support, reclaim = fives[-3:]
+    if washout.ts_utc < session_open_utc + timedelta(minutes=15):
+        return None
+    spread = config.relative_spread if relative_spread is None else relative_spread
+    if not modern_entry_allowed(
+        session_open_utc=session_open_utc,
+        asof_utc=complete_minute,
+        config=config,
+        relative_spread=spread,
+    ):
+        return None
+    if not (
+        reclaim.close / prior_close - 1 >= config.minimum_gap_return
+        and support.low > washout.low
+        and support.volume < washout.volume
+        and support.close > h15
+        and support.close > support.session_vwap
+        and reclaim.low > support.low
+        and reclaim.close > support.high
+        and reclaim.close > h15
+        and reclaim.close > reclaim.session_vwap
+        and washout.session_vwap < support.session_vwap < reclaim.session_vwap
+        and reclaim.volume >= support.volume * 0.8
+        and macd[-1] > 0
+        and macd[-1] > macd[-2]
+    ):
+        return None
+    estimated_entry = reclaim.close * (1 + spread / 2 + config.market_impact_pct)
+    stop = max(support.low, estimated_entry * 0.985)
+    all_in = (estimated_entry - stop) / estimated_entry + config.stop_slippage_reserve_pct
+    if stop >= estimated_entry or all_in > config.max_all_in_stop_pct + 1e-12:
+        return None
+    return PullbackAcceptanceSignal(
+        signal_ts_utc=complete_minute,
+        entry_reference=reclaim.close,
+        structural_stop=support.low,
+        h15=h15,
+        macd=macd[-1],
+        premarket_rvol=premarket_rvol,
+        all_in_stop_pct=all_in,
+        support_ts_utc=support.ts_utc,
     )
 
 

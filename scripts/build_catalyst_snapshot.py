@@ -365,6 +365,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trade-date", type=_parse_date, required=True)
     parser.add_argument("--asof", type=_parse_utc)
+    parser.add_argument(
+        "--wave", action="store_true",
+        help="discover a new bounded event pool without replacing the overnight lock",
+    )
     parser.add_argument("--data-root", type=Path, default=ROOT / "data")
     parser.add_argument("--massive-pace-seconds", type=float, default=12.5)
     parser.add_argument("--reuse-provider-snapshots", action="store_true")
@@ -372,7 +376,9 @@ def main() -> None:
 
     default_asof = datetime.combine(args.trade_date, time(8, 0), BEIJING).astimezone(UTC)
     asof_utc: datetime = args.asof or default_asof
-    verification_mode = asof_utc > default_asof
+    if args.wave and (args.asof is None or asof_utc > datetime.now(UTC)):
+        raise ValueError("wave requires an explicit non-future event cutoff")
+    verification_mode = asof_utc > default_asof and not args.wave
     schedule = build_xnys_schedule(args.trade_date - timedelta(days=10), args.trade_date)
     target = schedule.filter(pl.col("trade_date") == args.trade_date)
     previous = schedule.filter(pl.col("trade_date") < args.trade_date).sort("trade_date").tail(1)
@@ -448,7 +454,7 @@ def main() -> None:
         massive = fetch_massive_news(
             start_utc, end_utc, pace_seconds=args.massive_pace_seconds
         )
-        if verification_mode:
+        if verification_mode or args.wave:
             sec, sec_available = _optional_sec_filings(
                 fetch_live_candidate_filings,
                 cik_to_symbols=cik_map,
@@ -470,7 +476,7 @@ def main() -> None:
             source="alpaca.news.benzinga",
             start_utc=start_utc,
             end_utc=end_utc,
-            require_non_empty=not standalone,
+            require_non_empty=not standalone and not args.wave,
         )
         massive_snapshot = _store_provider(
             massive,
@@ -478,7 +484,7 @@ def main() -> None:
             source="massive.news",
             start_utc=start_utc,
             end_utc=end_utc,
-            require_non_empty=True,
+            require_non_empty=not args.wave,
         )
         sec_parents = [reference_snapshot_id, universe_snapshot_id]
         if locked_snapshot_id is not None:
@@ -494,6 +500,12 @@ def main() -> None:
         )
 
     raw = pl.concat((alpaca, massive, sec))
+    if args.wave:
+        # Publication cutoff is not materialization time: a snapshot is only
+        # available after retrieval. Never consume a later revision as earlier news.
+        raw = raw.filter(
+            pl.col("updated_utc").is_null() | (pl.col("updated_utc") <= asof_utc)
+        )
     prepared = prepare_catalysts(raw, asof_utc=asof_utc)
     prepared_checks = _prepared_checks(
         prepared, target_date=args.trade_date, asof_utc=asof_utc
@@ -527,6 +539,12 @@ def main() -> None:
         if verification_mode
         else "kernel.catalysts.overnight_candidates"
     )
+    if args.wave:
+        candidate_source = "kernel.catalysts.wave_candidates"
+        candidate_checks += (_check(
+            "wave_context", QualitySeverity.CRITICAL, True,
+            args.trade_date.isoformat(), asof_utc.isoformat(), candidate_source,
+        ),)
     candidate_parents = [prepared_snapshot.dataset_id, universe_snapshot_id]
     if locked_snapshot_id is not None:
         candidate_parents.append(locked_snapshot_id)
@@ -542,7 +560,9 @@ def main() -> None:
 
     result = {
         "trade_date": args.trade_date.isoformat(),
-        "mode": "locked_verification" if verification_mode else "pool_lock",
+        "mode": (
+            "wave" if args.wave else "locked_verification" if verification_mode else "pool_lock"
+        ),
         "locked_symbols": (
             candidate_universe.filter(pl.col("precheck_pass")).height
             if verification_mode

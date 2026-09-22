@@ -23,18 +23,42 @@ dedicated worktree and branch; no worktree is itself a deployment target.
 
 Run `scripts/install_local_observation_tasks.ps1` only after review, passing explicit
 paths for the approved Python interpreter, machine-owned environment file and shared
-data root. Add `-ArmPaper -PaperSmokeMaxNotional 200000` only after owner unfreeze. The
+data root, `-ActivePolicyFile`, `-ChallengerPolicyFile`, and `-RuntimeStateRoot`.
+The installer never bootstraps a replacement active policy. Before running it:
+
+1. Export the current task definitions and record all authoritative state roots.
+2. Disable and drain the owned scheduler tasks, including legacy premarket. Disable
+   and preserve the legacy `Local Observation Supervisor.lnk` startup launcher and
+   drain `schedule.supervisor` / `run_local_observation_supervisor.ps1`; verify
+   no detached Paper monitor remains. Preserve broker protection orders and reconcile
+   positions/open orders read-only before restarting a writer. Leave Buffett untouched.
+3. Back up SQLite ledgers with the SQLite backup API after quiescence. Reconcile
+   jobs, funnel, Paper/order, notification, Loop-outbox and immutable authorization
+   evidence from the previous roots into the approved persistent state directory.
+   Do not overwrite colliding evidence or rewrite embedded historical paths/hashes.
+   Preserve the old roots for receipt references and rollback.
+4. Bind the new release's `runs` directory to that existing state directory with a
+   Windows directory junction. The installer checks directory identity and refuses
+   missing, new release-local or mismatched state. `DataRoot` is not order state.
+5. Pass the existing approved policy paths, then install. All replacement tasks are
+   registered **disabled**, including on partial installation failure. Inspect every
+   definition, re-run external dependency checks and reconciliation, then enable one
+   modern funnel owner and its review/research tasks. Never re-enable legacy selection.
+
+Add `-ArmPaper -PaperSmokeMaxNotional 200000` only after owner unfreeze. The
 installer creates the one-minute `Trading System V2 - AI Quant Funnel` task and
 postmarket review, and disables the old premarket and Paper tasks.
 `schedule.modern_funnel` computes ET/DST and XNYS sessions; Windows local time does not
 define trading windows. Secrets remain in the machine-owned environment file and are
 not copied into a worktree or Task Scheduler arguments.
 
-The local tick passes `--first-wave-not-before-beijing 21:00`. This defers the
-first-wave invocation only, not existing-position supervision after midnight.
-It does not rewrite historical/PIT snapshot cutoffs. Gary SIP credentials remain
-subject to their existing time authorization; a pre-window 403 is not evidence of
-post-window entitlement. XNYS holidays do not run selection or place orders.
+The funnel uses the exchange clock: first wave 08:30 ET, second wave 09:00 ET,
+final rank 09:30 ET, and opening confirmation 09:35 ET. There is no Beijing-time
+gate in the funnel scheduler, so daylight-saving changes cannot shift a wave into
+the next stage. Gary SIP credentials remain subject to their own explicit
+authorization window; an unavailable credential or pre-authorized data snapshot
+must fail closed instead of shifting the funnel clock. XNYS holidays do not run
+selection or place orders.
 
 The installation does not authorize Paper writes. Arming still requires all of:
 

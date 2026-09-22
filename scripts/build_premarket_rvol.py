@@ -380,6 +380,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trade-date", type=_parse_date, required=True)
     parser.add_argument("--decision-asof", type=_parse_utc)
+    parser.add_argument("--candidate-snapshot")
     parser.add_argument("--data-root", type=Path, default=ROOT / "data")
     parser.add_argument(
         "--pool",
@@ -478,6 +479,8 @@ def main() -> None:
         args.data_root,
         args.trade_date,
         pool=args.pool,
+        snapshot_id=args.candidate_snapshot,
+        decision_cutoff=decision_asof_utc if args.candidate_snapshot else None,
     )
     candidates = candidate_pool.frame
     locked_snapshot = candidate_pool.snapshot

@@ -392,3 +392,85 @@ def test_current_reentry_shares_default_cutoff_spread_and_stale_guards(
         )
         is None
     )
+
+
+def test_pullback_first_entry_is_a_five_minute_shadow_signal_only() -> None:
+    washout = pl.col("ts_utc").is_between(
+        OPENED + timedelta(minutes=30), OPENED + timedelta(minutes=34)
+    )
+    support = pl.col("ts_utc").is_between(
+        OPENED + timedelta(minutes=35), OPENED + timedelta(minutes=39)
+    )
+    reclaim = pl.col("ts_utc").is_between(
+        OPENED + timedelta(minutes=40), OPENED + timedelta(minutes=44)
+    )
+    frame = (
+        bars(45)
+        .with_columns(
+            pl.when(washout)
+            .then(100.70)
+            .when(support)
+            .then(100.82)
+            .when(reclaim)
+            .then(101.30)
+            .otherwise(pl.col("close"))
+            .alias("close"),
+            pl.when(washout)
+            .then(101.00)
+            .when(support)
+            .then(100.90)
+            .when(reclaim)
+            .then(101.35)
+            .otherwise(pl.col("high"))
+            .alias("high"),
+            pl.when(washout)
+            .then(100.20)
+            .when(support)
+            .then(100.40)
+            .when(reclaim)
+            .then(100.55)
+            .otherwise(pl.col("low"))
+            .alias("low"),
+            pl.when(washout)
+            .then(20_000)
+            .when(support)
+            .then(10_000)
+            .when(reclaim)
+            .then(12_000)
+            .otherwise(pl.col("volume"))
+            .alias("volume"),
+        )
+        .with_columns(pl.col("close").alias("vwap"))
+    )
+    kwargs: dict[str, Any] = {
+        "session_open_utc": OPENED,
+        "prior_close": 96.0,
+        "market_cap": 2e9,
+        "premarket_rvol": 2.0,
+        "config": modern.ModernMomentumConfig(),
+        "relative_spread": 0.0025,
+    }
+
+    signal = modern.latest_modern_pullback_shadow_signal(
+        frame, asof_utc=OPENED + timedelta(minutes=45), **kwargs
+    )
+
+    assert signal is not None
+    assert signal.signal_ts_utc == OPENED + timedelta(minutes=45)
+    assert signal.entry_reference == pytest.approx(101.30)
+    assert signal.structural_stop == pytest.approx(100.40)
+    assert signal.all_in_stop_pct <= 0.02
+    assert modern.modern_pullback_shadow_manifest()["orders_enabled"] is False
+    assert modern.latest_modern_pullback_shadow_signal(
+        frame, asof_utc=OPENED + timedelta(minutes=46), **kwargs
+    ) is None
+    for column in ("vwap", "volume"):
+        for invalid in (None, float("nan"), float("inf"), -1.0):
+            incomplete = frame.with_columns(
+                pl.when(pl.col("ts_utc") < OPENED + timedelta(minutes=30))
+                .then(pl.lit(invalid, dtype=pl.Float64))
+                .otherwise(pl.col(column)).alias(column)
+            )
+            assert modern.latest_modern_pullback_shadow_signal(
+                incomplete, asof_utc=OPENED + timedelta(minutes=45), **kwargs
+            ) is None

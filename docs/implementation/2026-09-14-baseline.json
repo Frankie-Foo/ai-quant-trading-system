@@ -1,0 +1,141 @@
+{
+  "observed_at_utc": "2026-09-14T10:15:08.1994411Z",
+  "release_root": "D:\\cdoeX-releases\\2026-09-07-loop-v4-c2e5966",
+  "release_head": "bd51b340046d5bf3dbebae3bdf1813ee40b16fa0",
+  "main_head": "c2e5966add8a9de344e4239b8fc503c181597445",
+  "loop_head": "d6ce9e7a7156db3db14b01756f563a7701622a99",
+  "merge_base": "4070b1fc89ef2b610df8dcfde749c1dc0c04f141",
+  "dirty_files": [
+    {
+      "path": "operations/local_env.py",
+      "sha256": "96464faf70c30b4671908e0308f4a0fc5762b303566a77255725eb64e3dbd1ec",
+      "bytes": 6031
+    },
+    {
+      "path": "operations/loop_integration/client.py",
+      "sha256": "28f9262f4583d40017f41f934d936da4705eaf7cd44487285ca07c00a9515d9c",
+      "bytes": 19243
+    },
+    {
+      "path": "operations/loop_integration/execution_summary.py",
+      "sha256": "f3ca43472fe7f180516ca03022382c03be78bb82f721d58cff46aaf06c945fc8",
+      "bytes": 25320
+    },
+    {
+      "path": "operations/loop_integration/review_builder.py",
+      "sha256": "c637a2f205a81a879cf3671f970ae98384af2431567826a2da2c279b7478e218",
+      "bytes": 18429
+    },
+    {
+      "path": "schedule/postmarket.py",
+      "sha256": "cb796cee8b3d8ae21d9f60ffbc9d24591d2fe8bece02989c662bf6168b5eb66e",
+      "bytes": 27166
+    },
+    {
+      "path": "scripts/monitor_modern_momentum_paper.py",
+      "sha256": "6bf4a7bb2f411d5b56b582f1144d1c664749a2827b31b8febc1ce7221c8ffd8e",
+      "bytes": 83216
+    },
+    {
+      "path": "scripts/run_hidden_powershell.vbs",
+      "sha256": "9ee894683e28575c9971fb839e061e85dd6a8a281d11b414809f04c0b643f9a6",
+      "bytes": 501
+    },
+    {
+      "path": "scripts/run_modern_funnel_stage.py",
+      "sha256": "a420bde381c11ff681be48e4f260cc87d5f0539cdf1a9163138332b00c3a3103",
+      "bytes": 46325
+    },
+    {
+      "path": "scripts/run_modern_funnel_tick.ps1",
+      "sha256": "e4cab60f04f0b547ad5b1156f49aadb092611431ec558c928ab13d2654b35936",
+      "bytes": 3229
+    },
+    {
+      "path": "scripts/run_postmarket_tick.ps1",
+      "sha256": "5fb0a45c606d00dd0f9a2e27c9d212cef56b80015f37ddf7591f6ef699a31923",
+      "bytes": 2537
+    },
+    {
+      "path": "scripts/sync_loop_owner_attested_review.py",
+      "sha256": "9f6639bd18773226334989a5b113c79b9234de2b6a67bc978fa13a7e38418a62",
+      "bytes": 9465
+    },
+    {
+      "path": "tests/test_local_env.py",
+      "sha256": "93697f64f7a76e9c1a470999d5cc25daff651c2a6448d583dc5da5c1cafefc71",
+      "bytes": 5215
+    },
+    {
+      "path": "tests/test_loop_integration.py",
+      "sha256": "fb51c6534b452ff01caab478567d947aa8d51c88231af184c134098bcca037a8",
+      "bytes": 50746
+    },
+    {
+      "path": "tests/test_loop_postmarket.py",
+      "sha256": "25646b5d15397b2267a2b82510e6be60082b9d682fb47f32b3fc6aff7a37ac1f",
+      "bytes": 8648
+    },
+    {
+      "path": "tests/test_loop_providers.py",
+      "sha256": "5de48893ed16ed9456deaaa278a8b29cf63a58d6aef4f23ed268c12bf2901af4",
+      "bytes": 12437
+    },
+    {
+      "path": "tests/test_modern_funnel_stage.py",
+      "sha256": "ae932c229cb66d3b9f607a1b4592f07a247fbb7dbce95427a3cffcfe1c843b2c",
+      "bytes": 42767
+    }
+  ],
+  "tasks": [
+    {
+      "name": "Trading System V2 - AI Quant Funnel",
+      "state": "Ready",
+      "execute": [
+        "C:\\windows\\System32\\wscript.exe"
+      ]
+    },
+    {
+      "name": "Trading System V2 - Monthly Evolution",
+      "state": "Ready",
+      "execute": [
+        "powershell.exe"
+      ]
+    },
+    {
+      "name": "Trading System V2 - Paper Session",
+      "state": "Disabled",
+      "execute": [
+        "powershell.exe"
+      ]
+    },
+    {
+      "name": "Trading System V2 - Postmarket Review",
+      "state": "Ready",
+      "execute": [
+        "C:\\windows\\System32\\wscript.exe"
+      ]
+    },
+    {
+      "name": "Trading System V2 - Premarket",
+      "state": "Disabled",
+      "execute": [
+        "powershell.exe"
+      ]
+    },
+    {
+      "name": "Trading System V2 - Research Cycle",
+      "state": "Ready",
+      "execute": [
+        "powershell.exe"
+      ]
+    }
+  ],
+  "status": "inventory_only_not_a_deployable_release",
+  "implementation_model": {
+    "id": "gpt-6-astra",
+    "reasoning_effort": "medium",
+    "owner_confirmation": "2026-09-14 conversation: 开始"
+  },
+  "release_gate": "All release-only changes must be reconciled and tested before switching scheduled tasks; do not overwrite the active release."
+}

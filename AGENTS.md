@@ -28,6 +28,10 @@
     successful third stage requires immutable dedicated-Base and Livermore receipts.
 17. Never read or write a disconnected legacy Feishu Base. The Investment Base uses
     four explicit, distinct table IDs and stores transitions, not polling ticks.
+    The owner selected VPS Work multidimensional tables on 2026-09-22. With
+    `AI_QUANT_INVESTMENT_PROVIDER=vps-work`, Feishu is never contacted or used as
+    fallback. Legacy receipt field names remain readable; new receipt values carry
+    the `vps-work` provider, document, table and verified record identity.
 18. Paper is frozen by default. Unfreeze requires owner confirmation and complete
     reconciliation. The 2026-09-07 owner-approved release allows at most $200,000
     aggregate Paper notional, further capped by account equity and remaining risk.

@@ -597,6 +597,20 @@ mv runs/strategy/challenger.json \
 - 5xx：保留 pending/failed 记录，待 Loop 恢复后重试；
 - 已成功的事件不得用不同内容重复提交。
 
+### 15.4 风控证据与计划生效时间
+
+风控证据时间与计划生效时间不能混用：
+
+- `risk_policy.evidence.effective_at`：该证据事实或计划版本形成的时间；
+- `risk_policy.evidence.available_at`：交易系统实际可读取该证据的时间，必须不早于 `effective_at`，且不得晚于复盘 `as_of`；
+- `risk_policy.authorization_effective_at`：计划允许开始生效的未来时间，可晚于前两个时间。
+
+例如计划文件在 09:39 ET 形成并可读、但规定 09:56 ET 才允许参与，应写成
+`effective_at=09:39`、`available_at=09:39`、`authorization_effective_at=09:56`。
+禁止为了表达未来执行窗口而把证据 `effective_at` 写成 09:56，否则会形成“09:39 已读取
+09:56 才存在的证据”的未来信息。官方客户端会在任何 Loop 网络请求前将此类事件标为
+`RISK_POLICY_EVIDENCE_INVALID`，不会创建远端 Task。
+
 ## 16. 常见故障
 
 | 现象 | 检查 | 处理 |
@@ -606,6 +620,7 @@ mv runs/strategy/challenger.json \
 | 找不到 accepted snapshot | 日期、数据根目录 | 先完成真实盘后复盘，不伪造文件 |
 | Top10 校验失败 | 候选数量和排名 | 确保十只唯一标的、排名 1..10 |
 | Signal 缺字段 | Signal Contract | 修复上游复盘字段，不降低合同 |
+| `risk_policy.evidence.available_at must not precede effective_at` | 风控证据时间语义 | 将证据形成/可见时间写入 `effective_at`/`available_at`，未来计划生效时间单独写入 `authorization_effective_at`；旧 Task 不可变，修复生产者后创建新事件 |
 | FSM transition invalid | Binding/FSM | 确认绑定事件为 `review_completed`，且冻结合同在当前状态显式声明该事件；不要为通过校验而虚构新状态 |
 | Golden Replay 失败 | actual/expected | 保持 PAPER_ONLY，不修改预期绕过失败 |
 | 候选被拒绝 | 参数白名单 | 只允许 `universe.min_rvol` |

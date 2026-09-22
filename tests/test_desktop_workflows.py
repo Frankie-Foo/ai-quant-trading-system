@@ -132,6 +132,7 @@ def test_desktop_workflow_selection_runs_the_existing_deterministic_pipeline(
         "scripts.build_daily_universe",
         "scripts.build_catalyst_snapshot",
         "scripts.build_premarket_rvol",
+        "scripts.refresh_event_sip_market_caps",
         "scripts.build_selection_gates",
     ]
     assert manager.status()["latest_job"]["action"] == "run_selection"
@@ -161,6 +162,7 @@ def test_desktop_run_today_syncs_selects_and_starts_monitor(
         "scripts.build_daily_universe",
         "scripts.build_catalyst_snapshot",
         "scripts.build_premarket_rvol",
+        "scripts.refresh_event_sip_market_caps",
         "scripts.build_selection_gates",
     ]
     assert manager.status()["latest_job"]["status"] == "complete"

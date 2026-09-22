@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -10,22 +11,22 @@ from typing import Any
 import polars as pl
 
 from data_plane.calendar import build_xnys_schedule
+from data_plane.candidate_pools import load_premarket_pool
 from data_plane.contracts import DataQualityCheck, DatasetSnapshot, QualitySeverity
-from data_plane.providers.massive import (
-    empty_ticker_details_frame,
-    fetch_free_float,
-    fetch_ticker_details,
-)
+from data_plane.providers.massive import fetch_free_float
 from data_plane.providers.nasdaq_events import (
     fetch_earnings_calendar,
     fetch_trade_halts,
 )
+from data_plane.snapshot_queries import load_snapshot_by_id
 from data_plane.storage import persist_snapshot
 from kernel.config import load_config
 from kernel.universe import apply_selection_gates
 from operations.local_env import load_project_env
 
 ROOT = Path(__file__).resolve().parents[1]
+SIP_MARKET_CAP_SOURCE = "event.sip_market_cap"
+SIP_MARKET_CAP_MAX_AGE_SECONDS = 600
 
 
 def _parse_date(value: str) -> date:
@@ -213,6 +214,108 @@ def _latest_source(
     return pl.read_parquet(path), snapshot
 
 
+def _empty_market_details() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "symbol": pl.String,
+            "market_cap": pl.Float64,
+            "asof_date": pl.Date,
+            "provenance": pl.String,
+        }
+    )
+
+
+def _market_details_from_sip_frames(
+    frames: list[pl.DataFrame],
+    *,
+    symbols: tuple[str, ...],
+    decision_at: datetime,
+) -> pl.DataFrame:
+    """Resolve point-in-time market caps from cached-shares × fresh SIP trades.
+
+    This is deliberately the sole live selection source for market capitalisation:
+    provider market-cap fallbacks are not equivalent to a contemporaneous SIP price.
+    """
+    requested = {symbol.upper() for symbol in symbols}
+    latest: dict[str, dict[str, object]] = {}
+    latest_available_at: dict[str, datetime] = {}
+    required = {
+        "symbol",
+        "market_cap",
+        "asof_date",
+        "available_at",
+        "provenance",
+        "market_cap_status",
+        "source",
+        "price_source",
+        "price_timestamp",
+    }
+    for frame in frames:
+        missing = required - set(frame.columns)
+        if missing:
+            raise ValueError(f"SIP market-cap snapshot missing columns: {sorted(missing)}")
+        for row in frame.iter_rows(named=True):
+            symbol = str(row["symbol"]).strip().upper()
+            available_at = row["available_at"]
+            price_timestamp = row["price_timestamp"]
+            cap = row["market_cap"]
+            if (
+                symbol not in requested
+                or row["market_cap_status"] != "available"
+                or row["source"] != "derived.sip_market_cap"
+                or not isinstance(available_at, datetime)
+                or not isinstance(price_timestamp, datetime)
+                or available_at.tzinfo is None
+                or price_timestamp.tzinfo is None
+                or available_at > decision_at
+                or price_timestamp > decision_at
+                or (decision_at - price_timestamp).total_seconds()
+                > SIP_MARKET_CAP_MAX_AGE_SECONDS
+                or not isinstance(cap, (int, float))
+                or not math.isfinite(float(cap))
+                or float(cap) <= 0
+                or "alpaca.sip" not in str(row["price_source"])
+            ):
+                continue
+            previous_available_at = latest_available_at.get(symbol)
+            if previous_available_at is None or available_at > previous_available_at:
+                latest[symbol] = {
+                    "symbol": symbol,
+                    "market_cap": float(cap),
+                    "asof_date": row["asof_date"],
+                    "provenance": row["provenance"],
+                    "available_at": available_at,
+                }
+                latest_available_at[symbol] = available_at
+    if not latest:
+        return _empty_market_details()
+    return pl.DataFrame(list(latest.values())).select(
+        "symbol", "market_cap", "asof_date", "provenance"
+    )
+
+
+def _load_current_sip_market_caps(
+    data_root: Path,
+    *,
+    symbols: tuple[str, ...],
+    decision_at: datetime,
+) -> tuple[pl.DataFrame, tuple[str, ...]]:
+    frames: list[pl.DataFrame] = []
+    snapshot_ids: list[str] = []
+    for path in (data_root / "accepted").glob(f"{SIP_MARKET_CAP_SOURCE}-*/data.parquet"):
+        snapshot = DatasetSnapshot.model_validate(_manifest(path.parent / "manifest.json"))
+        if snapshot.asof_utc > decision_at:
+            continue
+        frames.append(pl.read_parquet(path))
+        snapshot_ids.append(snapshot.dataset_id)
+    details = _market_details_from_sip_frames(
+        frames,
+        symbols=symbols,
+        decision_at=decision_at,
+    )
+    return details, tuple(snapshot_ids)
+
+
 def _counts(frame: pl.DataFrame, column: str) -> dict[str, int]:
     return {
         str(row[column]): int(row["len"])
@@ -225,9 +328,44 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trade-date", type=_parse_date, required=True)
     parser.add_argument("--data-root", type=Path, default=ROOT / "data")
-    parser.add_argument("--massive-pace-seconds", type=float, default=12.5)
     parser.add_argument("--refresh-events", action="store_true")
+    parser.add_argument("--candidate-snapshot")
+    parser.add_argument("--rvol-snapshot")
+    parser.add_argument("--market-cap-snapshot")
     args = parser.parse_args()
+    explicit = (args.candidate_snapshot, args.rvol_snapshot, args.market_cap_snapshot)
+    if any(explicit) and not all(explicit):
+        raise ValueError("candidate, RVOL and market-cap snapshot IDs must be supplied together")
+    rvol_loaded = None
+    cap_loaded = None
+    if all(explicit):
+        pool = load_premarket_pool(
+            args.data_root, args.trade_date, pool="catalyst",
+            snapshot_id=args.candidate_snapshot,
+        )
+        candidates, locked_snapshot = pool.frame, pool.snapshot
+        rvol_loaded = load_snapshot_by_id(
+            args.data_root, args.rvol_snapshot, source="kernel.premarket.rvol_candidates",
+            available_by=datetime.now(UTC), required_parents=(locked_snapshot.dataset_id,),
+        )
+        rvol, _ = rvol_loaded
+        if (rvol["session_date"].unique().to_list() != [args.trade_date]
+                or rvol.height != candidates.height
+                or rvol["symbol"].n_unique() != rvol.height
+                or set(rvol["symbol"]) != set(candidates["symbol"])):
+            raise ValueError("RVOL wave date or symbol coverage mismatch")
+        cutoff = datetime.fromisoformat(next(
+            check.expected for check in locked_snapshot.checks if check.name == "wave_context"
+        ))
+        if ("decision_asof_utc" not in rvol.columns
+                or rvol["decision_asof_utc"].unique().to_list() != [cutoff]):
+            raise ValueError("RVOL wave cutoff mismatch")
+        cap_loaded = load_snapshot_by_id(
+            args.data_root, args.market_cap_snapshot, source=SIP_MARKET_CAP_SOURCE,
+            available_by=datetime.now(UTC), required_parents=(args.rvol_snapshot,),
+        )
+    else:
+        candidates, locked_snapshot = _load_locked(args.data_root, args.trade_date)
 
     schedule = build_xnys_schedule(args.trade_date - timedelta(days=15), args.trade_date)
     prior_dates = schedule.filter(pl.col("trade_date") < args.trade_date).get_column(
@@ -236,8 +374,21 @@ def main() -> None:
     if len(prior_dates) != 5:
         raise ValueError("five prior XNYS sessions are required")
     previous_session = prior_dates[-1]
-    candidates, locked_snapshot = _load_locked(args.data_root, args.trade_date)
-    daily, daily_snapshot = _load_daily(args.data_root, previous_session)
+    if all(explicit):
+        daily_ids = [
+            identity for identity in locked_snapshot.parent_snapshot_ids
+            if identity.startswith("kernel.universe.daily_precheck-")
+        ]
+        if len(daily_ids) != 1:
+            raise ValueError("wave candidate must bind one daily universe")
+        daily, daily_snapshot = load_snapshot_by_id(
+            args.data_root, daily_ids[0], source="kernel.universe.daily_precheck",
+            available_by=locked_snapshot.asof_utc,
+        )
+        if daily["asof_date"].unique().to_list() != [previous_session]:
+            raise ValueError("wave daily universe date mismatch")
+    else:
+        daily, daily_snapshot = _load_daily(args.data_root, previous_session)
     symbols = tuple(candidates.get_column("symbol").sort().to_list())
     symbol_set = set(symbols)
 
@@ -310,7 +461,8 @@ def main() -> None:
     else:
         floats, float_snapshot = float_cached
 
-    rvol_loaded = _load_rvol(args.data_root, args.trade_date)
+    if not all(explicit):
+        rvol_loaded = _load_rvol(args.data_root, args.trade_date)
     if rvol_loaded is None:
         result = {
             "trade_date": args.trade_date.isoformat(),
@@ -329,71 +481,20 @@ def main() -> None:
     rvol_frame, rvol_snapshot = rvol_loaded
     cfg = load_config(ROOT / "config.yaml")
     gate_asof_utc = datetime.now(UTC)
-    # Market-cap details are the rate-limited endpoint. Probe all other hard gates
-    # with a positive placeholder cap, then query Massive only for possible passes.
-    probe_market = pl.DataFrame(
-        {
-            "symbol": symbols,
-            "market_cap": [cfg.universe.min_market_cap_usd] * len(symbols),
-        }
-    )
-    probe = apply_selection_gates(
-        daily,
-        candidates,
-        rvol_frame,
-        probe_market,
-        earnings,
-        halts,
-        floats,
-        trade_date=args.trade_date,
-        asof_utc=gate_asof_utc,
-        recent_session_dates=prior_dates,
-        cfg=cfg,
-        low_float_shares=cfg.universe.luld_low_float_shares,
-    )
-    market_symbols = tuple(
-        probe.filter(pl.col("pass_gate")).get_column("symbol").sort().to_list()
-    )
-    market_cached = _latest_source(
-        args.data_root,
-        source="massive.ticker_details",
-        predicate=lambda frame: set(frame.get_column("symbol").to_list())
-        == set(market_symbols)
-        and frame.get_column("asof_date").unique().to_list() == [previous_session]
-        and frame.get_column("market_cap").is_not_null().all(),
-    )
-    if market_cached is None:
-        market = (
-            fetch_ticker_details(
-                market_symbols,
-                previous_session,
-                pace_seconds=args.massive_pace_seconds,
-                on_symbol=lambda index, total: print(
-                    json.dumps(
-                        {
-                            "progress": f"{index}/{total}",
-                            "stage": "ticker_details",
-                        }
-                    ),
-                    flush=True,
-                ),
-            )
-            if market_symbols
-            else empty_ticker_details_frame()
+    # Fetching already happens once for the locked pool.  Keep all resulting
+    # SIP-derived caps in the audit output; otherwise an unrelated RVOL failure
+    # is incorrectly reported as a missing market-cap failure.
+    market_snapshot_ids: tuple[str, ...]
+    if cap_loaded is not None:
+        cap_frame, cap_snapshot = cap_loaded
+        market = _market_details_from_sip_frames(
+            [cap_frame], symbols=symbols, decision_at=gate_asof_utc,
         )
-        market_snapshot = _store_reference(
-            market,
-            data_root=args.data_root,
-            source="massive.ticker_details",
-            schema_version="ticker_details.v1",
-            symbols=market_symbols,
-            target_date=previous_session,
-            date_column="asof_date",
-            parent_ids=(locked_snapshot.dataset_id,),
-            allow_empty=True,
-        )
+        market_snapshot_ids = (cap_snapshot.dataset_id,)
     else:
-        market, market_snapshot = market_cached
+        market, market_snapshot_ids = _load_current_sip_market_caps(
+            args.data_root, symbols=symbols, decision_at=gate_asof_utc,
+        )
 
     output = apply_selection_gates(
         daily,
@@ -448,6 +549,17 @@ def main() -> None:
             "0 passing rows violating a hard gate",
             "kernel.universe.apply_selection_gates",
         ),
+        _check(
+            "current_sip_market_cap_coverage",
+            QualitySeverity.WARNING,
+            market.height == len(symbols),
+            market.height,
+            (
+                f"all {len(symbols)} locked candidates have "
+                "fresh cached-shares × SIP caps"
+            ),
+            SIP_MARKET_CAP_SOURCE,
+        ),
     )
     parent_ids = (
         locked_snapshot.dataset_id,
@@ -455,8 +567,8 @@ def main() -> None:
         rvol_snapshot.dataset_id,
         earnings_snapshot.dataset_id,
         halt_snapshot.dataset_id,
-        market_snapshot.dataset_id,
         float_snapshot.dataset_id,
+        *market_snapshot_ids,
     )
     snapshot, path = persist_snapshot(
         output,
@@ -475,6 +587,11 @@ def main() -> None:
         "rejections": _counts(
             output.filter(~pl.col("pass_gate")), "reject_reason"
         ),
+        "market_cap_source": "cached_shares_times_alpaca_sip_trade",
+        "market_cap_coverage": {
+            "covered": market.height,
+            "requested": len(symbols),
+        },
         "dataset_id": snapshot.dataset_id,
         "path": str(path),
     }

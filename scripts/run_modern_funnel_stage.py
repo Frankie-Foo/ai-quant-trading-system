@@ -21,8 +21,10 @@ import polars as pl
 from pydantic import SecretStr
 
 from data_plane.calendar import build_xnys_schedule
+from data_plane.candidate_pools import load_premarket_pool
 from data_plane.contracts import DataQualityCheck, DatasetSnapshot, QualitySeverity
-from data_plane.providers.alpaca import fetch_bars, fetch_quotes
+from data_plane.providers.alpaca import fetch_bars
+from data_plane.snapshot_queries import load_snapshot_by_id
 from data_plane.storage import persist_snapshot
 from execution.alpaca_paper import DirectAlpacaPaperBroker
 from kernel.strategy_policy import load_strategy_policy
@@ -31,15 +33,17 @@ from operations.autonomous_selection_handoff import (
     create_open_confirmation,
     load_open_confirmation,
 )
-from operations.feishu_base import FeishuBaseEventClient, InvestmentTable
+from operations.feishu_base import FeishuBaseError, FeishuBaseEventClient, InvestmentTable
 from operations.livermore_push import LivermorePushClient, configured_identity
-from operations.local_env import load_project_env, project_data_root
+from operations.local_env import alpaca_paper_credentials, load_project_env, project_data_root
 from operations.paper_release import validate_smoke_notional
 from operations.paper_runtime_policy import PaperRuntimePolicy
 from operations.paper_state import PaperStateStore
+from operations.wave_artifacts import read_wave_artifact
+from research.intraday_wave_ranking import rank_forward_pool
 from research.modern_momentum import modern_strategy_manifest
 from schedule.modern_funnel import FunnelStage, PaperMonitorBlocked, _session_close_utc, _stage_for
-from scripts.monitor_modern_momentum_forward import SOURCE, _latest_pool
+from scripts.monitor_modern_momentum_forward import SOURCE
 
 ROOT = Path(__file__).resolve().parents[1]
 EASTERN = ZoneInfo("America/New_York")
@@ -111,7 +115,13 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _run_module(module: str, trade_date: date, data_root: Path) -> None:
+def _run_module(
+    module: str,
+    trade_date: date,
+    data_root: Path,
+    *,
+    extra_args: tuple[str, ...] = (),
+) -> dict[str, Any]:
     completed = subprocess.run(
         [
             sys.executable,
@@ -121,22 +131,51 @@ def _run_module(module: str, trade_date: date, data_root: Path) -> None:
             trade_date.isoformat(),
             "--data-root",
             str(data_root),
+            *extra_args,
         ],
         cwd=ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         timeout=3600,
         check=False,
     )
     if completed.returncode != 0:
         raise RuntimeError(f"{module} failed with exit code {completed.returncode}")
+    # Children may emit JSON progress lines before a pretty-printed final receipt.
+    lines = completed.stdout.splitlines()
+    for index in reversed(range(len(lines))):
+        if not lines[index].startswith("{"):
+            continue
+        try:
+            receipt = json.loads("\n".join(lines[index:]))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(receipt, dict):
+            return receipt
+    raise ValueError(f"{module} did not return a JSON receipt")
+
+
+def _snapshot_id(receipt: dict[str, Any], key: str = "dataset_id") -> str:
+    value = receipt.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"child receipt missing {key}")
+    return value
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     encoded = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
     if path.exists():
-        existing = path.read_text(encoding="utf-8")
-        if json.loads(existing) != json.loads(encoded):
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        requested = json.loads(encoded)
+        # A retry may have a different wall-clock generation time. The frozen
+        # selection itself must remain identical, but that volatile timestamp
+        # must not turn a recovered notification write into a failed trade day.
+        existing.pop("generated_at_utc", None)
+        requested.pop("generated_at_utc", None)
+        if existing != requested:
             raise RuntimeError(f"immutable funnel artifact changed: {path.name}")
         return
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -226,6 +265,8 @@ def _first_wave_number(row: dict[str, object], field: str) -> float:
 
 def _first_wave_message(candidates: list[dict[str, object]]) -> str:
     lines = ["第一波观察池：", ""]
+    if not candidates:
+        lines.append("无候选：未出现同时满足硬门槛的标的。")
     for index, row in enumerate(candidates, start=1):
         symbol = str(row["symbol"])
         rvol = _first_wave_number(row, "rvol")
@@ -233,6 +274,31 @@ def _first_wave_message(candidates: list[dict[str, object]]) -> str:
         lines.append(
             f"{index}. {symbol}：{_first_wave_catalyst(row)}，"
             f"RVOL {rvol:.2f}，盘前 {premarket_return:+.2%}"
+        )
+    return "\n".join(lines)
+
+
+def _ranked_wave_message(
+    stage: FunnelStage,
+    candidates: list[dict[str, object]],
+) -> str:
+    titles = {
+        FunnelStage.SECOND_WAVE: "第二轮观察池（09:00 ET）：",
+        FunnelStage.FINAL_RANK: "第三轮最终观察池（09:30 ET）：",
+    }
+    title = titles[stage]
+    lines = [title, ""]
+    if not candidates:
+        lines.append("无候选：未出现同时满足硬门槛的标的。")
+    for index, row in enumerate(candidates, start=1):
+        symbol = str(row["symbol"])
+        rvol = _first_wave_number(row, "rvol")
+        premarket_return = _first_wave_number(row, "premarket_return")
+        repeats = int(_number(row.get("repeat_count", 0)))
+        persistence = f"，连续入池{repeats}轮" if repeats else ""
+        lines.append(
+            f"{index}. {symbol}：{_first_wave_catalyst(row)}，"
+            f"RVOL {rvol:.2f}，盘前 {premarket_return:+.2%}{persistence}"
         )
     return "\n".join(lines)
 
@@ -298,8 +364,9 @@ def _selection_event_fields(
 
 def _stage_observed_at(trade_date: date, stage: FunnelStage) -> datetime:
     stage_time = {
-        FunnelStage.FIRST_WAVE: time(8),
-        FunnelStage.SECOND_WAVE: time(9, 25),
+        FunnelStage.FIRST_WAVE: time(8, 30),
+        FunnelStage.SECOND_WAVE: time(9),
+        FunnelStage.FINAL_RANK: time(9, 30),
         FunnelStage.OPEN_CONFIRMATION: time(9, 35),
     }[stage]
     return datetime.combine(trade_date, stage_time, EASTERN).astimezone(UTC)
@@ -524,30 +591,39 @@ def _publish_stage(
     state_root: Path,
     strategy_version: str = STRATEGY_VERSION,
 ) -> tuple[tuple[str, ...], str]:
-    base = FeishuBaseEventClient.from_environment(os.environ)
-    if base is None:
-        raise RuntimeError("dedicated investment Feishu Base is required")
     now = _stage_observed_at(trade_date, stage)
     stage_rows = tuple((row, True) for row in candidates) + tuple((row, False) for row in rejected)
-    record_ids = tuple(
-        base.record_event(
-            InvestmentTable.SELECTION,
-            f"funnel:{trade_date.isoformat()}:{stage.value}:{row['symbol']}",
-            _selection_event_fields(
-                trade_date=trade_date,
-                stage=stage,
-                row=row,
-                kept=kept,
-                observed_at_utc=now,
-                strategy_version=strategy_version,
-            ),
+    record_ids: tuple[str, ...] = ()
+    feishu_failed = False
+    try:
+        base = FeishuBaseEventClient.from_environment(os.environ)
+        if base is None:
+            raise RuntimeError("dedicated investment record store is unavailable")
+        record_ids = tuple(
+            base.record_event(
+                InvestmentTable.SELECTION,
+                f"funnel:{trade_date.isoformat()}:{stage.value}:{row['symbol']}",
+                _selection_event_fields(
+                    trade_date=trade_date,
+                    stage=stage,
+                    row=row,
+                    kept=kept,
+                    observed_at_utc=now,
+                    strategy_version=strategy_version,
+                ),
+            )
+            for row, kept in stage_rows
         )
-        for row, kept in stage_rows
-    )
+    except (FeishuBaseError, RuntimeError, ValueError):
+        # Preserve selection and its notification during a Base outage.
+        # create_open_confirmation still requires real Base receipts before
+        # Paper authorization; this degraded projection does not grant it.
+        feishu_failed = True
     stage_title = {
         FunnelStage.FIRST_WAVE: "第一波观察池",
-        FunnelStage.SECOND_WAVE: "第二波盘前复核",
-        FunnelStage.OPEN_CONFIRMATION: "第三波开盘确认",
+        FunnelStage.SECOND_WAVE: "第二轮观察池",
+        FunnelStage.FINAL_RANK: "第三轮最终观察池",
+        FunnelStage.OPEN_CONFIRMATION: "第四步开盘确认",
     }[stage]
     kept_text = (
         "；".join(f"{row['symbol']}：{_candidate_reason(row)}" for row in candidates) or "无"
@@ -560,10 +636,16 @@ def _publish_stage(
         if stage is FunnelStage.OPEN_CONFIRMATION
         else ""
     )
-    body = (
-        _first_wave_message(candidates)
-        if stage is FunnelStage.FIRST_WAVE
-        else (
+    if stage is FunnelStage.FIRST_WAVE:
+        body = _first_wave_message(candidates)
+    elif stage in {FunnelStage.SECOND_WAVE, FunnelStage.FINAL_RANK}:
+        body = _ranked_wave_message(stage, candidates)
+        if stage is FunnelStage.FINAL_RANK:
+            body += (
+                "\n\n观察池已生成，等待开盘确认与Paper启动校验；本消息不代表盯盘已启动或已经买入。"
+            )
+    else:
+        body = (
             f"【AI量化漏斗｜{stage_title}】\n"
             f"交易日：{trade_date.isoformat()}\n"
             f"保留：{kept_text}\n"
@@ -571,7 +653,10 @@ def _publish_stage(
             f"{plan_text}"
             "仅Alpaca Paper模拟盘；本消息不代表已经成交。"
         )
-    )
+    if stage in {FunnelStage.FIRST_WAVE, FunnelStage.SECOND_WAVE, FunnelStage.FINAL_RANK}:
+        body += "\n\n仅Alpaca Paper模拟盘；本消息不代表已经成交。"
+    if feishu_failed:
+        body += "\n投资记录同步失败：本地审计已保留，请检查连接后补写。"
     ledger = AutonomousNotificationLedger(
         state_root / trade_date.isoformat() / "funnel-notifications.sqlite3"
     )
@@ -582,7 +667,11 @@ def _publish_stage(
             push,
             key=f"funnel:{trade_date.isoformat()}:{stage.value}",
             body=body,
-            payload={"kept": kept_text, "rejected": rejected_text},
+            payload={
+                "kept": kept_text,
+                "rejected": rejected_text,
+                "feishu_status": "failed" if feishu_failed else "succeeded",
+            },
         )
     finally:
         push.close()
@@ -592,11 +681,14 @@ def _publish_stage(
 def _first_wave(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
     path = day_root / "first_wave_pool.json"
     if path.exists():
-        existing = _read_json(path)
+        existing, _ = read_wave_artifact(path, trade_date=args.trade_date, as_of=datetime.now(UTC))
         raw_rows = existing.get("candidates")
         if not isinstance(raw_rows, list):
             raise ValueError("first-wave retry artifact is invalid")
         rows = raw_rows
+        rejected = existing.get("rejected", [])
+        if not isinstance(rejected, list) or not all(isinstance(row, dict) for row in rejected):
+            raise ValueError("first-wave rejection artifact is invalid")
         strategy_context = existing.get("strategy_context")
         if not isinstance(strategy_context, dict):
             if os.getenv("AI_QUANT_ACTIVE_POLICY_FILE", "").strip():
@@ -605,16 +697,20 @@ def _first_wave(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
                 )
             strategy_context = _strategy_context(rows)
     else:
-        _run_module("schedule.premarket", args.trade_date, args.data_root)
-        _run_module("scripts.prepare_modern_momentum_forward", args.trade_date, args.data_root)
-        pool = _latest_pool(args.data_root, args.trade_date)
-        rows = pool.to_dicts()
+        rows, rejected, source_snapshot_id = _rank_live_pool(
+            args,
+            prior_waves=(),
+            limit=20,
+            include_lock=True,
+        )
         strategy_context = _strategy_context(rows)
         payload: dict[str, object] = {
-            "schema_version": "modern_funnel.first_wave.v2",
+            "schema_version": "modern_funnel.first_wave.v3",
             "trade_date": args.trade_date.isoformat(),
             "generated_at_utc": datetime.now(UTC),
             "candidates": rows,
+            "rejected": rejected,
+            "source_snapshot_id": source_snapshot_id,
             "strategy_context": strategy_context,
         }
         _write_json(path, payload)
@@ -623,7 +719,7 @@ def _first_wave(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
         trade_date=args.trade_date,
         stage=FunnelStage.FIRST_WAVE,
         candidates=rows,
-        rejected=[],
+        rejected=rejected,
         state_root=args.state_root,
         strategy_version=strategy_version,
     )
@@ -637,37 +733,128 @@ def _session(args: argparse.Namespace) -> dict[str, Any]:
     return schedule.row(0, named=True)
 
 
+def _refresh_selection_inputs(
+    args: argparse.Namespace, *, include_lock: bool,
+) -> tuple[pl.DataFrame, DatasetSnapshot]:
+    """Refresh only current, point-in-time inputs required for one ranked wave."""
+    if include_lock:
+        _run_module(
+            "schedule.premarket", args.trade_date, args.data_root,
+            extra_args=("--reference-only",),
+        )
+    cutoff = min(
+        datetime.now(UTC).replace(second=0, microsecond=0),
+        _session(args)["market_open_utc"],
+    )
+    candidate_id = _snapshot_id(_run_module(
+        "scripts.build_catalyst_snapshot", args.trade_date, args.data_root,
+        extra_args=("--wave", "--asof", cutoff.isoformat()),
+    ), "candidate_dataset_id")
+    candidate = load_premarket_pool(
+        args.data_root, args.trade_date, pool="catalyst", snapshot_id=candidate_id,
+        decision_cutoff=cutoff,
+    )
+    if candidate.frame.is_empty():
+        return candidate.frame, candidate.snapshot
+    rvol_id = _snapshot_id(_run_module(
+        "scripts.build_premarket_rvol", args.trade_date, args.data_root,
+        extra_args=("--decision-asof", cutoff.isoformat(), "--candidate-snapshot", candidate_id),
+    ))
+    cap_id = _snapshot_id(_run_module(
+        "scripts.refresh_event_sip_market_caps", args.trade_date, args.data_root,
+        extra_args=("--rvol-snapshot", rvol_id),
+    ))
+    gate_id = _snapshot_id(_run_module(
+        "scripts.build_selection_gates", args.trade_date, args.data_root,
+        extra_args=("--candidate-snapshot", candidate_id, "--rvol-snapshot", rvol_id,
+                    "--market-cap-snapshot", cap_id),
+    ))
+    return load_snapshot_by_id(
+        args.data_root, gate_id, source="kernel.universe.selection_gates",
+        available_by=datetime.now(UTC), required_parents=(candidate_id, rvol_id, cap_id),
+    )
+
+
+def _prior_candidates(payload: dict[str, Any]) -> list[dict[str, object]]:
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list) or not all(isinstance(row, dict) for row in candidates):
+        raise ValueError("prior wave candidates are missing")
+    return candidates
+
+
+def _rank_live_pool(
+    args: argparse.Namespace,
+    *,
+    prior_waves: tuple[dict[str, Any], ...],
+    limit: int,
+    include_lock: bool,
+) -> tuple[list[dict[str, object]], list[dict[str, object]], str]:
+    gates, gate_snapshot = _refresh_selection_inputs(args, include_lock=include_lock)
+    if gates.is_empty():
+        return [], [], gate_snapshot.dataset_id
+    eligible = gates.filter(
+        pl.col("pass_gate").fill_null(False) & (pl.col("rvol").fill_null(0) >= 1.5)
+    )
+    if eligible.is_empty():
+        return [], [], gate_snapshot.dataset_id
+    pool_id = _snapshot_id(_run_module(
+        "scripts.prepare_modern_momentum_forward",
+        args.trade_date,
+        args.data_root,
+        extra_args=("--all-eligible", "--gate-snapshot", gate_snapshot.dataset_id),
+    ))
+    pool, snapshot = load_snapshot_by_id(
+        args.data_root, pool_id, source=SOURCE, available_by=datetime.now(UTC),
+        required_parents=(gate_snapshot.dataset_id,),
+    )
+    ranked = rank_forward_pool(
+        pool.to_dicts(),
+        prior_waves=tuple(_prior_candidates(payload) for payload in prior_waves),
+        limit=pool.height,
+    )
+    ranked = [{**row, "wave_rank": index} for index, row in enumerate(ranked, start=1)]
+    selected = ranked[:limit]
+    rejected = [
+        {
+            **row,
+            "reasons": [f"本轮Top{limit}容量落选（排序第{row['wave_rank']}）"],
+        }
+        for row in ranked[limit:]
+    ]
+    return selected, rejected, snapshot.dataset_id
+
+
 def _second_wave(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
-    source = _read_json(day_root / "first_wave_pool.json")
-    candidates = source.get("candidates")
-    if not isinstance(candidates, list) or not candidates:
-        raise ValueError("first-wave candidates are missing")
+    source, first_hash = read_wave_artifact(
+        day_root / "first_wave_pool.json", trade_date=args.trade_date, as_of=datetime.now(UTC),
+    )
+    candidates = _prior_candidates(source)
     strategy_context = source.get("strategy_context")
     if not isinstance(strategy_context, dict):
         strategy_context = _strategy_context(candidates)
     strategy_version = str(strategy_context.get("active_version", STRATEGY_VERSION))
     path = day_root / "second_wave_pool.json"
     if path.exists():
-        existing = _read_json(path)
+        existing, _ = read_wave_artifact(path, trade_date=args.trade_date, as_of=datetime.now(UTC))
         kept = existing.get("candidates")
         rejected = existing.get("rejected")
         if not isinstance(kept, list) or not isinstance(rejected, list):
             raise ValueError("second-wave retry artifact is invalid")
     else:
-        symbols = _symbols(source)
-        session = _session(args)
-        open_utc = session["market_open_utc"]
-        now = datetime.now(UTC)
-        premarket_start = datetime.combine(args.trade_date, time(4), EASTERN).astimezone(UTC)
-        bars = fetch_bars(symbols, premarket_start, min(now, open_utc), feed="sip")
-        quotes = fetch_quotes(symbols, now - timedelta(seconds=15), now, feed="sip")
-        kept, rejected = evaluate_second_wave(candidates, bars, quotes)
+        kept, rejected, source_snapshot_id = _rank_live_pool(
+            args,
+            prior_waves=(source,),
+            limit=20,
+            include_lock=False,
+        )
         payload: dict[str, object] = {
-            "schema_version": "modern_funnel.second_wave.v1",
+            "schema_version": "modern_funnel.second_wave.v2",
+            "prior_wave_hashes": {"first_wave_pool.json": first_hash},
             "trade_date": args.trade_date.isoformat(),
-            "generated_at_utc": now,
+            "generated_at_utc": datetime.now(UTC),
             "candidates": kept,
             "rejected": rejected,
+            "source_snapshot_id": source_snapshot_id,
             "strategy_context": strategy_context,
         }
         _write_json(path, payload)
@@ -682,29 +869,67 @@ def _second_wave(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
     return _receipt(path, record_ids, message_id)
 
 
-def _latest_pool_snapshot(data_root: Path, trade_date: date) -> tuple[Path, DatasetSnapshot]:
-    matches: list[tuple[datetime, Path, DatasetSnapshot]] = []
-    for path in (data_root / "accepted").glob(f"{SOURCE}-*/data.parquet"):
-        frame = pl.read_parquet(path, columns=["session_date"])
-        if frame["session_date"].unique().to_list() != [trade_date]:
-            continue
-        snapshot = DatasetSnapshot.model_validate_json(
-            (path.parent / "manifest.json").read_text(encoding="utf-8")
-        ).assert_usable()
-        matches.append((snapshot.asof_utc, path, snapshot))
-    if not matches:
-        raise FileNotFoundError("modern momentum pool snapshot is missing")
-    _, path, snapshot = max(matches, key=lambda item: item[0])
-    return path, snapshot
+def _final_rank(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
+    first, first_hash = read_wave_artifact(
+        day_root / "first_wave_pool.json", trade_date=args.trade_date, as_of=datetime.now(UTC),
+    )
+    second, second_hash = read_wave_artifact(
+        day_root / "second_wave_pool.json", trade_date=args.trade_date, as_of=datetime.now(UTC),
+    )
+    candidates = _prior_candidates(second)
+    strategy_context = second.get("strategy_context")
+    if not isinstance(strategy_context, dict):
+        strategy_context = _strategy_context(candidates)
+    strategy_version = str(strategy_context.get("active_version", STRATEGY_VERSION))
+    path = day_root / "final_wave_pool.json"
+    if path.exists():
+        existing, _ = read_wave_artifact(path, trade_date=args.trade_date, as_of=datetime.now(UTC))
+        kept = existing.get("candidates")
+        rejected = existing.get("rejected")
+        if not isinstance(kept, list) or not isinstance(rejected, list):
+            raise ValueError("final-rank retry artifact is invalid")
+    else:
+        kept, rejected, source_snapshot_id = _rank_live_pool(
+            args,
+            prior_waves=(first, second),
+            limit=10,
+            include_lock=False,
+        )
+        payload: dict[str, object] = {
+            "schema_version": "modern_funnel.final_rank.v1",
+            "prior_wave_hashes": {
+                "first_wave_pool.json": first_hash, "second_wave_pool.json": second_hash,
+            },
+            "trade_date": args.trade_date.isoformat(),
+            "generated_at_utc": datetime.now(UTC),
+            "candidates": kept,
+            "rejected": rejected,
+            "source_snapshot_id": source_snapshot_id,
+            "strategy_context": strategy_context,
+        }
+        _write_json(path, payload)
+    record_ids, message_id = _publish_stage(
+        trade_date=args.trade_date,
+        stage=FunnelStage.FINAL_RANK,
+        candidates=kept,
+        rejected=rejected,
+        state_root=args.state_root,
+        strategy_version=strategy_version,
+    )
+    return _receipt(path, record_ids, message_id)
 
 
 def _freeze_final_pool(
     data_root: Path,
     trade_date: date,
     symbols: tuple[str, ...],
+    *, source_snapshot_id: str,
 ) -> DatasetSnapshot:
-    source_path, parent = _latest_pool_snapshot(data_root, trade_date)
-    source_pool = pl.read_parquet(source_path)
+    source_pool, parent = load_snapshot_by_id(
+        data_root, source_snapshot_id, source=SOURCE, available_by=datetime.now(UTC),
+    )
+    if source_pool["session_date"].unique().to_list() != [trade_date]:
+        raise ValueError("final source trade date mismatch")
     final_pool = source_pool.filter(pl.col("symbol").is_in(symbols)).sort("forward_rank")
     if final_pool.height != len(symbols):
         raise RuntimeError("final pool diverged from its frozen source")
@@ -812,9 +1037,10 @@ def _launch_paper_if_confirmed(trade_date: date, confirmation_path: Path) -> int
         if lease_active:
             raise PaperMonitorBlocked("monitor_exited_with_active_lease")
     # Read-only preflight; the sole broker-writing monitor reconciles again on startup.
+    key_id, secret_key = alpaca_paper_credentials(os.environ)
     broker = DirectAlpacaPaperBroker(
-        key_id=SecretStr(os.getenv("ALPACA_PAPER_KEY_ID", "")),
-        secret_key=SecretStr(os.getenv("ALPACA_PAPER_SECRET_KEY", "")),
+        key_id=key_id,
+        secret_key=secret_key,
         writes_enabled=False,
     )
     try:
@@ -959,18 +1185,20 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
     if getattr(args, "resume_only", False):
         raise RuntimeError("handoff recovery requires existing same-day authorization")
     _require_selection_window(FunnelStage.OPEN_CONFIRMATION, args.trade_date)
-    frozen_source = _read_json(day_root / "second_wave_pool.json")
+    frozen_source, final_hash = read_wave_artifact(
+        day_root / "final_wave_pool.json", trade_date=args.trade_date, as_of=datetime.now(UTC),
+    )
     strategy_context = frozen_source.get("strategy_context")
     if not isinstance(strategy_context, dict):
         raw_candidates = frozen_source.get("candidates", [])
         if not isinstance(raw_candidates, list):
-            raise ValueError("second-wave candidates are missing")
+            raise ValueError("final-wave candidates are missing")
         strategy_context = _strategy_context(raw_candidates)
     strategy_version = str(strategy_context.get("active_version", STRATEGY_VERSION))
     source = frozen_source
     candidates = source.get("candidates")
     if not isinstance(candidates, list):
-        raise ValueError("second-wave candidates are missing")
+        raise ValueError("final-wave candidates are missing")
     if not candidates:
         prior_rejected = source.get("rejected", [])
         if not isinstance(prior_rejected, list):
@@ -989,14 +1217,16 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
             {
                 "schema_version": "modern_funnel.no_trade.v1",
                 "trade_date": args.trade_date.isoformat(),
-                "reason": "第二波无候选",
+                "reason": "第三轮最终观察池无候选",
                 "strategy_context": strategy_context,
             },
         )
         return _receipt(path, record_ids, message_id)
     decision_path = day_root / "open_decision.json"
     if decision_path.exists():
-        decision = _read_json(decision_path)
+        decision, _ = read_wave_artifact(
+            decision_path, trade_date=args.trade_date, as_of=datetime.now(UTC),
+        )
         kept = decision.get("candidates")
         rejected = decision.get("rejected")
         if not isinstance(kept, list) or not isinstance(rejected, list):
@@ -1011,6 +1241,7 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
             decision_path,
             {
                 "schema_version": "modern_funnel.open_decision.v1",
+                "prior_wave_hashes": {"final_wave_pool.json": final_hash},
                 "trade_date": args.trade_date.isoformat(),
                 "generated_at_utc": datetime.now(UTC),
                 "candidates": kept,
@@ -1040,7 +1271,10 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
         )
         return _receipt(path, record_ids, message_id)
     final_symbols = tuple(str(row["symbol"]) for row in kept)
-    snapshot = _freeze_final_pool(args.data_root, args.trade_date, final_symbols)
+    snapshot = _freeze_final_pool(
+        args.data_root, args.trade_date, final_symbols,
+        source_snapshot_id=_snapshot_id(frozen_source, "source_snapshot_id"),
+    )
     plan_path = day_root / "modern_h15_paper_plan.json"
     _write_json(
         plan_path,
@@ -1099,6 +1333,8 @@ def main() -> int:
         receipt = _first_wave(args, day_root)
     elif args.stage is FunnelStage.SECOND_WAVE:
         receipt = _second_wave(args, day_root)
+    elif args.stage is FunnelStage.FINAL_RANK:
+        receipt = _final_rank(args, day_root)
     else:
         receipt = _open_confirmation(args, day_root)
     print(json.dumps(receipt, ensure_ascii=False, sort_keys=True))

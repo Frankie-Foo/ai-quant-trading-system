@@ -32,7 +32,7 @@ from execution.alpaca_paper import (
 from operations.autonomous_selection_handoff import load_open_confirmation
 from operations.feishu_base import FeishuBaseEventClient, InvestmentTable
 from operations.livermore_push import LivermorePushClient, configured_identity
-from operations.local_env import load_project_env, project_data_root
+from operations.local_env import alpaca_paper_credentials, load_project_env, project_data_root
 from operations.paper_release import remaining_entry_notional
 from operations.paper_release import validate_smoke_notional as validate_smoke_notional
 from operations.paper_run_evidence import capture_startup
@@ -192,9 +192,10 @@ def _push_client() -> LivermorePushClient:
 
 
 def _broker(*, writes_enabled: bool) -> DirectAlpacaPaperBroker:
+    key_id, secret_key = alpaca_paper_credentials(os.environ)
     return DirectAlpacaPaperBroker(
-        key_id=SecretStr(os.getenv("ALPACA_PAPER_KEY_ID", "")),
-        secret_key=SecretStr(os.getenv("ALPACA_PAPER_SECRET_KEY", "")),
+        key_id=key_id,
+        secret_key=secret_key,
         writes_enabled=writes_enabled,
     )
 

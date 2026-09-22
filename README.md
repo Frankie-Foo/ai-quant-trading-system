@@ -32,7 +32,7 @@ Git worktree；评审通过后合并到 `main`，生产只部署明确记录的 
 
 唯一自动执行链是 `schedule.modern_funnel` →
 `scripts.run_modern_funnel_stage` → `scripts.monitor_modern_momentum_paper`。
-它按纽约时间 08:00、09:25、09:35 运行三段漏斗，只有第三段的专用飞书 Base
+它按纽约时间 08:00、09:25、09:35 运行三段漏斗，只有第三段的 vps-work 多维表格
 记录和利弗莫尔回执都成功后才生成不可变授权。默认保持冻结；Paper 启用还必须同时
 满足写入开关、关闭 kill switch、运行确认和经业主批准的名义金额上限。
 2026-09-07 发布额度为组合最多 20 万美元，同时不得超过账户净值和剩余风险预算；
@@ -132,7 +132,7 @@ network requests:
 The first real evidence run is documented in the
 [catalyst audit](docs/CATALYST_AUDIT_2026-07-20.md).
 
-Prefetch the prior 20 same-time premarket windows and, once the Beijing 20:00
+Prefetch the prior 20 same-time premarket windows and, once the Beijing 21:00
 decision time has arrived, build the locked-pool RVOL snapshot with:
 
 ```powershell
@@ -150,13 +150,33 @@ cannot pass the final gate by itself: the same snapshot must also show a positiv
 premarket close to be strictly above the prior close. See the historical
 [premarket RVOL audit](docs/PREMARKET_RVOL_AUDIT_2026-07-20.md).
 
-Prefetch and apply the remaining L0 selection gates (point-in-time market cap,
+Before first live selection, build the restartable SEC total-shares cache in bounded
+batches. It reads the existing active-common-stock reference, uses its CIK values,
+and never calls a per-symbol market-cap endpoint:
+
+```powershell
+.\.venv\Scripts\python -m scripts.cache_sec_shares_outstanding --max-ciks 100
+```
+
+The default cache is `data/cache/sec-shares-outstanding.parquet`; set
+`AI_QUANT_SHARES_CACHE_FILE` only to use another owner-managed path. Each run resumes
+from `data/state/sec-shares-cache.sqlite3`, records failed/missing CIKs with backoff,
+and refreshes successful SEC facts after 14 days. Use `--dry-run` before enabling a
+background task; it reads no SEC Company Facts.
+
+Then prefetch and apply the remaining L0 selection gates (point-in-time market cap,
 earnings day, current halt, recent LULD/low-float risk, and prior-session bearish
 distribution) with:
 
 ```powershell
+.\.venv\Scripts\python -m scripts.refresh_event_sip_market_caps --trade-date 2026-07-20
 .\.venv\Scripts\python -m scripts.build_selection_gates --trade-date 2026-07-20
 ```
+
+The live cap refresh reads the configured cache, or its default path, and derives each
+cap from cached shares outstanding and a fresh Alpaca SIP trade. It never falls back to
+per-symbol third-party market-cap lookups. Missing cache coverage blocks the final gate
+rather than admitting an unverified symbol.
 
 The bearish-distribution veto rejects a prior session whose open-to-close return is
 at most -3%, volume is at least 1.5 times the preceding 20-session average, and close

@@ -181,6 +181,15 @@ def _five_minute_bars(
         expected = [start + timedelta(minutes=minute) for minute in range(5)]
         if bucket.get_column("ts_utc").to_list() != expected:
             break
+        # Null products are silently skipped by sum(); retaining their volume
+        # would fabricate a lower VWAP and false reclaim evidence.
+        if bucket.filter(
+            ~(
+                pl.col("vwap").is_finite() & (pl.col("vwap") > 0)
+                & pl.col("volume").is_finite() & (pl.col("volume") >= 0)
+            ).fill_null(False)
+        ).height:
+            break
         volume = float(bucket.get_column("volume").sum())
         if volume <= 0:
             break

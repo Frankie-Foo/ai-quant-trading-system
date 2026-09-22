@@ -132,7 +132,9 @@ def _has_reference_snapshot(data_root: Path, asof_date: date) -> bool:
     return False
 
 
-def _lock_stage(trade_date: date, data_root: Path, logger: JsonEventLogger) -> tuple[str, ...]:
+def _lock_stage(
+    trade_date: date, data_root: Path, logger: JsonEventLogger, *, reference_only: bool = False,
+) -> tuple[str, ...]:
     previous = _previous_session(trade_date)
     artifacts: list[str] = []
     artifacts.extend(
@@ -171,12 +173,10 @@ def _lock_stage(trade_date: date, data_root: Path, logger: JsonEventLogger) -> t
             "reference_snapshot_reused",
             asof_date=previous.isoformat(),
         )
-    for module in (
-        "scripts.build_daily_universe",
-        "scripts.build_catalyst_snapshot",
-        "scripts.build_premarket_rvol",
-        "scripts.build_selection_gates",
-    ):
+    modules: tuple[str, ...] = ("scripts.build_daily_universe",)
+    if not reference_only:
+        modules += ("scripts.build_catalyst_snapshot",)
+    for module in modules:
         artifacts.extend(
             _run(
                 [
@@ -199,6 +199,7 @@ def _selection_stage(
     artifacts: list[str] = []
     for module in (
         "scripts.build_premarket_rvol",
+        "scripts.refresh_event_sip_market_caps",
         "scripts.build_selection_gates",
     ):
         artifacts.extend(
@@ -295,6 +296,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-root", type=Path, default=project_data_root(ROOT))
     parser.add_argument("--state-db", type=Path, default=ROOT / "runs/jobs.sqlite3")
     parser.add_argument("--lock-file", type=Path, default=ROOT / "runs/premarket.lock")
+    parser.add_argument("--lock-only", action="store_true")
+    parser.add_argument("--reference-only", action="store_true")
     return parser
 
 
@@ -333,17 +336,19 @@ def _run_locked(
     if now_utc < lock_due:
         return 0
 
-    lock_record = ledger.get(LOCK_JOB, trade_date, LOCK_VERSION)
+    # Reference-only completion must not mark the legacy overnight-news job done.
+    lock_job = "premarket_reference" if args.reference_only else LOCK_JOB
+    lock_record = ledger.get(lock_job, trade_date, LOCK_VERSION)
     if lock_record is None or lock_record.status is not JobStatus.SUCCEEDED:
         lease = ledger.acquire(
-            LOCK_JOB,
+            lock_job,
             trade_date,
             LOCK_VERSION,
             max_attempts=cfg.scheduler.premarket_max_attempts,
             retry_after=timedelta(minutes=cfg.scheduler.premarket_retry_minutes),
         )
         if lease is None:
-            record = ledger.get(LOCK_JOB, trade_date, LOCK_VERSION)
+            record = ledger.get(lock_job, trade_date, LOCK_VERSION)
             exhausted = (
                 record is not None
                 and record.attempts >= cfg.scheduler.premarket_max_attempts
@@ -356,15 +361,18 @@ def _run_locked(
             )
             return 1 if exhausted else 0
         try:
-            artifacts = _lock_stage(trade_date, args.data_root, logger)
+            if args.reference_only:
+                artifacts = _lock_stage(trade_date, args.data_root, logger, reference_only=True)
+            else:
+                artifacts = _lock_stage(trade_date, args.data_root, logger)
             ledger.complete(lease, artifact_ids=artifacts)
         except Exception as exc:
             ledger.fail(lease, error_code=type(exc).__name__)
             logger.emit("lock_stage_failed", level="error", error_code=type(exc).__name__)
             return 1
 
-    if now_utc < selection_due:
-        logger.emit("tick_completed_history_prefetched", orders_submitted=0)
+    if args.reference_only or args.lock_only or now_utc < selection_due:
+        logger.emit("tick_completed_reference_ready", orders_submitted=0)
         return 0
     lease = ledger.acquire(
         SELECTION_JOB,
@@ -410,8 +418,8 @@ def _run_locked(
             error_type=type(exc).__name__,
             trade_date=trade_date.isoformat(),
         )
-        if _truthy(os.environ.get("FEISHU_INVESTMENT_AUDIT_REQUIRED")):
-            return 1
+        # Selection is frozen locally before projection. A Base outage must
+        # not discard that decision and make the downstream funnel impossible.
         feishu = None
     if feishu is not None:
         try:
@@ -434,8 +442,6 @@ def _run_locked(
                 error_type=type(exc).__name__,
                 trade_date=trade_date.isoformat(),
             )
-            if _truthy(os.environ.get("FEISHU_INVESTMENT_AUDIT_REQUIRED")):
-                return 1
     shadow_status = "disabled"
     if cfg.scheduler.multisignal_shadow_enabled:
         shadow_status = "pending"

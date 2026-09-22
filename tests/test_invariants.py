@@ -41,7 +41,7 @@ def test_config_loads() -> None:
     assert cfg.market_data.paper_start_lead_minutes == 10
     assert cfg.market_data.postmarket_data_grace_minutes == 20
     assert cfg.guardrails.lock_time_beijing == "08:00"
-    assert cfg.guardrails.selection_time_beijing == "20:00"
+    assert cfg.guardrails.selection_time_beijing == "21:00"
     assert cfg.scheduler.premarket_retry_minutes == 30
     assert cfg.scheduler.premarket_max_attempts == 24
     assert cfg.scheduler.postmarket_retry_minutes == 30

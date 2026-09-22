@@ -33,6 +33,14 @@ python -m scripts.sync_loop_daily_review \
   --active-policy runs/strategy/active.json
 ```
 
+合同验证成功后，客户端还会用刚读取且 Hash 匹配的 SignalContract 对最终 Task 做提交前校验，
+包括 required features、允许的 signal type、事件新鲜度和 point-in-time 边界。校验失败返回
+`SIGNAL_CONTRACT_REJECTED` 及具体违规项，且不会调用 `POST /api/v1/tasks`。所有正式、历史补录
+和人工见证生产者都必须调用 `LoopClient.submit_review`；禁止绕过该入口直接拼装 Task。若历史
+证据没有 `close_return`、`dollar_volume`、`atr_pct` 等合同要求的决策时点事实，应保持
+`blocked_precondition`，不能用当前行情、默认值或人工猜测补齐；只有找到原始不可变快照后才能
+创建新的替代 Task。
+
 环境变量：
 
 ```text
@@ -66,8 +74,10 @@ Top10 是当日候选批次，不要求跨交易日保持相同。每个 Task �
 一致。生产器为三段数据写入同一个 `decision_cohort_id` 和 `decision_trading_date`，并在发起
 HTTP 请求前再次校验；Loop 创建 Task 时执行同样校验，错配直接返回 422，不再等到 Run 中途
 失败。前一日 Top10 不得混入今日候选；它们的到期表现只通过下述 Outcome 链路独立回填。
-盘前冻结候选池继续保存在 `daily_review.frozen_candidate_pool`，作为当日执行范围事实；它不再
-冒充盘后研究 Top10，也不参与强制精判集合的一致性比较。
+盘前冻结池与盘后赢家保留为不同来源，不能互相补造。当冻结池完整时，动态排名和精判
+取同一冻结批次，`source_kind=frozen_intraday_pool`；没有可用冻结池且允许纯研究复盘时，
+使用显式 `post_close_research_only`，禁止执行。存在券商证据却缺少应有的冻结池时阻断。
+完整盘前池另外保存在 `daily_review.frozen_candidate_pool`，盘后涨幅统计保持独立研究口径。
 
 ## 延迟 Outcome
 

@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from operations.local_env import load_project_env, project_data_root
+from operations.local_env import (
+    alpaca_paper_credentials,
+    load_project_env,
+    project_data_root,
+    sip_monitoring_window,
+)
 
 
 def test_load_project_env_promotes_alpaca_aliases_and_scopes_shared_env(
@@ -75,7 +80,7 @@ def test_load_project_env_accepts_an_explicit_machine_runtime_file(
     assert project_data_root(project) == shared_data_root
 
 
-def test_market_data_credentials_are_loaded_only_after_2100_beijing(
+def test_market_data_credentials_are_loaded_during_monitoring_window(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -114,10 +119,8 @@ def test_market_data_credentials_are_loaded_only_after_2100_beijing(
     monkeypatch.setenv("ALPACA_ENV_FILE", str(tmp_path / "missing.env"))
     monkeypatch.setenv("ALPACA_SIP_ENV_FILE", str(sip_env))
 
-    load_project_env(project, now_utc=datetime(2026, 8, 31, 12, 59, tzinfo=UTC))
+    load_project_env(project, now_utc=datetime(2026, 8, 31, 11, 0, tzinfo=UTC))
     assert "ALPACA_API_KEY_ID" not in os.environ
-    assert "FINNHUB_API_KEY" not in os.environ
-    assert "ALPHAVANTAGE_API_KEY" not in os.environ
 
     load_project_env(project, now_utc=datetime(2026, 8, 31, 13, 0, tzinfo=UTC))
     assert os.environ["ALPACA_API_KEY_ID"] == "sip-key"
@@ -127,3 +130,24 @@ def test_market_data_credentials_are_loaded_only_after_2100_beijing(
     assert "ALPACA_PAPER_SECRET_KEY" not in os.environ
     assert os.environ["FINNHUB_API_KEY"] == "finnhub-key"
     assert os.environ["ALPHAVANTAGE_API_KEY"] == "alpha-vantage-key"
+
+
+def test_sip_monitoring_window_crosses_midnight() -> None:
+    assert not sip_monitoring_window(datetime(2026, 8, 31, 11, 0, tzinfo=UTC))
+    assert not sip_monitoring_window(datetime(2026, 8, 31, 12, 20, tzinfo=UTC))
+    assert not sip_monitoring_window(datetime(2026, 8, 31, 12, 29, tzinfo=UTC))
+    assert sip_monitoring_window(datetime(2026, 8, 31, 12, 30, tzinfo=UTC))
+    assert sip_monitoring_window(datetime(2026, 8, 31, 12, 59, tzinfo=UTC))
+    assert sip_monitoring_window(datetime(2026, 8, 31, 13, 0, tzinfo=UTC))
+    assert sip_monitoring_window(datetime(2026, 8, 31, 20, 0, tzinfo=UTC))
+    assert not sip_monitoring_window(datetime(2026, 8, 31, 22, 0, tzinfo=UTC))
+
+
+def test_paper_credential_resolver_accepts_generic_alpaca_aliases() -> None:
+    key_id, secret_key = alpaca_paper_credentials({
+        "ALPACA_API_KEY_ID": "paper-key",
+        "ALPACA_API_SECRET_KEY": "paper-secret",
+    })
+
+    assert key_id.get_secret_value() == "paper-key"
+    assert secret_key.get_secret_value() == "paper-secret"

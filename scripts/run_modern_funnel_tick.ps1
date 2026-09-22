@@ -34,7 +34,15 @@ if ($ArmPaper) {
     $env:AI_QUANT_PAPER_RUNTIME_CONFIRMED = "false"
     Remove-Item Env:AI_QUANT_PAPER_SMOKE_MAX_NOTIONAL -ErrorAction SilentlyContinue
 }
-& $python -m schedule.modern_funnel --first-wave-not-before-beijing "21:00" `
+& $python -m schedule.modern_funnel `
     1>> (Join-Path $runs "modern_funnel_scheduler.out.log") `
     2>> (Join-Path $runs "modern_funnel_scheduler.err.log")
-exit $LASTEXITCODE
+$funnelExit = $LASTEXITCODE
+& $python -m scripts.report_modern_paper_summary `
+    1>> (Join-Path $runs "modern_funnel_scheduler.out.log") `
+    2>> (Join-Path $runs "modern_funnel_scheduler.err.log")
+$summaryExit = $LASTEXITCODE
+if ($funnelExit -ne 0) {
+    exit $funnelExit
+}
+exit $summaryExit

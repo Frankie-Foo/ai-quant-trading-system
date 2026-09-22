@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -41,6 +42,9 @@ def run_child(
         cwd=cwd,
         capture_output=capture_output,
         text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         timeout=timeout_seconds,
         check=False,
     )

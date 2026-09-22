@@ -231,6 +231,19 @@ def _loop_evidence_args(prefix: str = "AI_QUANT_LOOP") -> list[str]:
     return ["--execution-index", path, "--execution-index-sha256", digest] if path else []
 
 
+def _native_no_trade_fallback_available(run_root: str, trade_date: date) -> bool:
+    """Allow a factual research review when native execution never started."""
+
+    if not run_root:
+        return False
+    day = Path(run_root) / "autonomous" / trade_date.isoformat()
+    return (
+        (day / "open_no_trade.json").is_file()
+        and not (day / "open_confirmation.json").exists()
+        and not (day / "modern_h15_paper_plan.json").exists()
+    )
+
+
 def _sync_loop_outcomes(
     *,
     trade_date: date,
@@ -295,6 +308,7 @@ def _sync_loop_handoffs(
     """Retry independently of local success; remote outbox handles idempotency."""
     evidence_args = None
     provider_blocked = False
+    no_trade_fallback = False
     native_root = os.environ.get("AI_QUANT_LOOP_NATIVE_RUN_ROOT", "").strip()
     if any(_truthy(os.environ.get(name)) for name in (
         "AI_QUANT_LOOP_SYNC_ENABLED", "AI_QUANT_LOOP_OUTCOME_SYNC_ENABLED",
@@ -331,16 +345,25 @@ def _sync_loop_handoffs(
                             trade_date=str(trade_date), error_type=type(exc).__name__,
                             orders_submitted=0)
                 provider_blocked = True
-    failures = int(provider_blocked)
+                no_trade_fallback = _native_no_trade_fallback_available(native_root, trade_date)
+                if no_trade_fallback:
+                    logger.emit(
+                        "loop_provider_no_trade_fallback",
+                        trade_date=str(trade_date),
+                        orders_submitted=0,
+                    )
+    failures = int(provider_blocked and not no_trade_fallback)
     for sync, extra in (
         (_sync_loop_review, {"artifacts": artifacts}),
         (_sync_loop_outcomes, {}),
     ):
-        if sync is _sync_loop_review and provider_blocked:
+        if sync is _sync_loop_review and provider_blocked and not no_trade_fallback:
             continue
         try:
             selected_args = evidence_args
-            if sync is _sync_loop_outcomes:
+            if sync is _sync_loop_outcomes and _truthy(
+                os.environ.get("AI_QUANT_LOOP_OUTCOME_SYNC_ENABLED")
+            ):
                 selected_args = _loop_evidence_args("AI_QUANT_LOOP_OUTCOME") or evidence_args
                 if selected_args is None and native_root and provider_blocked:
                     history = run_child([

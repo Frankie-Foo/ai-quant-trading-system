@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
 
@@ -12,6 +12,7 @@ import polars as pl
 
 from data_plane.calendar import build_xnys_schedule
 from data_plane.contracts import DatasetSnapshot
+from data_plane.snapshot_queries import load_snapshot_by_id
 
 PremarketPoolName = Literal["catalyst", "factor"]
 
@@ -65,9 +66,33 @@ def load_premarket_pool(
     target_date: date,
     *,
     pool: PremarketPoolName,
+    snapshot_id: str | None = None,
+    decision_cutoff: datetime | None = None,
 ) -> PremarketPool:
     """Return the latest accepted catalyst or independent daily-factor pool."""
 
+    if snapshot_id is not None:
+        if pool != "catalyst":
+            raise ValueError("explicit event snapshot requires catalyst pool")
+        source = "kernel.catalysts.wave_candidates"
+        frame, snapshot = load_snapshot_by_id(
+            data_root, snapshot_id, source=source, available_by=datetime.now(UTC),
+        )
+        context = [check for check in snapshot.checks if check.name == "wave_context"]
+        if len(context) != 1 or context[0].observed != target_date.isoformat():
+            raise ValueError("wave context date mismatch")
+        cutoff = datetime.fromisoformat(context[0].expected)
+        if (cutoff.tzinfo is None or cutoff.utcoffset() is None
+                or cutoff > snapshot.asof_utc
+                or (decision_cutoff is not None and cutoff != decision_cutoff)):
+            raise ValueError("wave context cutoff mismatch")
+        if not frame.is_empty() and not _matches_target(
+            frame, pool="catalyst", target_date=target_date,
+        ):
+            raise ValueError("wave context rows mismatch")
+        if frame["symbol"].n_unique() != frame.height:
+            raise ValueError("wave pool contains duplicate symbols")
+        return PremarketPool(frame.sort("symbol"), snapshot, source, target_date)
     if pool == "catalyst":
         source = "kernel.catalysts.overnight_candidates"
     elif pool == "factor":

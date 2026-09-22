@@ -241,6 +241,27 @@ def test_readonly_cli_timeout_retries_are_bounded_and_redacted(
     assert "SECRET" not in "".join(traceback.format_exception(caught.value))
 
 
+def test_cli_stderr_authorization_error_retains_safe_type_and_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def denied(command: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 3, "", json.dumps({
+            "ok": False,
+            "error": {
+                "type": "authorization", "code": 99991672,
+                "message": "SECRET requires base:record:read",
+            },
+        }))
+
+    monkeypatch.setattr(subprocess, "run", denied)
+    client = FeishuBaseEventClient(_settings(tmp_path), sleep=lambda _: None)
+    with pytest.raises(FeishuBaseError) as caught:
+        client.check_access()
+    assert "type=authorization" in str(caught.value)
+    assert "code=99991672" in str(caught.value)
+    assert "SECRET" not in "".join(traceback.format_exception(caught.value))
+
+
 def test_timed_out_write_is_reconciled_by_readback_without_second_upsert(tmp_path: Path) -> None:
     class AcceptedButTimedOut(FakeLark):
         def __call__(self, command: Sequence[str]) -> Mapping[str, object]:
