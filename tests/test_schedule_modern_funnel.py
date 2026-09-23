@@ -122,6 +122,37 @@ def test_missing_prerequisite_still_blocks_final_rank(tmp_path: Path) -> None:
     assert executor.calls == []
 
 
+def test_missing_second_wave_is_recovered_during_final_rank_window(tmp_path: Path) -> None:
+    executor = FakeExecutor()
+    ledger = tmp_path / "funnel.sqlite3"
+    run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(8, 30))
+
+    recovered = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 30))
+    final_rank = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 31))
+
+    assert recovered.status is FunnelTickStatus.SUCCEEDED
+    assert recovered.stage is FunnelStage.SECOND_WAVE
+    assert final_rank.status is FunnelTickStatus.SUCCEEDED
+    assert final_rank.stage is FunnelStage.FINAL_RANK
+
+
+def test_missing_final_rank_is_recovered_during_open_confirmation_window(
+    tmp_path: Path,
+) -> None:
+    executor = FakeExecutor()
+    ledger = tmp_path / "funnel.sqlite3"
+    run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(8, 30))
+    run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 0))
+
+    recovered = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 35))
+    confirmation = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 36))
+
+    assert recovered.status is FunnelTickStatus.SUCCEEDED
+    assert recovered.stage is FunnelStage.FINAL_RANK
+    assert confirmation.status is FunnelTickStatus.SUCCEEDED
+    assert confirmation.stage is FunnelStage.OPEN_CONFIRMATION
+
+
 def test_funnel_does_nothing_outside_windows_or_on_xnys_holiday(tmp_path: Path) -> None:
     executor = FakeExecutor()
     outside = run_tick(

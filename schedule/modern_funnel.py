@@ -197,6 +197,35 @@ def _prerequisite(stage: FunnelStage) -> FunnelStage | None:
     }[stage]
 
 
+def _recovery_window(stage: FunnelStage, local_time: time) -> bool:
+    start, end = {
+        FunnelStage.FIRST_WAVE: (time(9, 0), time(9, 30)),
+        FunnelStage.SECOND_WAVE: (time(9, 30), time(9, 45)),
+        FunnelStage.FINAL_RANK: (time(9, 35), time(9, 45)),
+    }.get(stage, (time.max, time.min))
+    return start <= local_time < end
+
+
+def _first_missing_predecessor(
+    connection: sqlite3.Connection, trade_date: date, stage: FunnelStage
+) -> FunnelStage | None:
+    ordered = (
+        FunnelStage.FIRST_WAVE,
+        FunnelStage.SECOND_WAVE,
+        FunnelStage.FINAL_RANK,
+        FunnelStage.OPEN_CONFIRMATION,
+    )
+    day = trade_date.isoformat()
+    for predecessor in ordered[: ordered.index(stage)]:
+        row = connection.execute(
+            "SELECT status FROM funnel_runs WHERE trade_date=? AND stage=?",
+            (day, predecessor.value),
+        ).fetchone()
+        if row is None or row[0] != FunnelTickStatus.SUCCEEDED.value:
+            return predecessor
+    return None
+
+
 def _connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path, timeout=30)
@@ -359,19 +388,18 @@ def run_tick(
             stage=stage,
             now_utc=current,
         )
-        if (
-            claim_status is FunnelTickStatus.PREREQUISITE_MISSING
-            and stage is FunnelStage.SECOND_WAVE
-            and time(9, 0) <= eastern.time().replace(tzinfo=None) < time(9, 30)
-        ):
-            # Recover a missed first-wave tick before the later premarket stages.
-            stage = FunnelStage.FIRST_WAVE
-            claim_status = _claim(
-                connection,
-                trade_date=trade_date,
-                stage=stage,
-                now_utc=current,
-            )
+        if claim_status is FunnelTickStatus.PREREQUISITE_MISSING:
+            local_time = eastern.time().replace(tzinfo=None)
+            missing = _first_missing_predecessor(connection, trade_date, stage)
+            if missing is not None and _recovery_window(missing, local_time):
+                # Recover only the earliest missing stage, preserving funnel order.
+                stage = missing
+                claim_status = _claim(
+                    connection,
+                    trade_date=trade_date,
+                    stage=stage,
+                    now_utc=current,
+                )
         if claim_status is not None:
             return FunnelTickResult(claim_status, stage)
         try:

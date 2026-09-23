@@ -367,10 +367,16 @@ def _stage_observed_at(
 ) -> datetime:
     if now_utc is not None:
         observed = now_utc.astimezone(EASTERN)
+        recovery_windows = {
+            FunnelStage.FIRST_WAVE: (time(9, 0), time(9, 30)),
+            FunnelStage.SECOND_WAVE: (time(9, 30), time(9, 45)),
+            FunnelStage.FINAL_RANK: (time(9, 35), time(9, 45)),
+        }
+        recovery_window = recovery_windows.get(stage)
         if (
-            stage is FunnelStage.FIRST_WAVE
+            recovery_window is not None
             and observed.date() == trade_date
-            and time(9, 0) <= observed.time().replace(tzinfo=None) < time(9, 30)
+            and recovery_window[0] <= observed.time().replace(tzinfo=None) < recovery_window[1]
         ):
             return now_utc.astimezone(UTC)
     stage_time = {
@@ -1334,12 +1340,19 @@ def _require_selection_window(
     stage: FunnelStage, trade_date: date, *, now_utc: datetime | None = None
 ) -> None:
     eastern = (now_utc or datetime.now(UTC)).astimezone(EASTERN)
-    late_first_wave_recovery = (
-        stage is FunnelStage.FIRST_WAVE
-        and time(9, 0) <= eastern.time().replace(tzinfo=None) < time(9, 30)
+    local_time = eastern.time().replace(tzinfo=None)
+    recovery_windows = {
+        FunnelStage.FIRST_WAVE: (time(9, 0), time(9, 30)),
+        FunnelStage.SECOND_WAVE: (time(9, 30), time(9, 45)),
+        FunnelStage.FINAL_RANK: (time(9, 35), time(9, 45)),
+    }
+    recovery_window = recovery_windows.get(stage)
+    late_recovery = (
+        recovery_window is not None
+        and recovery_window[0] <= local_time < recovery_window[1]
     )
     if eastern.date() != trade_date or (
-        _stage_for(eastern.time()) is not stage and not late_first_wave_recovery
+        _stage_for(eastern.time()) is not stage and not late_recovery
     ):
         raise RuntimeError("funnel selection window is closed")
 
