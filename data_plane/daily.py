@@ -72,6 +72,7 @@ def audit_daily_bars(
     *,
     provenance: str,
     expected_date: date,
+    expected_source: str = "massive.grouped_daily",
 ) -> tuple[DataQualityCheck, ...]:
     duplicate_count = (
         frame.select(pl.struct("symbol", "trade_date").is_duplicated().sum()).item()
@@ -98,6 +99,9 @@ def audit_daily_bars(
         else 0
     )
     negative_volume = frame.filter(pl.col("volume") < 0).height if frame.height else 0
+    sources = (
+        set(frame.get_column("source").drop_nulls().unique().to_list()) if frame.height else set()
+    )
     return (
         _check(
             "non_empty",
@@ -156,11 +160,11 @@ def audit_daily_bars(
             provenance,
         ),
         _check(
-            "research_provenance_approval",
+            "source_provenance",
             QualitySeverity.CRITICAL,
-            True,
-            True,
-            "direct Massive grouped-daily SIP aggregates",
+            sources == {expected_source},
+            sorted(sources),
+            f"all rows source={expected_source}",
             provenance,
         ),
     )

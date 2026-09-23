@@ -579,6 +579,7 @@ class OutcomeReporterConfig(FrozenModel):
     approved_by: str = Field(min_length=1, max_length=128)
     approved_at_utc: datetime
     price_source: Literal["massive.grouped_daily"] = "massive.grouped_daily"
+    fallback_price_sources: tuple[Literal["alpaca.sip.daily_event_session"], ...] = ()
     adjustment: Literal["split_adjusted"] = "split_adjusted"
 
     @field_validator("approved_at_utc")

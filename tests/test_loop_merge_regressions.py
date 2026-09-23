@@ -33,11 +33,13 @@ def _no_request(method: str, path: str, payload: object) -> Any:
 
 @pytest.mark.parametrize("count", [None, 0, 2, 9])
 def test_incompatible_frozen_pool_blocks_build_and_submit_without_winner_backfill(
-    tmp_path: Path, count: int | None,
+    tmp_path: Path,
+    count: int | None,
 ) -> None:
     candidates = None if count is None else _frozen_candidates(count)
     envelope = _envelope(
-        tmp_path, fill_rows=[],
+        tmp_path,
+        fill_rows=[],
         plan_overrides={"candidates": candidates, "candidate_pool_complete": count is not None},
     )
     assert envelope.market_context["frozen_candidate_pool"]["count"] == count
@@ -90,7 +92,8 @@ def test_full_pool_adjudication_uses_frozen_verdicts_and_never_borrows_winner_re
 
 @pytest.mark.parametrize("field", ["verdict", "classification", "logging_action_probability"])
 def test_full_pool_missing_decision_evidence_is_not_repaired_from_winners(
-    tmp_path: Path, field: str,
+    tmp_path: Path,
+    field: str,
 ) -> None:
     candidates = _frozen_candidates()
     candidates[0].pop(field)
@@ -101,10 +104,14 @@ def test_full_pool_missing_decision_evidence_is_not_repaired_from_winners(
 
 
 def test_authorization_activation_does_not_rewrite_source_availability(tmp_path: Path) -> None:
-    envelope = _envelope(tmp_path, fill_rows=[], plan_overrides={
-        "effective_at_utc": "2026-09-01T13:37:00+00:00",
-        "available_at_utc": "2026-09-01T13:20:00+00:00",
-    })
+    envelope = _envelope(
+        tmp_path,
+        fill_rows=[],
+        plan_overrides={
+            "effective_at_utc": "2026-09-01T13:37:00+00:00",
+            "available_at_utc": "2026-09-01T13:20:00+00:00",
+        },
+    )
     validate_review_risk_policy_evidence(envelope)
     evidence = envelope.risk_policy["evidence"]
     assert datetime.fromisoformat(evidence["effective_at"]) == datetime(
@@ -130,15 +137,23 @@ def test_factual_fill_unknown_fees_stay_null_after_merge(tmp_path: Path) -> None
 
 @pytest.mark.parametrize("stage_only", [False, True])
 def test_outcome_sync_status_preserves_stage_only_and_idempotent_replay(
-    tmp_path: Path, stage_only: bool,
+    tmp_path: Path,
+    stage_only: bool,
 ) -> None:
     outcome = LoopOutcomeEnvelope(
-        id="synthetic-outcome", decision_event_id="synthetic-decision", source_run_id="test-run",
-        market_scope="US-equity", instrument="T00", horizon="1d", observed_at=NOW,
+        id="synthetic-outcome",
+        decision_event_id="synthetic-decision",
+        source_run_id="test-run",
+        market_scope="US-equity",
+        instrument="T00",
+        horizon="1d",
+        observed_at=NOW,
         evidence={
-            "strategy_revision_id": "test-revision", "evaluation_role": "forward",
+            "strategy_revision_id": "test-revision",
+            "evaluation_role": "forward",
             "point_in_time_guard_passed": True,
-        }, metadata={"synthetic": True},
+        },
+        metadata={"synthetic": True},
     )
     calls: list[str] = []
 
@@ -152,8 +167,12 @@ def test_outcome_sync_status_preserves_stage_only_and_idempotent_replay(
     statuses: dict[tuple[str, str, str, str], LoopOutcomeSyncStatus] = {}
     for _ in range(2):
         assert _stage_and_deliver(
-            [outcome], client=client, outbox=outbox, stage_only=stage_only,
-            observed_before=NOW, statuses=statuses,
+            [outcome],
+            client=client,
+            outbox=outbox,
+            stage_only=stage_only,
+            observed_before=NOW,
+            statuses=statuses,
         ) == (1, 0 if stage_only else 1)
         assert next(iter(statuses.values())).state == ("SYNC_PENDING" if stage_only else "OBSERVED")
     assert len(calls) == (0 if stage_only else 1)
@@ -164,15 +183,23 @@ def test_outcome_sync_status_preserves_stage_only_and_idempotent_replay(
 
 
 def test_outcome_delivery_error_survives_diagnostic_status_failure(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     outcome = LoopOutcomeEnvelope(
-        id="synthetic-outcome", decision_event_id="synthetic-decision", source_run_id="test-run",
-        market_scope="US-equity", instrument="T00", horizon="1d", observed_at=NOW,
+        id="synthetic-outcome",
+        decision_event_id="synthetic-decision",
+        source_run_id="test-run",
+        market_scope="US-equity",
+        instrument="T00",
+        horizon="1d",
+        observed_at=NOW,
         evidence={
-            "strategy_revision_id": "test-revision", "evaluation_role": "forward",
+            "strategy_revision_id": "test-revision",
+            "evaluation_role": "forward",
             "point_in_time_guard_passed": True,
-        }, metadata={"synthetic": True},
+        },
+        metadata={"synthetic": True},
     )
     calls: list[str] = []
 
@@ -187,11 +214,16 @@ def test_outcome_delivery_error_survives_diagnostic_status_failure(
     outbox = LoopOutbox(tmp_path / "outcomes.sqlite3")
     with pytest.raises(RuntimeError, match="outcome delivery failure"):
         _stage_and_deliver(
-            [outcome], client=client, outbox=outbox, stage_only=False,
-            observed_before=NOW, statuses={},
+            [outcome],
+            client=client,
+            outbox=outbox,
+            stage_only=False,
+            observed_before=NOW,
+            statuses={},
         )
     assert calls == [
-        "/api/v1/knowledge/quant/outcomes", "/api/v1/knowledge/quant/outcome-sync-statuses",
+        "/api/v1/knowledge/quant/outcomes",
+        "/api/v1/knowledge/quant/outcome-sync-statuses",
     ]
     item = outbox.get(outcome.id)
     assert item is not None and item.status == "failed"
@@ -199,39 +231,108 @@ def test_outcome_delivery_error_survives_diagnostic_status_failure(
     assert "sync-status" in caplog.text and "ValueError" in caplog.text
 
 
+def test_outcome_contract_rejection_persists_only_safe_remote_field_path(
+    tmp_path: Path,
+) -> None:
+    from operations.loop_integration.client import LoopRemoteRejectedError
+
+    outcome = LoopOutcomeEnvelope(
+        id="safe-error-outcome",
+        decision_event_id="safe-error-decision",
+        source_run_id="test-run",
+        market_scope="US-equity",
+        instrument="T00",
+        horizon="1d",
+        observed_at=NOW,
+        evidence={
+            "strategy_revision_id": "test-revision",
+            "evaluation_role": "forward",
+            "point_in_time_guard_passed": True,
+        },
+        metadata={"synthetic": True},
+    )
+
+    def request(method: str, path: str, payload: Any) -> Any:
+        if path.endswith("outcome-sync-statuses"):
+            return {"saved": len(payload["statuses"])}
+        raise LoopRemoteRejectedError(
+            "HTTP_422_TASK_INPUT_SCHEMA",
+            "rejected private-value",
+            diagnostic_code="body.schema_version.literal_error",
+        )
+
+    outbox = LoopOutbox(tmp_path / "outcomes.sqlite3")
+    with pytest.raises(LoopRemoteRejectedError):
+        _stage_and_deliver(
+            [outcome],
+            client=LoopClient(base_url="https://loop.invalid", api_key="test", request=request),
+            outbox=outbox,
+            stage_only=False,
+            observed_before=NOW,
+            statuses={},
+        )
+
+    item = outbox.get(outcome.id)
+    assert item is not None
+    assert item.last_error_code == ("HTTP_422_TASK_INPUT_SCHEMA:body.schema_version.literal_error")
+    assert "private-value" not in item.last_error_code
+
+
 def _accepted_outcome_inputs(tmp_path: Path) -> tuple[Path, OutcomeReporterConfig]:
     data_root = tmp_path / "data"
     for day, close in [(date(2026, 8, 31), 100.0), (date(2026, 9, 1), 104.0)]:
-        frame = canonicalize_daily_bars(pl.DataFrame({
-            "symbol": ["AAPL", "QQQ"], "trade_date": [day, day],
-            "provider_ts_utc": [NOW, NOW], "open": [99.0, 99.0],
-            "high": [105.0, 105.0], "low": [98.0, 98.0], "close": [close, close],
-            "volume": [1_000_000.0, 1_000_000.0], "trade_count": [10_000, 10_000],
-            "vwap": [close, close], "source": ["massive.grouped_daily"] * 2,
-            "feed": ["sip"] * 2, "adjustment": ["split_adjusted"] * 2,
-        }))
+        frame = canonicalize_daily_bars(
+            pl.DataFrame(
+                {
+                    "symbol": ["AAPL", "QQQ"],
+                    "trade_date": [day, day],
+                    "provider_ts_utc": [NOW, NOW],
+                    "open": [99.0, 99.0],
+                    "high": [105.0, 105.0],
+                    "low": [98.0, 98.0],
+                    "close": [close, close],
+                    "volume": [1_000_000.0, 1_000_000.0],
+                    "trade_count": [10_000, 10_000],
+                    "vwap": [close, close],
+                    "source": ["massive.grouped_daily"] * 2,
+                    "feed": ["sip"] * 2,
+                    "adjustment": ["split_adjusted"] * 2,
+                }
+            )
+        )
         persist_snapshot(
-            frame, root=data_root, source="massive.grouped_daily", schema_version="bars_daily.v1",
+            frame,
+            root=data_root,
+            source="massive.grouped_daily",
+            schema_version="bars_daily.v1",
             checks=audit_daily_bars(frame, provenance="test.synthetic", expected_date=day),
         )
     return data_root, OutcomeReporterConfig(
-        benchmark_symbol="QQQ", transaction_cost_bps_round_trip=10,
-        slippage_bps_round_trip=5, cost_model_version="test-cost-v1",
-        approved_by="test-owner", approved_at_utc=NOW,
+        benchmark_symbol="QQQ",
+        transaction_cost_bps_round_trip=10,
+        slippage_bps_round_trip=5,
+        cost_model_version="test-cost-v1",
+        approved_by="test-owner",
+        approved_at_utc=NOW,
     )
 
 
 def _outcome_assignment(*, event: bool, revision_id: str = "test-revision") -> dict[str, Any]:
     assignment: dict[str, Any] = {
         "decision_event_id": "test-event" if event else "test-strategy-event",
-        "source_run_id": "test-run", "market_scope": "US-equity", "instrument": "AAPL",
-        "decision_trading_date": "2026-08-31", "observed_verdict": "accept",
+        "source_run_id": "test-run",
+        "market_scope": "US-equity",
+        "instrument": "AAPL",
+        "decision_trading_date": "2026-08-31",
+        "observed_verdict": "accept",
         "outstanding_horizons": ["1d", "5d"],
     }
     if not event:
         assignment.update(
-            strategy_revision_id=revision_id, strategy_lineage_id="test-lineage",
-            target_verdict="accept", evaluation_role="forward",
+            strategy_revision_id=revision_id,
+            strategy_lineage_id="test-lineage",
+            target_verdict="accept",
+            evaluation_role="forward",
         )
     return assignment
 
@@ -239,7 +340,10 @@ def _outcome_assignment(*, event: bool, revision_id: str = "test-revision") -> d
 @pytest.mark.parametrize("failure", ["404", "timeout", "incomplete"])
 @pytest.mark.parametrize("failed_checkpoint", [1, 2])
 def test_diagnostic_failure_does_not_block_strategy_outcomes_and_can_retry(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, failure: str, failed_checkpoint: int,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    failure: str,
+    failed_checkpoint: int,
 ) -> None:
     data_root, config = _accepted_outcome_inputs(tmp_path)
     status_calls = 0
@@ -268,8 +372,12 @@ def test_diagnostic_failure_does_not_block_strategy_outcomes_and_can_retry(
     client = LoopClient(base_url="https://loop.invalid", api_key="test", request=request)
     outbox = LoopOutbox(tmp_path / "outcomes.sqlite3")
     args: dict[str, Any] = dict(
-        client=client, outbox=outbox, data_root=data_root, as_of_date=date(2026, 9, 1),
-        observed_before=datetime.now(UTC) + timedelta(seconds=1), config=config,
+        client=client,
+        outbox=outbox,
+        data_root=data_root,
+        as_of_date=date(2026, 9, 1),
+        observed_before=datetime.now(UTC) + timedelta(seconds=1),
+        config=config,
     )
     summary = sync_due_outcomes(**args)
     assert (summary.staged, summary.delivered) == (2, 2)
@@ -293,7 +401,9 @@ def test_diagnostic_failure_does_not_block_strategy_outcomes_and_can_retry(
 @pytest.mark.parametrize("revision_length", [80, 128])
 @pytest.mark.parametrize("stage_only", [True, False])
 def test_legal_long_revision_is_preserved_through_outcome_staging_and_statuses(
-    tmp_path: Path, revision_length: int, stage_only: bool,
+    tmp_path: Path,
+    revision_length: int,
+    stage_only: bool,
 ) -> None:
     data_root, config = _accepted_outcome_inputs(tmp_path)
     revision_id = "r" * revision_length
@@ -315,8 +425,11 @@ def test_legal_long_revision_is_preserved_through_outcome_staging_and_statuses(
     outbox = LoopOutbox(tmp_path / "outcomes.sqlite3")
     summary = sync_due_outcomes(
         client=LoopClient(base_url="https://loop.invalid", api_key="test", request=request),
-        outbox=outbox, data_root=data_root, as_of_date=date(2026, 9, 1),
-        observed_before=datetime.now(UTC) + timedelta(seconds=1), config=config,
+        outbox=outbox,
+        data_root=data_root,
+        as_of_date=date(2026, 9, 1),
+        observed_before=datetime.now(UTC) + timedelta(seconds=1),
+        config=config,
         stage_only=stage_only,
     )
     assert (summary.staged, summary.delivered) == (1, 0 if stage_only else 1)
