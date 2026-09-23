@@ -8,7 +8,7 @@ from pathlib import Path
 
 from operations.local_env import load_project_env
 from operations.loop_integration.client import LoopClient
-from operations.loop_integration.outbox import LoopOutbox
+from operations.loop_integration.outbox import LoopOutbox, default_loop_outbox_path
 from scripts.sync_loop_daily_review import resume_submitted_review
 
 
@@ -17,7 +17,7 @@ def main() -> int:
     load_project_env(root)
     if os.environ.get("AI_QUANT_LOOP_SYNC_ENABLED", "").lower() not in {"true", "1", "yes"}:
         return 0
-    outbox = LoopOutbox(root / "runs/loop-integration.sqlite3")
+    outbox = LoopOutbox(default_loop_outbox_path(root))
     now = datetime.now(UTC)
     due = outbox.recoverable_reviews(now=now)
     if not due:

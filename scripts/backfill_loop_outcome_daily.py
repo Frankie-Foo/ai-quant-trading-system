@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sqlite3
 from datetime import UTC, date, datetime, time, timedelta
@@ -19,6 +20,8 @@ from data_plane.providers.alpaca import fetch_daily_bars, stock_data_policy_from
 from data_plane.quality import canonicalize_bars
 from data_plane.storage import persist_snapshot
 from operations.local_env import load_project_env, project_data_root
+from operations.loop_integration.client import LoopClient
+from operations.loop_integration.contracts import OutcomeReporterConfig
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = "alpaca.sip.daily_event_session"
@@ -119,6 +122,13 @@ def _symbols_from_outbox(path: Path) -> tuple[str, ...]:
     return _parse_symbols([*symbols])
 
 
+def _symbols_from_assignments(
+    assignments: tuple[object, ...], benchmark_symbol: str
+) -> tuple[str, ...]:
+    symbols = {str(item.instrument).upper() for item in assignments}
+    return _parse_symbols([*symbols, benchmark_symbol])
+
+
 def main() -> None:
     load_project_env(ROOT)
     parser = argparse.ArgumentParser(description=__doc__)
@@ -126,11 +136,40 @@ def main() -> None:
     inputs = parser.add_mutually_exclusive_group(required=True)
     inputs.add_argument("--symbols", nargs="+")
     inputs.add_argument("--outbox", type=Path)
+    inputs.add_argument("--loop-assignments", action="store_true")
+    parser.add_argument("--config", type=Path)
     parser.add_argument("--data-root", type=Path, default=project_data_root(ROOT))
     args = parser.parse_args()
-    symbols = _parse_symbols(args.symbols) if args.symbols else _symbols_from_outbox(args.outbox)
     if build_xnys_schedule(args.trade_date, args.trade_date).height != 1:
         raise ValueError(f"{args.trade_date} is not an XNYS trading session")
+    if args.symbols:
+        symbols = _parse_symbols(args.symbols)
+    elif args.outbox:
+        symbols = _symbols_from_outbox(args.outbox)
+    else:
+        if args.config is None or not args.config.is_file():
+            raise FileNotFoundError("approved Loop outcome config is missing")
+        config = OutcomeReporterConfig.model_validate_json(
+            args.config.read_text(encoding="utf-8")
+        )
+        client = LoopClient(
+            base_url=os.environ.get("LOOP_BASE_URL", ""),
+            api_key=os.environ.get("LOOP_RUNTIME_API_KEY", ""),
+        )
+        assignments = (
+            *client.list_event_outcome_assignments(market_scope=config.market_scope),
+            *client.list_outcome_assignments(market_scope=config.market_scope),
+        )
+        if not assignments:
+            print(
+                json.dumps(
+                    {"status": "skipped", "reason": "no_outstanding_assignments"},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+            return
+        symbols = _symbols_from_assignments(assignments, config.benchmark_symbol)
     policy = stock_data_policy_from_env()
     if policy.feed != "sip":
         raise RuntimeError("outcome backfill is disabled unless Alpaca SIP is selected")

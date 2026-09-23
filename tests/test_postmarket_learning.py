@@ -427,8 +427,11 @@ def test_postmarket_outcome_sync_requires_approved_config_and_uses_safe_child(
         logger=logger,
     )
 
-    assert "scripts.sync_loop_due_outcomes" in commands[0]
+    assert "scripts.backfill_loop_outcome_daily" in commands[0]
+    assert "--loop-assignments" in commands[0]
+    assert "scripts.sync_loop_due_outcomes" in commands[1]
     assert "/secure/loop-outcome.json" in commands[0]
+    assert "/secure/loop-outcome.json" in commands[1]
     assert logger.emit.call_args.kwargs["orders_submitted"] == 0
 
 

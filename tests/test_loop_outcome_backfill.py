@@ -6,6 +6,7 @@ import polars as pl
 import pytest
 
 from scripts.backfill_loop_outcome_daily import (
+    _symbols_from_assignments,
     _symbols_from_outbox,
     normalize_alpaca_daily_bars,
 )
@@ -82,3 +83,13 @@ def test_backfill_symbols_are_derived_read_only_from_pending_outcomes(tmp_path) 
         )
 
     assert _symbols_from_outbox(path) == ("AAPL", "SPY")
+
+
+def test_backfill_symbols_include_loop_assignments_and_benchmark() -> None:
+    class Assignment:
+        def __init__(self, instrument: str):
+            self.instrument = instrument
+
+    assert _symbols_from_assignments(
+        (Assignment("AAPL"), Assignment("MSFT"), Assignment("AAPL")), "SPY"
+    ) == ("AAPL", "MSFT", "SPY")

@@ -11,7 +11,7 @@ from pathlib import Path
 from operations.local_env import load_project_env, project_data_root
 from operations.loop_integration.client import LoopClient
 from operations.loop_integration.contracts import OutcomeReporterConfig
-from operations.loop_integration.outbox import LoopOutbox
+from operations.loop_integration.outbox import LoopOutbox, default_loop_outbox_path
 from operations.loop_integration.outcome_reporter import sync_due_outcomes
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,7 +33,7 @@ def main() -> None:
     parser.add_argument(
         "--outbox",
         type=Path,
-        default=ROOT / "runs/loop-integration.sqlite3",
+        default=default_loop_outbox_path(ROOT),
     )
     parser.add_argument("--stage-only", action="store_true")
     parser.add_argument("--execution-index", type=Path)

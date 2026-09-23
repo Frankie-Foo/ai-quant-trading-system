@@ -112,11 +112,20 @@ def test_missing_daily_plan_does_not_block_historical_outcomes(
     monkeypatch.delenv("AI_QUANT_LOOP_EXECUTION_INDEX_FILE", raising=False)
     monkeypatch.delenv("AI_QUANT_LOOP_EXECUTION_INDEX_SHA256", raising=False)
     outcome_calls: list[list[str]] = []
+    backfill_calls: list[list[str]] = []
 
     def child(command: list[str], **kwargs: object) -> ChildProcessResult:
         if "scripts.prepare_loop_execution" in command:
             return ChildProcessResult(return_code=2, stdout='{"status":"blocked"}',
                                       stderr="", elapsed_ms=1)
+        if "scripts.backfill_loop_outcome_daily" in command:
+            backfill_calls.append(command)
+            return ChildProcessResult(
+                return_code=0,
+                stdout='{"status":"accepted","rows":2,"symbols_missing":[]}',
+                stderr="",
+                elapsed_ms=1,
+            )
         assert "scripts.sync_loop_due_outcomes" in command
         assert "historical-index.json" in command
         outcome_calls.append(command)
@@ -130,6 +139,8 @@ def test_missing_daily_plan_does_not_block_historical_outcomes(
         "--state-db", str(ledger.path), "--lock-file", str(tmp_path / "lock"),
     ]) == 1
     assert len(outcome_calls) == 1
+    assert len(backfill_calls) == 1
+    assert "--loop-assignments" in backfill_calls[0]
 
 
 def test_no_trade_day_submits_research_review_without_native_execution_index(

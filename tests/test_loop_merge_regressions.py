@@ -25,6 +25,7 @@ from operations.loop_integration.contracts import (
 )
 from operations.loop_integration.outbox import LoopOutbox
 from operations.loop_integration.outcome_reporter import _stage_and_deliver, sync_due_outcomes
+from operations.loop_integration.review_builder import envelope_sha256
 
 
 def _no_request(method: str, path: str, payload: object) -> Any:
@@ -252,9 +253,13 @@ def test_outcome_contract_rejection_persists_only_safe_remote_field_path(
         metadata={"synthetic": True},
     )
 
+    submit_calls = 0
+
     def request(method: str, path: str, payload: Any) -> Any:
+        nonlocal submit_calls
         if path.endswith("outcome-sync-statuses"):
             return {"saved": len(payload["statuses"])}
+        submit_calls += 1
         raise LoopRemoteRejectedError(
             "HTTP_422_TASK_INPUT_SCHEMA",
             "rejected private-value",
@@ -274,8 +279,46 @@ def test_outcome_contract_rejection_persists_only_safe_remote_field_path(
 
     item = outbox.get(outcome.id)
     assert item is not None
+    assert item.status == "remote_rejected"
     assert item.last_error_code == ("HTTP_422_TASK_INPUT_SCHEMA:body.schema_version.literal_error")
     assert "private-value" not in item.last_error_code
+
+    staged, delivered = _stage_and_deliver(
+        [outcome],
+        client=LoopClient(base_url="https://loop.invalid", api_key="test", request=request),
+        outbox=outbox,
+        stage_only=False,
+        observed_before=NOW,
+        statuses={},
+    )
+    assert (staged, delivered) == (1, 0)
+    assert submit_calls == 1
+
+    legacy = outcome.model_copy(
+        update={"id": "legacy-422-outcome", "decision_event_id": "legacy-422-decision"}
+    )
+    legacy_payload = legacy.model_dump(mode="json")
+    outbox.stage(
+        event_id=legacy.id,
+        event_type="outcome",
+        payload=legacy_payload,
+        payload_sha256=envelope_sha256(legacy_payload),
+    )
+    outbox.mark_failed(
+        legacy.id,
+        error_code="HTTP_422_TASK_INPUT_SCHEMA:body.schema_version.literal_error",
+    )
+    _stage_and_deliver(
+        [legacy],
+        client=LoopClient(base_url="https://loop.invalid", api_key="test", request=request),
+        outbox=outbox,
+        stage_only=False,
+        observed_before=NOW,
+        statuses={},
+    )
+    assert submit_calls == 1
+    migrated = outbox.get(legacy.id)
+    assert migrated is not None and migrated.status == "remote_rejected"
 
 
 def _accepted_outcome_inputs(tmp_path: Path) -> tuple[Path, OutcomeReporterConfig]:

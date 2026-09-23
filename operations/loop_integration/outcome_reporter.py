@@ -21,7 +21,7 @@ from data_plane.calendar import build_xnys_schedule
 from data_plane.contracts import DatasetSnapshot
 from data_plane.storage import sha256_file
 
-from .client import LoopClient
+from .client import LoopClient, LoopRemoteRejectedError
 from .contracts import (
     EVENT_OUTCOME_EXCESS_FORMULA,
     OUTCOME_EXCESS_FORMULA,
@@ -670,6 +670,21 @@ def _stage_and_deliver(
                 **status_args, state="OBSERVED", reason="idempotent replay"
             )
             continue
+        previous_error = item.last_error_code or ""
+        if item.status == "remote_rejected" or previous_error.startswith(
+            "HTTP_422_TASK_INPUT_SCHEMA"
+        ):
+            if item.status != "remote_rejected":
+                outbox.mark_remote_rejected(
+                    outcome.id,
+                    error_code=previous_error[:128] or "HTTP_422_TASK_INPUT_SCHEMA",
+                )
+            statuses[key] = LoopOutcomeSyncStatus(
+                **status_args,
+                state="SYNC_FAILED",
+                reason=previous_error[:128] or "HTTP_422_TASK_INPUT_SCHEMA",
+            )
+            continue
         try:
             client.submit_outcome(outcome)
         except Exception as exc:
@@ -677,7 +692,10 @@ def _stage_and_deliver(
             diagnostic_code = getattr(exc, "diagnostic_code", None)
             if diagnostic_code:
                 error_code = f"{error_code}:{diagnostic_code}"
-            outbox.mark_failed(outcome.id, error_code=error_code)
+            if isinstance(exc, LoopRemoteRejectedError):
+                outbox.mark_remote_rejected(outcome.id, error_code=error_code)
+            else:
+                outbox.mark_failed(outcome.id, error_code=error_code)
             statuses[key] = LoopOutcomeSyncStatus(
                 **status_args, state="SYNC_FAILED", reason=error_code
             )
