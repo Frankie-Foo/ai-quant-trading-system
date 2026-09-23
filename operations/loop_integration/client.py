@@ -39,6 +39,14 @@ class AuditOnlyBackfillRequired(LoopPreconditionError):
     pass
 
 
+class LoopRemoteRejectedError(RuntimeError):
+    """A definitive remote contract rejection that must not be retried unchanged."""
+
+    def __init__(self, error_code: str, message: str) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+
+
 class LoopRunFailedError(RuntimeError):
     def __init__(
         self,
@@ -131,7 +139,21 @@ class LoopClient:
             json=payload,
             timeout=self.timeout_seconds,
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if response.status_code != 422:
+                raise
+            try:
+                body = response.json()
+            except ValueError:
+                body = None
+            detail = body.get("detail") if isinstance(body, dict) else None
+            message = detail.get("message") if isinstance(detail, dict) else None
+            raise LoopRemoteRejectedError(
+                "HTTP_422_TASK_INPUT_SCHEMA",
+                str(message or "Loop rejected the submitted contract"),
+            ) from exc
         return response.json()
 
     def submit_review(
@@ -642,7 +664,7 @@ def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict
                 "market_scope": envelope.market_scope,
                 "as_of": envelope.as_of.isoformat(),
                 "available_at": envelope.as_of.isoformat(),
-                "trigger": "scheduled" if has_frozen_cohort else "post_close_research",
+                "trigger": "scheduled",
                 "trigger_evidence": {"review_event_id": envelope.event_id},
                 "source_kind": source_kind,
                 "universe": universe,

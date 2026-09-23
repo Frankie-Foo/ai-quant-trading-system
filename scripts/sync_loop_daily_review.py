@@ -14,6 +14,7 @@ from operations.loop_integration.client import (
     AuditOnlyBackfillRequired,
     LoopClient,
     LoopPreconditionError,
+    LoopRemoteRejectedError,
     LoopRunFailedError,
     LoopRunIncompleteError,
 )
@@ -163,6 +164,9 @@ def resume_submitted_review(
                            failed_node=exc.failed_node)
         outbox.mark_remote_rejected(item.event_id, error_code=exc.error_code)
         return {**receipt, "status": "remote_failed"}
+    except LoopRemoteRejectedError as exc:
+        outbox.mark_remote_rejected(item.event_id, error_code=exc.error_code)
+        return {**receipt, "status": "remote_rejected", "error_code": exc.error_code}
     except Exception as exc:
         outbox.defer_retry(item.event_id, type(exc).__name__, now=now)
         return {**receipt, "status": "retryable_failure", "error_type": type(exc).__name__}
@@ -288,6 +292,11 @@ def main() -> None:
     except LoopPreconditionError as exc:
         outbox.mark_blocked_precondition(envelope.event_id, error_code=exc.code)
         print(json.dumps({"status": "blocked_precondition", "event_id": envelope.event_id}))
+        return
+    except LoopRemoteRejectedError as exc:
+        outbox.mark_remote_rejected(envelope.event_id, error_code=exc.error_code)
+        print(json.dumps({"status": "remote_rejected", "event_id": envelope.event_id,
+                          "error_code": exc.error_code}))
         return
     except LoopRunFailedError as exc:
         outbox.mark_failed(

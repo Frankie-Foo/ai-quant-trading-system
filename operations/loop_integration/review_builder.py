@@ -30,6 +30,8 @@ from .execution_summary import (
     unavailable_execution,
 )
 
+_AUDIT_ONLY_REQUIRED_POSITIVE_PCT = 0.000001
+
 
 def _finite(value: object) -> float | None:
     if value is None or isinstance(value, bool):
@@ -174,10 +176,39 @@ def build_review_envelope(
     if not isinstance(cutoff, datetime) or cutoff.tzinfo is None:
         raise ValueError("selection cutoff must be timezone-aware")
     as_of = opportunity_snapshot.asof_utc
+    unavailable_reason = "effective_modern_plan_not_supplied"
+    unavailable_marker = f"unavailable:{unavailable_reason}"
     risk_policy: dict[str, Any] = {
         "status": "unavailable",
-        "reason": "effective_modern_plan_not_supplied",
+        "reason": unavailable_reason,
         "submission_allowed": False,
+        # Workflow v6 requires concrete risk objects.  These are the zero-order
+        # bounds of an audit-only Task, not reconstructed historical settings.
+        "position_limits": {
+            "max_concurrent": 0,
+            "risk_per_trade_fraction": 0.0,
+            "max_gross_exposure_fraction": 0.0,
+        },
+        "stop_loss": {
+            "type": "not_applicable",
+            "reference": "orders_forbidden",
+            # Workflow v6 requires a value > 0 even when orders are forbidden.
+            # This schema sentinel is not an observed or executable stop level.
+            "threshold_pct": _AUDIT_ONLY_REQUIRED_POSITIVE_PCT,
+        },
+        "risk_budget": {"daily_loss_limit_fraction": 0.0},
+        "exit_conditions": [unavailable_marker],
+        "reentry_conditions": [unavailable_marker],
+        "blocking_conditions": ["risk_policy_unavailable"],
+        "liquidity_constraints": {"participation_cap": 0.0},
+        "invalidation_conditions": ["risk_policy_unavailable"],
+        "evidence": {
+            "status": "unavailable",
+            "reason": unavailable_reason,
+            "source": "ai-quant-trading-system:missing_effective_plan",
+            "effective_at": as_of.isoformat(),
+            "available_at": as_of.isoformat(),
+        },
     }
     frozen_pool: dict[str, Any] = {
         "status": "unavailable", "count": None, "candidates": None,
@@ -368,7 +399,7 @@ def build_review_envelope(
     return QuantReviewEnvelope(
         event_id=(
             f"quant-review:{market_scope}:{trade_date.isoformat()}:"
-            f"{strategy_id}:{active_policy.policy_hash[:16]}:evidence-v2:"
+            f"{strategy_id}:{active_policy.policy_hash[:16]}:evidence-v3:"
             f"{(effective_plan_sha256 or 'unavailable')[:16]}"
             f":{(fill_evidence_sha256 or 'unavailable')[:16]}"
             f":{(review_context_sha256 or 'none')[:16]}"
