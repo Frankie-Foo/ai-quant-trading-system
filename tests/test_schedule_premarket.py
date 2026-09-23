@@ -76,6 +76,7 @@ def test_shadow_failure_does_not_invalidate_primary_selection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(FeishuBaseEventClient, "from_environment", lambda *_: None)
     target = date(2026, 7, 22)
     now = datetime(2026, 7, 22, 13, 0, tzinfo=UTC)
     state_db = tmp_path / "jobs.sqlite3"

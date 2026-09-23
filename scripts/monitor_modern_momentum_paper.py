@@ -39,6 +39,7 @@ from operations.paper_run_evidence import capture_startup
 from operations.paper_runtime_policy import PaperRuntimePolicy
 from operations.paper_state import OutboxClaim, PaperStateStore, read_prior_day_states
 from operations.runtime_alerts import RuntimeAlertManager, bounded_retry
+from operations.vps_investment_base import VpsInvestmentClient
 from research.h30_challenger import _five_minute_bars
 from research.modern_momentum import (
     ModernMomentumConfig,
@@ -643,6 +644,7 @@ def _record_fill(
     direction: str,
     order: BrokerOrder,
     reason: str,
+    observed_at: datetime | None = None,
 ) -> str | None:
     if base is None or order.filled_avg_price is None:
         return None
@@ -653,7 +655,7 @@ def _record_fill(
         f"paper:{client_order_id}:filled:{order.filled_qty}",
         {
             "运行ID": f"paper:{client_order_id}:filled:{order.filled_qty}",
-            "成交时间": order.filled_at or datetime.now(UTC),
+            "成交时间": order.filled_at or observed_at,
             "股票代码": symbol,
             "股票名称": symbol,
             "方向": direction,
@@ -800,6 +802,42 @@ def publish_fill_observations(
                     events.append(event)
             if base is None:
                 continue
+            observed_at = datetime.fromisoformat(str(snapshot["observed_at_utc"]))
+            if observed_at.tzinfo is None:
+                raise RuntimeError("fill observation time must be timezone-aware")
+            # A separate projection: a failed trade write must not erase the monitor transition.
+            monitor_key = f"monitor:{key}"
+            store.enqueue_outbox(
+                event_key=monitor_key, event_type="monitor_fill",
+                payload={"order_id": order.id, "cumulative_filled_qty": order.filled_qty},
+                observed_at_utc=observed_at,
+            )
+            monitor_claim = store.claim_outbox(monitor_key, observed_at_utc=datetime.now(UTC))
+            if monitor_claim is not OutboxClaim.SENT:
+                try:
+                    if monitor_claim is OutboxClaim.IN_FLIGHT and not isinstance(
+                        base, VpsInvestmentClient
+                    ):
+                        raise RuntimeError("monitor projection requires receipt reconciliation")
+                    receipt = base.record_event(InvestmentTable.MONITOR, monitor_key, {
+                        "运行ID": monitor_key, "触发时间": order.filled_at or observed_at,
+                        "股票代码": symbol, "触发类型": "券商成交确认",
+                        "模拟动作": direction,
+                        "执行结果": "已成交" if _filled(order) else "部分成交",
+                        "触发价格": order.filled_avg_price,
+                        "模拟数量": int(Decimal(order.filled_qty)),
+                        "执行摘要": f"{reason}；方向={direction}；订单={order.id}",
+                        "数据源状态": "alpaca.paper.direct|production=false",
+                        "下一动作": "继续对账、执行保护退出；不依据记录表下单",
+                    })
+                    store.mark_outbox_sent(
+                        monitor_key, message_id=receipt, observed_at_utc=datetime.now(UTC)
+                    )
+                except Exception as exc:
+                    event = {"type": "monitor_write_failed", "symbol": symbol,
+                             "event_key": str(key), "error_type": type(exc).__name__}
+                    if event not in events:
+                        events.append(event)
             # Delivery state lives in the outbox, never overwrite trading state
             # from a stale snapshot while the reconciliation thread is advancing it.
             base_key = f"feishu:{key}"
@@ -813,7 +851,7 @@ def publish_fill_observations(
             if claim is OutboxClaim.SENT:
                 continue
             try:
-                if claim is OutboxClaim.IN_FLIGHT:
+                if claim is OutboxClaim.IN_FLIGHT and not isinstance(base, VpsInvestmentClient):
                     raise RuntimeError("Feishu fill delivery is ambiguous; reconcile receipt")
                 record_id = _record_fill(
                     base,
@@ -822,6 +860,7 @@ def publish_fill_observations(
                     direction=direction,
                     order=order,
                     reason=reason,
+                    observed_at=observed_at,
                 )
                 if not record_id:
                     raise RuntimeError("Feishu fill delivery has no record ID")
@@ -837,6 +876,40 @@ def publish_fill_observations(
                 }
                 if event not in events:
                     events.append(event)
+
+
+def publish_monitor_transitions(
+    store: PaperStateStore, base: FeishuBaseEventClient | None,
+    events: list[dict[str, object]],
+) -> None:
+    if base is None:
+        return
+    phases = {"observing": "观察中", "blocked": "禁止开仓", "entry_pending": "入场意图已记录",
+              "active": "持仓保护中", "exit_pending": "退出处理中", "complete": "本次持仓流程结束"}
+    for key, payload in store.pending_monitor_transitions():
+        try:
+            claim = store.claim_outbox(key, observed_at_utc=datetime.now(UTC))
+            if claim is OutboxClaim.SENT:
+                continue
+            if claim is OutboxClaim.IN_FLIGHT and not isinstance(base, VpsInvestmentClient):
+                raise RuntimeError("monitor transition requires receipt reconciliation")
+            phase = phases.get(str(payload["phase"]), "状态变化")
+            receipt = base.record_event(InvestmentTable.MONITOR, key, {
+                "运行ID": key, "股票代码": payload["symbol"],
+                "触发时间": datetime.fromisoformat(str(payload["observed_at_utc"])),
+                "触发类型": "策略状态变化", "执行结果": phase,
+                "执行摘要": f"{phase}；{payload.get('reason') or payload.get('exit_reason') or ''}",
+                "状态证据": payload,
+                "数据源状态": "modern_h15_paper_state|production=false",
+                "下一动作": "按预案继续观察或保护退出；状态记录不代表成交",
+            })
+            store.mark_outbox_sent(key, message_id=receipt, observed_at_utc=datetime.now(UTC))
+        except Exception as exc:
+            store.defer_monitor_transition(key, now=datetime.now(UTC))
+            event: dict[str, object] = {"type": "monitor_transition_write_failed", "event_key": key,
+                     "error_type": type(exc).__name__}
+            if event not in events:
+                events.append(event)
 
 
 class NotificationPump:
@@ -870,6 +943,7 @@ class NotificationPump:
             events=events,
             message_ids=messages,
         )
+        publish_monitor_transitions(self.store, self.base, events)
         return events, messages
 
     def _collect(self, events: list[dict[str, object]], messages: list[str]) -> None:
@@ -1327,6 +1401,15 @@ def main() -> None:
     alerts = RuntimeAlertManager(run_dir / "runtime-alerts.sqlite3", push=push, defer_delivery=True)
     base = FeishuBaseEventClient.from_environment()
     notifications = NotificationPump(store, push, base, alerts, args.trade_date)
+    for symbol in symbols:
+        store.observe_monitor_transition(
+            trade_date=args.trade_date, symbol=symbol,
+            phase="observing" if strategy_matches else "blocked",
+            reason=(
+                "预案已载入，等待完整量价确认" if strategy_matches else "策略版本不匹配，禁止开仓"
+            ),
+            observed_at_utc=datetime.now(UTC),
+        )
     try:
         while datetime.now(UTC) < market_close:
             try:
@@ -1754,6 +1837,12 @@ def main() -> None:
                         "last_complete_minute_utc": complete_minute,
                     }
                 )
+                for candidate_symbol, block in candidate_blocks.items():
+                    store.observe_monitor_transition(
+                        trade_date=args.trade_date, symbol=candidate_symbol, phase="blocked",
+                        reason=str(block.get("code") or "入场条件未通过"),
+                        observed_at_utc=datetime.now(UTC),
+                    )
                 _save(state_path, state)
                 try:
                     alerts.report_recovery(

@@ -13,8 +13,10 @@ import shutil
 import sqlite3
 import subprocess
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import closing
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -39,9 +41,21 @@ def _create_intents(connection: sqlite3.Connection) -> None:
     )""")
 
 
+def _create_projection_queue(connection: sqlite3.Connection) -> None:
+    connection.execute("""CREATE TABLE vps_projection_queue (
+        identity TEXT PRIMARY KEY, doc_id TEXT NOT NULL, table_name TEXT NOT NULL,
+        table_id TEXT NOT NULL, event_id TEXT NOT NULL, payload TEXT NOT NULL,
+        record_id TEXT, last_attempt TEXT NOT NULL DEFAULT '', last_error TEXT
+    )""")
+
+
 INTENT_MIGRATIONS = (
     SQLiteMigration(
         version=1, name="vps_event_intents", signature="vps_event_intents.v1", apply=_create_intents
+    ),
+    SQLiteMigration(
+        version=2, name="vps_projection_queue", signature="vps_projection_queue.v1",
+        apply=_create_projection_queue,
     ),
 )
 
@@ -117,6 +131,60 @@ class VpsInvestmentClient(FeishuBaseEventClient):
         self._vps_runner = runner
         self._vps_command = command
         self._sleep = sleep
+
+    def queue_events(
+        self, events: Sequence[tuple[InvestmentTable, str, Mapping[str, object]]]
+    ) -> None:
+        """Freeze the whole batch before any network I/O, including not-yet-attempted rows."""
+        self.vps.state_db.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(self.vps.state_db, timeout=30)) as connection:
+            apply_sqlite_migrations(
+                connection, owner="operations.vps_event_intents", migrations=INTENT_MIGRATIONS
+            )
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                for table, event_id, fields in events:
+                    event_id, payload = self._payload(table, event_id, fields)
+                    table_id = self.vps.tables[table.value]["table_id"]
+                    identity = f"{self.vps.doc_id}:{table_id}:{event_id}"
+                    previous = connection.execute(
+                        "SELECT payload FROM vps_projection_queue WHERE identity=?", (identity,)
+                    ).fetchone()
+                    if previous is not None and previous[0] != payload:
+                        raise FeishuBaseError("VPS queued immutable payload conflict")
+                    connection.execute(
+                        "INSERT OR IGNORE INTO vps_projection_queue "
+                        "(identity,doc_id,table_name,table_id,event_id,payload) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (identity, self.vps.doc_id, table.value, table_id, event_id, payload),
+                    )
+
+    def flush_pending(self, *, limit: int = 10) -> dict[str, int]:
+        self.queue_events([])
+        with closing(sqlite3.connect(self.vps.state_db, timeout=30)) as connection:
+            rows = connection.execute(
+                "SELECT identity,table_name,table_id,event_id,payload FROM vps_projection_queue "
+                "WHERE doc_id=? AND record_id IS NULL ORDER BY last_attempt,identity LIMIT ?",
+                (self.vps.doc_id, limit),
+            ).fetchall()
+        result = {"delivered": 0, "failed": 0}
+        for identity, table_name, table_id, event_id, payload in rows:
+            error = None
+            try:
+                if self.vps.tables[table_name]["table_id"] != table_id:
+                    raise FeishuBaseError("VPS queued destination changed")
+                self.record_event(InvestmentTable(table_name), event_id, json.loads(payload))
+                result["delivered"] += 1
+            except (FeishuBaseError, ValueError, OSError) as exc:
+                error = type(exc).__name__  # no credentials or raw CLI output in audit
+                result["failed"] += 1
+            with closing(sqlite3.connect(self.vps.state_db, timeout=30)) as connection:
+                with connection:
+                    connection.execute(
+                        "UPDATE vps_projection_queue SET last_attempt=?,last_error=? "
+                        "WHERE identity=?", (datetime.now(UTC).isoformat(), error, identity),
+                    )
+        return result
 
     def _call(self, arguments: tuple[str, ...], stdin: str | None = None) -> dict[str, Any]:
         args = ("docs", *arguments, "--doc-id", self.vps.doc_id, "--base-url", SERVICE_URL)
@@ -229,12 +297,12 @@ class VpsInvestmentClient(FeishuBaseEventClient):
             raise FeishuBaseError("VPS duplicate immutable event")
         return found[0] if found else None
 
-    def record_event(
-        self,
+    @staticmethod
+    def _payload(
         table: InvestmentTable,
         event_id: str,
         fields: Mapping[str, object],
-    ) -> str:
+    ) -> tuple[str, str]:
         if not isinstance(table, InvestmentTable) or not event_id.strip() or len(event_id) > 1000:
             raise ValueError("VPS investment event identity is invalid")
         event_id = event_id.strip()
@@ -249,6 +317,14 @@ class VpsInvestmentClient(FeishuBaseEventClient):
             or payload.encode("utf-8").decode("utf-8") != payload
         ):
             raise ValueError("VPS investment text encoding is invalid")
+        return event_id, payload
+
+    def record_event(
+        self, table: InvestmentTable, event_id: str, fields: Mapping[str, object]
+    ) -> str:
+        event_id, payload = self._payload(table, event_id, fields)
+        self.queue_events([(table, event_id, fields)])
+        normalized = json.loads(payload)
         entry = self.vps.tables[table.value]
         remote_fields = {
             entry["event_id"]: event_id,
@@ -311,6 +387,10 @@ class VpsInvestmentClient(FeishuBaseEventClient):
                     "INSERT INTO vps_event_intents(identity,payload,record_id) VALUES (?,?,?) "
                     "ON CONFLICT(identity) DO UPDATE SET record_id=excluded.record_id",
                     (identity, payload, record_id),
+                )
+                connection.execute(
+                    "UPDATE vps_projection_queue SET record_id=?,last_error=NULL WHERE identity=?",
+                    (record_id, identity),
                 )
                 connection.commit()
                 return f"vps-work:{self.vps.doc_id}:{entry['table_id']}:{record_id}"

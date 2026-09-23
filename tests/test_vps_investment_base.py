@@ -86,6 +86,39 @@ def test_factory_uses_vps_without_reading_feishu(tmp_path: Path) -> None:
         FeishuBaseEventClient.from_environment({"AI_QUANT_INVESTMENT_PROVIDER": "typo"})
 
 
+def test_missing_provider_never_falls_back_to_legacy() -> None:
+    with pytest.raises(ValueError, match="explicitly"):
+        FeishuBaseEventClient.from_environment({"FEISHU_BASE_TOKEN": "disconnected"})
+
+
+def test_queued_batch_survives_restart_and_read_failure(tmp_path: Path) -> None:
+    settings, _ = binding(tmp_path)
+    runner = Runner(settings)
+    client = VpsInvestmentClient(settings, runner=runner, sleep=lambda _: None)
+    fields = {"执行摘要": "冻结的原始事件"}
+    client.queue_events([(InvestmentTable.SELECTION, "event1", fields)])
+    runner.total_override = 201
+    assert client.flush_pending() == {"delivered": 0, "failed": 1}
+    runner.total_override = None
+    restarted = VpsInvestmentClient(settings, runner=runner, sleep=lambda _: None)
+    assert restarted.flush_pending() == {"delivered": 1, "failed": 0}
+    assert restarted.flush_pending() == {"delivered": 0, "failed": 0}
+    assert runner.writes == 1
+    with pytest.raises(FeishuBaseError, match="conflict"):
+        restarted.queue_events([(InvestmentTable.SELECTION, "event1", {"changed": True})])
+
+
+def test_queue_recovery_does_not_blindly_repeat_ambiguous_append(tmp_path: Path) -> None:
+    settings, _ = binding(tmp_path)
+    runner = Runner(settings)
+    runner.timeout, runner.persist = True, False
+    client = VpsInvestmentClient(settings, runner=runner, sleep=lambda _: None)
+    client.queue_events([(InvestmentTable.MONITOR, "event1", {"执行摘要": "测试"})])
+    assert client.flush_pending()["failed"] == 1
+    assert client.flush_pending()["failed"] == 1
+    assert runner.writes == 1
+
+
 def test_binding_rejects_changed_file_and_reused_tables(tmp_path: Path) -> None:
     _, env = binding(tmp_path)
     path = Path(env["VPS_INVESTMENT_BINDING_FILE"])

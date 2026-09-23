@@ -2548,3 +2548,28 @@ Status: offline implementation and verification; no production activation.
   are untouched. Independent review tooling is unavailable in this task; main
   agent owns independent review, final integrated checks and the merge commit.
   These fixtures are not production-data or remote acceptance evidence.
+
+## M96 2026-09-23 durable recovery and release hardening
+
+- Investment projections are frozen locally before remote writes. Normal Paper
+  journals and emergency `paper-recovery` journals are both retried without
+  constructing a broker or notification client; duplicate delivery remains
+  idempotent across restarts.
+- Paper monitor transitions now use an atomic cursor/outbox, preserve A/B/A state
+  changes, rotate failed batches to avoid starvation and recover entry, position,
+  exit and broker-fill states without creating orders. Each journal persists a
+  stable source identity, so normal and emergency recovery events cannot collide.
+- Loop daily review now checkpoints Task and Run receipts before later work,
+  prevents same-date concurrent submissions, polls the documented Task status
+  endpoint and never retries an uncertain POST. Terminal local state cannot be
+  regressed by a stale poll.
+- Missing investment-provider configuration fails closed instead of falling back
+  to the retired Feishu path. Scheduled funnel and postmarket wrappers drain the
+  durable investment and Loop queues before their normal work.
+- Final pre-release verification: Ruff passed; strict mypy passed for 525 source
+  files; the full pytest suite passed **1352 tests**; Paper acceptance drills
+  passed clock, kill-switch, forced flatten, intent recovery, idempotency,
+  duplicate-process, fault-escalation and unknown-state-freeze checks with zero
+  broker calls and zero external writes. A separate regression covers both Paper
+  journal roots. Outcome synchronization remains disabled until its approved cost
+  model configuration exists; no policy, risk threshold or trading rule changed.

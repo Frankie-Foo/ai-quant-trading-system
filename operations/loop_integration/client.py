@@ -26,6 +26,7 @@ from .control_plane import (
 )
 
 JsonRequest = Callable[[str, str, dict[str, Any] | None], Any]
+SubmissionCheckpoint = Callable[[str, str | None, str | None], None]
 
 
 class LoopPreconditionError(RuntimeError):
@@ -55,7 +56,9 @@ class LoopRunFailedError(RuntimeError):
 
 
 class LoopRunIncompleteError(RuntimeError):
-    pass
+    def __init__(self, *, task_id: str, run_id: str, status: str) -> None:
+        super().__init__(f"Loop Run {run_id} returned non-terminal status {status or 'UNKNOWN'}")
+        self.task_id, self.run_id = task_id, run_id
 
 
 def validate_review_risk_policy_evidence(envelope: QuantReviewEnvelope) -> None:
@@ -131,7 +134,10 @@ class LoopClient:
         response.raise_for_status()
         return response.json()
 
-    def submit_review(self, envelope: QuantReviewEnvelope, binding: LoopBinding) -> tuple[str, str]:
+    def submit_review(
+        self, envelope: QuantReviewEnvelope, binding: LoopBinding,
+        *, checkpoint: SubmissionCheckpoint | None = None,
+    ) -> tuple[str, str]:
         # A daily review never authorizes broker orders.  It may therefore be
         # submitted as factual research even when there was no executable plan
         # or no broker reconciliation to attach.  Do not turn that absence into
@@ -162,14 +168,46 @@ class LoopClient:
             item for item in contracts if item.artifact_type == "signal_contract"
         )
         validate_loop_task_signal_contract(task_payload, signal_contract)
+        if checkpoint:
+            checkpoint("creating_task", None, None)
         task = self._request("POST", "/api/v1/tasks", task_payload)
         if not isinstance(task, dict) or not str(task.get("id") or ""):
             raise RuntimeError("Loop create-task response lacks task id")
         task_id = str(task["id"])
+        if checkpoint:
+            checkpoint("task_created", task_id, None)
+        return self.start_review_run(task_id=task_id, checkpoint=checkpoint)
+
+    def start_review_run(
+        self, *, task_id: str, checkpoint: SubmissionCheckpoint | None = None,
+    ) -> tuple[str, str]:
+        if checkpoint:
+            checkpoint("starting_run", task_id, None)
         run = self._request("POST", f"/api/v1/tasks/{task_id}/run", {"approve": False})
         if not isinstance(run, dict) or not str(run.get("id") or ""):
             raise RuntimeError("Loop run response lacks run id")
         run_id = str(run["id"])
+        if checkpoint:
+            checkpoint("remote_processing", task_id, run_id)
+        return self._review_result(run, task_id=task_id, run_id=run_id)
+
+    def get_review_run(self, *, task_id: str, run_id: str) -> tuple[str, str]:
+        # Public runtime credentials expose task status, while run IDs remain immutable receipts.
+        # A timeout must never cause another POST.
+        task = self._request("GET", f"/api/v1/tasks/{task_id}")
+        if not isinstance(task, dict) or task.get("id") != task_id:
+            raise RuntimeError("Loop task receipt identity mismatch")
+        status = str(task.get("status") or "").upper()
+        if status == "COMPLETED":
+            return task_id, run_id
+        if status == "FAILED":
+            raise LoopRunFailedError(
+                task_id=task_id, run_id=run_id, failed_node="", error_code="LOOP_TASK_FAILED"
+            )
+        raise LoopRunIncompleteError(task_id=task_id, run_id=run_id, status=status)
+
+    @staticmethod
+    def _review_result(run: dict[str, Any], *, task_id: str, run_id: str) -> tuple[str, str]:
         status = str(run.get("status") or "").upper()
         if status == "COMPLETED":
             return task_id, run_id
@@ -182,7 +220,7 @@ class LoopClient:
                 error_code=error_code,
             )
         raise LoopRunIncompleteError(
-            f"Loop Run {run_id} returned non-terminal status {status or 'UNKNOWN'}"
+            task_id=task_id, run_id=run_id, status=status,
         )
 
     def initialize_control_plane(self, manifest: LoopControlPlaneManifest) -> LoopBinding:

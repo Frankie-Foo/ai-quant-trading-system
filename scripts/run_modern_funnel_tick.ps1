@@ -42,7 +42,17 @@ $funnelExit = $LASTEXITCODE
     1>> (Join-Path $runs "modern_funnel_scheduler.out.log") `
     2>> (Join-Path $runs "modern_funnel_scheduler.err.log")
 $summaryExit = $LASTEXITCODE
+& $python -m scripts.sync_investment_records `
+    1>> (Join-Path $runs "modern_funnel_scheduler.out.log") `
+    2>> (Join-Path $runs "modern_funnel_scheduler.err.log")
+$projectionExit = $LASTEXITCODE
+& $python -m scripts.resume_loop_reviews `
+    1>> (Join-Path $runs "modern_funnel_scheduler.out.log") `
+    2>> (Join-Path $runs "modern_funnel_scheduler.err.log")
+$loopExit = $LASTEXITCODE
 if ($funnelExit -ne 0) {
     exit $funnelExit
 }
-exit $summaryExit
+if ($summaryExit -ne 0) { exit $summaryExit }
+if ($projectionExit -ne 0) { exit $projectionExit }
+exit $loopExit

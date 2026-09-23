@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -20,6 +20,8 @@ class OutboxItem:
     remote_run_id: str | None
     failed_node: str | None
     last_error_code: str | None
+    retry_after_utc: str | None = None
+    retry_count: int = 0
 
 
 class LoopOutbox:
@@ -49,6 +51,12 @@ class LoopOutbox:
             }
             if "failed_node" not in columns:
                 connection.execute("ALTER TABLE loop_outbox ADD COLUMN failed_node TEXT")
+            if "retry_after_utc" not in columns:
+                connection.execute("ALTER TABLE loop_outbox ADD COLUMN retry_after_utc TEXT")
+            if "retry_count" not in columns:
+                connection.execute(
+                    "ALTER TABLE loop_outbox ADD COLUMN retry_count INTEGER DEFAULT 0"
+                )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
@@ -108,6 +116,93 @@ class LoopOutbox:
                 "SELECT * FROM loop_outbox WHERE event_id=?", (event_id,)
             ).fetchone()
         return None if row is None else self._item(row)
+
+    def submitted_review(self, trade_date: date) -> OutboxItem | None:
+        """Find existing daily work before loading current policy, snapshots or contracts."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM loop_outbox WHERE event_type='daily_review' "
+                "AND json_extract(payload_json,'$.trading_date')=? "
+                "AND (remote_task_id IS NOT NULL OR status IN ('creating_task','starting_run')) "
+                "ORDER BY created_at_utc DESC LIMIT 1", (trade_date.isoformat(),),
+            ).fetchone()
+        return None if row is None else self._item(row)
+
+    def defer_retry(self, event_id: str, error_code: str, *, now: datetime) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT retry_count,status FROM loop_outbox WHERE event_id=?", (event_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(event_id)
+            if row[1] in {"delivered", "remote_completed", "remote_rejected"}:
+                return
+            count = int(row[0])
+            due = now + timedelta(minutes=(1, 5, 15, 60)[min(count, 3)])
+            connection.execute(
+                "UPDATE loop_outbox SET retry_count=retry_count+1,retry_after_utc=?,"
+                "last_error_code=?,updated_at_utc=? WHERE event_id=?",
+                (due.isoformat(), error_code[:128], now.isoformat(), event_id),
+            )
+
+    def recoverable_reviews(self, *, now: datetime, limit: int = 5) -> tuple[OutboxItem, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM loop_outbox WHERE event_type='daily_review' "
+                "AND remote_task_id IS NOT NULL AND status IN ('remote_processing','task_created',"
+                "'failed') AND (retry_after_utc IS NULL OR retry_after_utc<=?) "
+                "ORDER BY COALESCE(retry_after_utc,created_at_utc) LIMIT ?",
+                (now.isoformat(), limit),
+            ).fetchall()
+        return tuple(self._item(row) for row in rows)
+
+    def mark_remote_rejected(self, event_id: str, *, error_code: str) -> None:
+        self._finish(event_id, status="remote_rejected", error_code=error_code,
+                     remote_task_id=None, remote_run_id=None)
+
+    def checkpoint(
+        self, event_id: str, status: str, task_id: str | None, run_id: str | None,
+    ) -> None:
+        """Durable compare-and-set before either remote POST; no duplicate concurrent submit."""
+        predecessors = {
+            "creating_task": ("pending", "failed", "blocked_precondition", "audit_only_backfill"),
+            "task_created": ("creating_task",),
+            "starting_run": ("task_created",),
+            "remote_processing": ("starting_run",),
+        }
+        allowed = predecessors[status]
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if status == "creating_task":
+                conflict = connection.execute(
+                    "SELECT 1 FROM loop_outbox WHERE event_id!=? AND event_type='daily_review' "
+                    "AND json_extract(payload_json,'$.trading_date')=(SELECT "
+                    "json_extract(payload_json,'$.trading_date') FROM loop_outbox "
+                    "WHERE event_id=?) AND (remote_task_id IS NOT NULL "
+                    "OR status IN ('creating_task','starting_run'))",
+                    (event_id, event_id),
+                ).fetchone()
+                if conflict:
+                    raise RuntimeError("Loop daily review already claimed with different evidence")
+            cursor = connection.execute(
+                "UPDATE loop_outbox SET status=?,remote_task_id=?,remote_run_id=?,"
+                "attempts=attempts+1,updated_at_utc=?,last_error_code=NULL "
+                f"WHERE event_id=? AND status IN ({','.join('?' for _ in allowed)}) "
+                "AND remote_run_id IS NULL "
+                + ("AND remote_task_id IS NULL" if status == "creating_task" else ""),
+                (status, task_id, run_id, datetime.now(UTC).isoformat(), event_id, *allowed),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("Loop submission already claimed; reconcile original receipt")
+
+    def record_error(self, event_id: str, error_code: str) -> None:
+        """Keep remote/ambiguous state intact so retry cannot create a new task."""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE loop_outbox SET last_error_code=?,updated_at_utc=? WHERE event_id=?",
+                (error_code[:128], datetime.now(UTC).isoformat(), event_id),
+            )
 
     def mark_delivered(
         self,
@@ -179,24 +274,21 @@ class LoopOutbox:
         )
 
     def mark_blocked_precondition(self, event_id: str, *, error_code: str) -> None:
-        self._finish(
-            event_id,
-            status="blocked_precondition",
-            error_code=error_code[:128],
-            remote_task_id=None,
-            remote_run_id=None,
-            failed_node=None,
-        )
+        self._mark_local_block(event_id, "blocked_precondition", error_code)
 
     def mark_audit_only_backfill(self, event_id: str, *, error_code: str) -> None:
-        self._finish(
-            event_id,
-            status="audit_only_backfill",
-            error_code=error_code[:128],
-            remote_task_id=None,
-            remote_run_id=None,
-            failed_node=None,
-        )
+        self._mark_local_block(event_id, "audit_only_backfill", error_code)
+
+    def _mark_local_block(self, event_id: str, status: str, error: str) -> None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE loop_outbox SET status=?,last_error_code=?,updated_at_utc=? "
+                "WHERE event_id=? AND remote_task_id IS NULL AND remote_run_id IS NULL "
+                "AND status IN ('pending','failed','blocked_precondition','audit_only_backfill')",
+                (status, error[:128], datetime.now(UTC).isoformat(), event_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("cannot replace a claimed Loop submission with local rejection")
 
     def _finish(
         self,
@@ -215,6 +307,9 @@ class LoopOutbox:
                 SET status=?, attempts=attempts+1, remote_task_id=COALESCE(?, remote_task_id),
                     remote_run_id=COALESCE(?, remote_run_id), failed_node=?, last_error_code=?,
                     updated_at_utc=? WHERE event_id=?
+                    AND status NOT IN ('delivered','remote_completed','remote_rejected')
+                    AND (? IS NULL OR remote_task_id IS NULL OR remote_task_id=?)
+                    AND (? IS NULL OR remote_run_id IS NULL OR remote_run_id=?)
                 """,
                 (
                     status,
@@ -224,10 +319,17 @@ class LoopOutbox:
                     error_code,
                     datetime.now(UTC).isoformat(),
                     event_id,
+                    remote_task_id, remote_task_id, remote_run_id, remote_run_id,
                 ),
             )
             if cursor.rowcount != 1:
-                raise KeyError(event_id)
+                row = connection.execute(
+                    "SELECT status FROM loop_outbox WHERE event_id=?", (event_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(event_id)
+                if row[0] not in {"delivered", "remote_completed", "remote_rejected"}:
+                    raise RuntimeError("Loop remote receipt identity changed")
 
     @staticmethod
     def _item(row: sqlite3.Row) -> OutboxItem:
@@ -247,4 +349,6 @@ class LoopOutbox:
             last_error_code=(
                 None if row["last_error_code"] is None else str(row["last_error_code"])
             ),
+            retry_after_utc=row["retry_after_utc"],
+            retry_count=int(row["retry_count"] or 0),
         )

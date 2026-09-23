@@ -25,4 +25,9 @@ $env:AI_QUANT_PAPER_RUNTIME_CONFIRMED = "false"
 & $python -m schedule.postmarket `
     1>> (Join-Path $runs "postmarket_scheduler.out.log") `
     2>> (Join-Path $runs "postmarket_scheduler.err.log")
+$reviewExit = $LASTEXITCODE
+& $python -m scripts.sync_investment_records `
+    1>> (Join-Path $runs "postmarket_scheduler.out.log") `
+    2>> (Join-Path $runs "postmarket_scheduler.err.log")
+if ($reviewExit -ne 0) { exit $reviewExit }
 exit $LASTEXITCODE
