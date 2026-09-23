@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import time
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -47,6 +48,15 @@ class PriorDayPaperState:
     path: Path
     states: dict[str, dict[str, object]]
     orders: tuple[StoredPaperOrder, ...]
+
+
+def _paper_store_source(path: Path) -> str:
+    parts = {part.casefold() for part in path.resolve().parts}
+    for source in ("modern-momentum", "paper-recovery"):
+        if source in parts:
+            return source
+    digest = hashlib.sha256(str(path.resolve()).casefold().encode()).hexdigest()[:16]
+    return f"paper-store-{digest}"
 
 
 def discover_prior_day_stores(root: Path, *, trade_date: date) -> tuple[Path, ...]:
@@ -142,14 +152,44 @@ class PaperStateStore:
                     lease_until_utc TEXT NOT NULL,
                     updated_at_utc TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS paper_monitor_cursor (
+                    trade_date TEXT NOT NULL, symbol TEXT NOT NULL, channel TEXT NOT NULL,
+                    digest TEXT NOT NULL, sequence INTEGER NOT NULL,
+                    PRIMARY KEY (trade_date,symbol,channel)
+                );
+                CREATE TABLE IF NOT EXISTS paper_store_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
                 """
             )
+            source_id = _paper_store_source(path)
+            connection.execute(
+                "INSERT OR IGNORE INTO paper_store_metadata(key,value) "
+                "VALUES ('journal_source',?)",
+                (source_id,),
+            )
+            stored = connection.execute(
+                "SELECT value FROM paper_store_metadata WHERE key='journal_source'"
+            ).fetchone()
+            if stored is None or str(stored[0]) != source_id:
+                raise RuntimeError("Paper state journal source does not match its path")
+        self.source_id = source_id
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA synchronous=FULL")
         connection.execute("PRAGMA busy_timeout=30000")
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                connection.execute("PRAGMA journal_mode=WAL")
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).casefold() or time.monotonic() >= deadline:
+                    connection.close()
+                    raise
+                time.sleep(0.05)
+        connection.execute("PRAGMA synchronous=FULL")
         return connection
 
     def claim_run(
@@ -364,7 +404,9 @@ class PaperStateStore:
         normalized = symbol.strip().upper()
         if not normalized:
             raise ValueError("symbol state identity is required")
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._monitor_transition(connection, trade_date, normalized, state, observed_at_utc)
             connection.execute(
                 """
                 INSERT INTO paper_symbol_state (
@@ -380,6 +422,76 @@ class PaperStateStore:
                     _encode(state),
                     observed_at_utc.isoformat(),
                 ),
+            )
+
+    def _monitor_transition(
+        self,
+        connection: sqlite3.Connection, trade_date: date, symbol: str,
+        state: dict[str, object], observed_at_utc: datetime, channel: str = "lifecycle",
+    ) -> None:
+        if not state.get("phase"):
+            return
+        payload: dict[str, object] = {"trade_date": trade_date.isoformat(), "symbol": symbol, **{
+            key: state[key] for key in (
+                "phase", "attempt", "entry_client_id", "exit_client_id", "exit_reason", "reason"
+            ) if key in state
+        }}
+        digest = hashlib.sha256(_encode(payload).encode()).hexdigest()
+        previous = connection.execute(
+            "SELECT digest,sequence FROM paper_monitor_cursor WHERE "
+            "trade_date=? AND symbol=? AND channel=?", (trade_date.isoformat(), symbol, channel),
+        ).fetchone()
+        if previous and previous[0] == digest:
+            return
+        sequence = int(previous[1]) + 1 if previous else 1
+        connection.execute(
+            "INSERT INTO paper_monitor_cursor(trade_date,symbol,channel,digest,sequence) "
+            "VALUES (?,?,?,?,?) ON CONFLICT(trade_date,symbol,channel) DO UPDATE SET "
+            "digest=excluded.digest,sequence=excluded.sequence",
+            (trade_date.isoformat(), symbol, channel, digest, sequence),
+        )
+        key = f"monitor-state:{self.source_id}:{trade_date}:{symbol}:{channel}:{sequence}"
+        payload["journal_source"] = self.source_id
+        payload["observed_at_utc"] = observed_at_utc.isoformat()
+        connection.execute(
+            "INSERT OR IGNORE INTO paper_outbox "
+            "(event_key,event_type,payload_json,status,updated_at_utc) "
+            "VALUES (?,'monitor_transition',?,'pending',?)",
+            (key, _encode(payload), observed_at_utc.isoformat()),
+        )
+
+    def observe_monitor_transition(
+        self, *, trade_date: date, symbol: str, phase: str, reason: str,
+        observed_at_utc: datetime,
+    ) -> None:
+        _require_utc(observed_at_utc)
+        if not symbol.strip() or not phase.strip() or not reason.strip():
+            raise ValueError("monitor transition identity and reason are required")
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._monitor_transition(
+                connection, trade_date, symbol.upper(), {"phase": phase, "reason": reason},
+                observed_at_utc, "decision",
+            )
+
+    def pending_monitor_transitions(
+        self, limit: int = 5,
+    ) -> tuple[tuple[str, dict[str, object]], ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT event_key,payload_json FROM paper_outbox WHERE "
+                "event_type='monitor_transition' AND status!='sent' "
+                "ORDER BY updated_at_utc,event_key LIMIT ?", (limit,),
+            ).fetchall()
+        return tuple((str(key), _decode_object(str(payload))) for key, payload in rows)
+
+    def defer_monitor_transition(self, key: str, *, now: datetime) -> None:
+        """Rotate a failed projection without resetting its ambiguous sending state."""
+        _require_utc(now)
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE paper_outbox SET updated_at_utc=? WHERE event_key=? "
+                "AND event_type='monitor_transition' AND status!='sent'", (now.isoformat(), key),
             )
 
     def delete_symbol_state(self, trade_date: date, symbol: str) -> None:

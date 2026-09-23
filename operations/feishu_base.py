@@ -237,7 +237,9 @@ class FeishuBaseEventClient:
         **kwargs: Any,
     ) -> FeishuBaseEventClient | None:
         values = os.environ if environment is None else environment
-        provider = values.get("AI_QUANT_INVESTMENT_PROVIDER", "feishu").strip().lower()
+        provider = values.get("AI_QUANT_INVESTMENT_PROVIDER", "").strip().lower()
+        if not provider:
+            raise ValueError("investment record provider must be explicitly configured")
         if provider == "vps-work":
             from operations.vps_investment_base import VpsInvestmentClient, VpsInvestmentSettings
 

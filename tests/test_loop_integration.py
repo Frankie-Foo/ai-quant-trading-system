@@ -611,6 +611,65 @@ def test_loop_client_creates_idempotent_task_then_runs_it(tmp_path: Path) -> Non
     ]
 
 
+def test_loop_async_run_retains_ids_and_resumes_without_posts(tmp_path: Path) -> None:
+    from operations.loop_integration.client import LoopRunIncompleteError
+
+    calls: list[tuple[str, str]] = []
+    checkpoints: list[tuple[str, str | None, str | None]] = []
+
+    def request(method: str, path: str, payload: object) -> object:
+        calls.append((method, path))
+        if path.startswith("/api/v1/knowledge/quant/control-artifacts?"):
+            kind = path.split("artifact_type=", 1)[1].split("&", 1)[0]
+            return [_control_artifact(
+                {"signal_contract": "signal-v1", "fsm_contract": "fsm-v1",
+                 "golden_case_suite": "golden-v1"}[kind], kind)]
+        if path == "/api/v1/tasks":
+            assert checkpoints[-1][0] == "creating_task"
+            return {"id": "task-1"}
+        if method == "POST":
+            assert checkpoints[-1] == ("starting_run", "task-1", None)
+            return {"id": "run-1", "status": "RUNNING"}
+        return {"id": "task-1", "status": "COMPLETED"}
+
+    client = LoopClient(base_url="https://loop.invalid", api_key="test", request=request)
+    with pytest.raises(LoopRunIncompleteError) as exc:
+        client.submit_review(_submission_envelope(tmp_path), _binding(),
+                             checkpoint=lambda *args: checkpoints.append(args))
+    assert (exc.value.task_id, exc.value.run_id) == ("task-1", "run-1")
+    assert checkpoints[-1] == ("remote_processing", "task-1", "run-1")
+    assert client.get_review_run(task_id="task-1", run_id="run-1") == ("task-1", "run-1")
+    assert len([c for c in calls if c[0] == "POST"]) == 2
+
+
+def test_resume_daily_review_without_policy_binding_or_snapshot_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts import sync_loop_daily_review as sync
+
+    envelope = _submission_envelope(tmp_path)
+    box = LoopOutbox(tmp_path / "loop.sqlite3")
+    box.stage(event_id=envelope.event_id, event_type="daily_review",
+              payload=envelope.model_dump(mode="json"), payload_sha256=envelope.payload_sha256)
+    box.mark_remote_processing(envelope.event_id, remote_task_id="task", remote_run_id="run")
+    calls: list[str] = []
+
+    def request(method: str, path: str, payload: object) -> object:
+        assert method == "GET"
+        calls.append(path)
+        return {"id": "task", "status": "COMPLETED"}
+
+    monkeypatch.setattr(sys, "argv", ["sync", "--trade-date", envelope.trading_date.isoformat(),
+                                     "--binding", "missing.json", "--outbox", str(box.path)])
+    monkeypatch.setattr(sync, "load_project_env", lambda root: None)
+    monkeypatch.setattr(sync, "_latest", lambda *_: pytest.fail("must not rebuild source inputs"))
+    monkeypatch.setattr(sync, "LoopClient", lambda **_: LoopClient(
+        base_url="https://test.invalid", api_key="test", request=request))
+    sync.main()
+    assert json.loads(capsys.readouterr().out)["status"] == "delivered"
+    assert calls == ["/api/v1/tasks/task"]
+
+
 def test_future_risk_authorization_is_separate_from_evidence_timeline() -> None:
     authorization = NOW + timedelta(minutes=17)
     timing = build_risk_policy_timing(

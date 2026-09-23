@@ -4,7 +4,7 @@ import argparse
 import hashlib
 import json
 import os
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from kernel.config import load_config
@@ -15,10 +15,11 @@ from operations.loop_integration.client import (
     LoopClient,
     LoopPreconditionError,
     LoopRunFailedError,
+    LoopRunIncompleteError,
 )
-from operations.loop_integration.contracts import LoopBinding
+from operations.loop_integration.contracts import LoopBinding, QuantReviewEnvelope
 from operations.loop_integration.execution_summary import load_execution_index
-from operations.loop_integration.outbox import LoopOutbox
+from operations.loop_integration.outbox import LoopOutbox, OutboxItem
 from operations.loop_integration.review_builder import build_review_envelope, load_accepted_snapshot
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -121,10 +122,65 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def resume_submitted_review(
+    outbox: LoopOutbox, item: OutboxItem, client: LoopClient, *, now: datetime,
+) -> dict[str, object]:
+    """Resume frozen remote work without requiring today's policy or source files."""
+    envelope = QuantReviewEnvelope.model_validate(item.payload)
+    if envelope.payload_sha256 != item.payload_sha256:
+        raise ValueError("persisted Loop review content hash mismatch")
+    receipt: dict[str, object] = {"event_id": item.event_id, "task_id": item.remote_task_id,
+                                 "run_id": item.remote_run_id}
+    if item.status in {"delivered", "remote_completed"}:
+        return {**receipt, "status": "delivered"}
+    if item.status == "remote_rejected":
+        return {**receipt, "status": "remote_failed"}
+    if item.status in {"creating_task", "starting_run"}:
+        return {**receipt, "status": "reconciliation_required"}
+    if item.retry_after_utc and datetime.fromisoformat(item.retry_after_utc) > now:
+        return {**receipt, "status": "retry_scheduled", "retry_after_utc": item.retry_after_utc}
+
+    def checkpoint(status: str, task: str | None, run: str | None) -> None:
+        outbox.checkpoint(item.event_id, status, task, run)
+
+    try:
+        if item.remote_task_id and item.remote_run_id:
+            task, run = client.get_review_run(
+                task_id=item.remote_task_id, run_id=item.remote_run_id
+            )
+        elif item.status == "task_created" and item.remote_task_id:
+            task, run = client.start_review_run(task_id=item.remote_task_id, checkpoint=checkpoint)
+        else:
+            return {**receipt, "status": "reconciliation_required"}
+    except LoopRunIncompleteError as exc:
+        outbox.mark_remote_processing(item.event_id, remote_task_id=exc.task_id,
+                                      remote_run_id=exc.run_id)
+        outbox.defer_retry(item.event_id, "REMOTE_PROCESSING", now=now)
+        return {**receipt, "status": "remote_processing", "run_id": exc.run_id}
+    except LoopRunFailedError as exc:
+        outbox.mark_failed(item.event_id, error_code=exc.error_code,
+                           remote_task_id=exc.task_id, remote_run_id=exc.run_id,
+                           failed_node=exc.failed_node)
+        outbox.mark_remote_rejected(item.event_id, error_code=exc.error_code)
+        return {**receipt, "status": "remote_failed"}
+    except Exception as exc:
+        outbox.defer_retry(item.event_id, type(exc).__name__, now=now)
+        return {**receipt, "status": "retryable_failure", "error_type": type(exc).__name__}
+    outbox.mark_delivered(item.event_id, remote_task_id=task, remote_run_id=run)
+    return {**receipt, "status": "delivered", "task_id": task, "run_id": run}
+
+
 def main() -> None:
     args = _parser().parse_args()
     if not args.stage_only:
         load_project_env(ROOT)
+        outbox = LoopOutbox(args.outbox)
+        prior = outbox.submitted_review(args.trade_date)
+        if prior is not None:
+            client = LoopClient(base_url=os.environ.get("LOOP_BASE_URL", ""),
+                                api_key=os.environ.get("LOOP_RUNTIME_API_KEY", ""))
+            print(json.dumps(resume_submitted_review(outbox, prior, client, now=datetime.now(UTC))))
+            return
     entries = load_execution_index(args.execution_index, args.execution_index_sha256)
     entry = None
     if args.execution_index is not None:
@@ -164,12 +220,22 @@ def main() -> None:
         if envelope.risk_policy["evidence"]["strategy_sha256"] != entry.strategy_sha256:
             raise ValueError("execution index strategy mismatch")
     outbox = LoopOutbox(args.outbox)
-    staged = outbox.stage(
-        event_id=envelope.event_id,
-        event_type="daily_review",
-        payload=envelope.model_dump(mode="json"),
-        payload_sha256=envelope.payload_sha256,
-    )
+    previous = outbox.get(envelope.event_id)
+    if not args.stage_only and previous is not None and (
+        previous.remote_task_id or previous.status in {"creating_task", "starting_run"}
+    ):
+        # Deployment/snapshot changes cannot rewrite an already submitted review.
+        staged = previous
+        envelope = QuantReviewEnvelope.model_validate(previous.payload)
+        if envelope.payload_sha256 != previous.payload_sha256:
+            raise ValueError("persisted Loop review content hash mismatch")
+    else:
+        staged = outbox.stage(
+            event_id=envelope.event_id,
+            event_type="daily_review",
+            payload=envelope.model_dump(mode="json"),
+            payload_sha256=envelope.payload_sha256,
+        )
     if args.stage_only:
         print(json.dumps({
             "status": "staged", "event_id": envelope.event_id,
@@ -177,7 +243,7 @@ def main() -> None:
             "submitted": False,
         }))
         return
-    if staged.status == "delivered":
+    if staged.status in {"delivered", "remote_completed"}:
         print(json.dumps({"status": "delivered", "event_id": envelope.event_id,
                           "task_id": staged.remote_task_id, "run_id": staged.remote_run_id}))
         return
@@ -193,7 +259,28 @@ def main() -> None:
         api_key=os.environ.get("LOOP_RUNTIME_API_KEY", ""),
     )
     try:
-        task_id, run_id = client.submit_review(envelope, binding)
+        def checkpoint(status: str, task: str | None, run: str | None) -> None:
+            outbox.checkpoint(envelope.event_id, status, task, run)
+        if staged.remote_task_id and staged.remote_run_id:
+            task_id, run_id = client.get_review_run(
+                task_id=staged.remote_task_id, run_id=staged.remote_run_id
+            )
+        elif staged.status == "task_created" and staged.remote_task_id:
+            task_id, run_id = client.start_review_run(
+                task_id=staged.remote_task_id, checkpoint=checkpoint
+            )
+        elif staged.status in {"creating_task", "starting_run"} or staged.remote_task_id:
+            raise RuntimeError("Loop submission outcome unknown; reconcile before resubmission")
+        else:
+            task_id, run_id = client.submit_review(envelope, binding, checkpoint=checkpoint)
+    except LoopRunIncompleteError as exc:
+        outbox.mark_remote_processing(
+            envelope.event_id, remote_task_id=exc.task_id, remote_run_id=exc.run_id
+        )
+        outbox.defer_retry(envelope.event_id, "REMOTE_PROCESSING", now=datetime.now(UTC))
+        print(json.dumps({"status": "remote_processing", "task_id": exc.task_id,
+                          "run_id": exc.run_id}))
+        return
     except AuditOnlyBackfillRequired as exc:
         outbox.mark_audit_only_backfill(envelope.event_id, error_code=exc.code)
         print(json.dumps({"status": "audit_only_backfill", "event_id": envelope.event_id}))
@@ -212,7 +299,7 @@ def main() -> None:
         )
         raise
     except Exception as exc:
-        outbox.mark_failed(envelope.event_id, error_code=type(exc).__name__)
+        outbox.record_error(envelope.event_id, type(exc).__name__)
         raise
     outbox.mark_delivered(envelope.event_id, remote_task_id=task_id, remote_run_id=run_id)
     print(json.dumps({"status": "delivered", "task_id": task_id, "run_id": run_id}))

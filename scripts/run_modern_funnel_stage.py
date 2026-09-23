@@ -599,8 +599,10 @@ def _publish_stage(
         base = FeishuBaseEventClient.from_environment(os.environ)
         if base is None:
             raise RuntimeError("dedicated investment record store is unavailable")
-        record_ids = tuple(
-            base.record_event(
+        from operations.vps_investment_base import VpsInvestmentClient
+
+        projections = [
+            (
                 InvestmentTable.SELECTION,
                 f"funnel:{trade_date.isoformat()}:{stage.value}:{row['symbol']}",
                 _selection_event_fields(
@@ -613,7 +615,10 @@ def _publish_stage(
                 ),
             )
             for row, kept in stage_rows
-        )
+        ]
+        if isinstance(base, VpsInvestmentClient):
+            base.queue_events(projections)
+        record_ids = tuple(base.record_event(*projection) for projection in projections)
     except (FeishuBaseError, RuntimeError, ValueError):
         # Preserve selection and its notification during a Base outage.
         # create_open_confirmation still requires real Base receipts before
