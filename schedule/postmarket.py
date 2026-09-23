@@ -308,7 +308,7 @@ def _sync_loop_handoffs(
     """Retry independently of local success; remote outbox handles idempotency."""
     evidence_args = None
     provider_blocked = False
-    no_trade_fallback = False
+    audit_only_fallback_reason: str | None = None
     native_root = os.environ.get("AI_QUANT_LOOP_NATIVE_RUN_ROOT", "").strip()
     if any(_truthy(os.environ.get(name)) for name in (
         "AI_QUANT_LOOP_SYNC_ENABLED", "AI_QUANT_LOOP_OUTCOME_SYNC_ENABLED",
@@ -322,42 +322,63 @@ def _sync_loop_handoffs(
                 if native_root:
                     if config or digest:
                         raise ValueError("choose native discovery or explicit provider config")
-                    command = [sys.executable, "-m", "scripts.produce_loop_daily",
-                               "--trade-date", str(trade_date), "--run-root", native_root,
-                               "--data-root", str(data_root), "--active-policy",
-                               os.environ.get("AI_QUANT_ACTIVE_POLICY_FILE", "")]
+                    native_plan = (
+                        Path(native_root) / "autonomous" / trade_date.isoformat()
+                        / "modern_h15_paper_plan.json"
+                    )
+                    if not native_plan.is_file():
+                        logger.emit(
+                            "loop_provider_execution_unavailable",
+                            level="warning",
+                            trade_date=str(trade_date),
+                            reason="effective_modern_plan_not_supplied",
+                            orders_submitted=0,
+                        )
+                        provider_blocked = True
+                        audit_only_fallback_reason = "effective_modern_plan_not_supplied"
+                        command = None
+                    else:
+                        command = [sys.executable, "-m", "scripts.produce_loop_daily",
+                                   "--trade-date", str(trade_date), "--run-root", native_root,
+                                   "--data-root", str(data_root), "--active-policy",
+                                   os.environ.get("AI_QUANT_ACTIVE_POLICY_FILE", "")]
                 else:
                     if not config or not digest:
                         raise ValueError("provider config path/hash must be paired")
                     command = [sys.executable, "-m", "scripts.prepare_loop_execution",
                                "--trade-date", str(trade_date), "--config", config,
                                "--config-sha256", digest]
-                result = run_child(command, cwd=ROOT, timeout_seconds=300)
-                receipt = _business_receipt(result.stdout)
-                if (result.return_code != 0 or receipt.get("status") != "prepared"
-                        or not receipt.get("execution_index_path")
-                        or not receipt.get("execution_index_sha256")):
-                    raise ValueError("provider business receipt is not prepared")
-                evidence_args = ["--execution-index", receipt["execution_index_path"],
-                                 "--execution-index-sha256", receipt["execution_index_sha256"]]
+                if command is not None:
+                    result = run_child(command, cwd=ROOT, timeout_seconds=300)
+                    receipt = _business_receipt(result.stdout)
+                    if (result.return_code != 0 or receipt.get("status") != "prepared"
+                            or not receipt.get("execution_index_path")
+                            or not receipt.get("execution_index_sha256")):
+                        raise ValueError("provider business receipt is not prepared")
+                    evidence_args = ["--execution-index", receipt["execution_index_path"],
+                                     "--execution-index-sha256",
+                                     receipt["execution_index_sha256"]]
             except Exception as exc:
-                logger.emit("loop_provider_blocked", level="warning",
-                            trade_date=str(trade_date), error_type=type(exc).__name__,
-                            orders_submitted=0)
-                provider_blocked = True
-                no_trade_fallback = _native_no_trade_fallback_available(native_root, trade_date)
-                if no_trade_fallback:
-                    logger.emit(
-                        "loop_provider_no_trade_fallback",
-                        trade_date=str(trade_date),
-                        orders_submitted=0,
-                    )
-    failures = int(provider_blocked and not no_trade_fallback)
+                if not (provider_blocked and audit_only_fallback_reason):
+                    logger.emit("loop_provider_blocked", level="warning",
+                                trade_date=str(trade_date), error_type=type(exc).__name__,
+                                orders_submitted=0)
+                    provider_blocked = True
+                    if _native_no_trade_fallback_available(native_root, trade_date):
+                        audit_only_fallback_reason = "open_no_trade"
+            if audit_only_fallback_reason:
+                logger.emit(
+                    "loop_provider_audit_only_fallback",
+                    trade_date=str(trade_date),
+                    reason=audit_only_fallback_reason,
+                    orders_submitted=0,
+                )
+    failures = int(provider_blocked and not audit_only_fallback_reason)
     for sync, extra in (
         (_sync_loop_review, {"artifacts": artifacts}),
         (_sync_loop_outcomes, {}),
     ):
-        if sync is _sync_loop_review and provider_blocked and not no_trade_fallback:
+        if sync is _sync_loop_review and provider_blocked and not audit_only_fallback_reason:
             continue
         try:
             selected_args = evidence_args

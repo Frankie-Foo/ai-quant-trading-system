@@ -43,6 +43,9 @@ def test_completed_local_review_retries_blocked_loop(
     monkeypatch.delenv("AI_QUANT_LOOP_NATIVE_RUN_ROOT", raising=False)
     if with_provider == "native":
         monkeypatch.setenv("AI_QUANT_LOOP_NATIVE_RUN_ROOT", str(tmp_path / "runs"))
+        plan = tmp_path / "runs" / "autonomous" / target.isoformat() / "modern_h15_paper_plan.json"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("{}", encoding="utf-8")
         monkeypatch.delenv("AI_QUANT_LOOP_PROVIDER_CONFIG_FILE", raising=False)
         monkeypatch.delenv("AI_QUANT_LOOP_PROVIDER_CONFIG_SHA256", raising=False)
     elif with_provider:
@@ -177,3 +180,47 @@ def test_no_trade_day_submits_research_review_without_native_execution_index(
         "--state-db", str(ledger.path), "--lock-file", str(tmp_path / "lock"),
     ]) == 0
     assert len(review_commands) == 1
+
+
+def test_missing_native_plan_submits_audit_only_review_without_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = date(2026, 7, 20)
+    ledger = JobLedger(tmp_path / "jobs.sqlite3")
+    lease = ledger.acquire(postmarket.JOB_NAME, target, postmarket.JOB_VERSION)
+    assert lease is not None
+    ledger.complete(lease, artifact_ids=("signal", "episode", "review", "opportunity"))
+    monkeypatch.setattr(postmarket, "load_project_env", lambda *_: None)
+    monkeypatch.setattr(postmarket, "load_config", lambda *_: SimpleNamespace(
+        market_data=SimpleNamespace(postmarket_data_grace_minutes=20),
+        scheduler=SimpleNamespace(postmarket_max_attempts=5, postmarket_retry_minutes=30),
+    ))
+    monkeypatch.setattr(FeishuBaseEventClient, "from_environment", lambda *_: None)
+    monkeypatch.setenv("AI_QUANT_LOOP_SYNC_ENABLED", "true")
+    monkeypatch.setenv("AI_QUANT_LOOP_BINDING_FILE", "fixture-binding.json")
+    monkeypatch.setenv("AI_QUANT_ACTIVE_POLICY_FILE", "fixture-active.json")
+    monkeypatch.setenv("AI_QUANT_LOOP_NATIVE_RUN_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("AI_QUANT_LOOP_OUTCOME_SYNC_ENABLED", "false")
+    monkeypatch.delenv("AI_QUANT_LOOP_PROVIDER_CONFIG_FILE", raising=False)
+    monkeypatch.delenv("AI_QUANT_LOOP_PROVIDER_CONFIG_SHA256", raising=False)
+    commands: list[list[str]] = []
+
+    def child(command: list[str], **kwargs: object) -> ChildProcessResult:
+        del kwargs
+        commands.append(command)
+        assert "scripts.produce_loop_daily" not in command
+        assert "scripts.sync_loop_daily_review" in command
+        assert "--execution-index" not in command
+        return ChildProcessResult(
+            return_code=0,
+            stdout='{"status":"delivered","task_id":"task","run_id":"run"}',
+            stderr="",
+            elapsed_ms=1,
+        )
+
+    monkeypatch.setattr(postmarket, "run_child", child)
+    assert postmarket.run([
+        "--trade-date", str(target), "--data-root", str(tmp_path),
+        "--state-db", str(ledger.path), "--lock-file", str(tmp_path / "lock"),
+    ]) == 0
+    assert len(commands) == 1

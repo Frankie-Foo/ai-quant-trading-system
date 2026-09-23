@@ -7,6 +7,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import polars as pl
 import pytest
 from test_loop_execution import fill, fills_payload, native_plan_payload, pinned_json, plan_payload
@@ -356,7 +357,19 @@ def test_no_order_review_without_effective_plan_is_submittable(tmp_path: Path) -
         )
     })
     assert envelope.risk_policy["status"] == "unavailable"
-    assert "stop_loss" not in envelope.risk_policy
+    assert envelope.risk_policy["submission_allowed"] is False
+    assert envelope.risk_policy["position_limits"] == {
+        "max_concurrent": 0,
+        "risk_per_trade_fraction": 0.0,
+        "max_gross_exposure_fraction": 0.0,
+    }
+    assert envelope.risk_policy["stop_loss"] == {
+        "type": "not_applicable",
+        "reference": "orders_forbidden",
+        "threshold_pct": 0.000001,
+    }
+    assert envelope.risk_policy["risk_budget"] == {"daily_loss_limit_fraction": 0.0}
+    assert envelope.risk_policy["liquidity_constraints"] == {"participation_cap": 0.0}
     assert envelope.execution_summary["status"] == "unavailable"
     assert envelope.execution_summary["realized_net_pnl"] is None
     assert envelope.market_context["frozen_candidate_pool"]["count"] is None
@@ -380,6 +393,7 @@ def test_no_order_review_without_effective_plan_is_submittable(tmp_path: Path) -
             assert payload["constraints"]["allow_order_execution"] is False
             review = payload["input_data"]["daily_review"]
             assert review["risk_policy"]["status"] == "unavailable"
+            assert review["risk_policy"]["position_limits"]["max_concurrent"] == 0
             assert review["execution_summary"]["orders_authorized"] is False
             assert payload["input_data"]["dynamic_rescan"]["source_kind"] == (
                 "post_close_research_only"
@@ -462,7 +476,7 @@ def test_missing_morning_pool_uses_explicit_research_only_cohort(tmp_path: Path)
     task = build_loop_task(envelope, _binding())
     rescan = task["input_data"]["dynamic_rescan"]
     assert rescan["source_kind"] == "post_close_research_only"
-    assert rescan["trigger"] == "post_close_research"
+    assert rescan["trigger"] == "scheduled"
     assert all(row["research_only"] is True for row in rescan["ranked_candidates"])
     assert envelope.market_context["frozen_candidate_pool"]["count"] is None
     assert rescan["universe"] == [item.instrument for item in envelope.top10_decisions]
@@ -499,7 +513,8 @@ def test_review_rejects_active_strategy_config_mismatch(tmp_path: Path) -> None:
 def test_review_sidecar_without_native_facts_is_risk_unavailable(tmp_path: Path) -> None:
     envelope = _envelope(tmp_path, native_risk=False)
     assert envelope.risk_policy["status"] == "unavailable"
-    assert "position_limits" not in envelope.risk_policy
+    assert envelope.risk_policy["position_limits"]["max_concurrent"] == 0
+    assert envelope.risk_policy["risk_budget"]["daily_loss_limit_fraction"] == 0.0
 
 
 @pytest.mark.parametrize("with_risk", [False, True])
@@ -611,6 +626,27 @@ def test_loop_client_creates_idempotent_task_then_runs_it(tmp_path: Path) -> Non
     ]
 
 
+def test_loop_client_classifies_http_422_as_terminal_contract_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from operations.loop_integration.client import LoopRemoteRejectedError
+
+    def request(*args: object, **kwargs: object) -> httpx.Response:
+        del args, kwargs
+        return httpx.Response(
+            422,
+            request=httpx.Request("POST", "https://loop.invalid/api/v1/tasks"),
+            json={"detail": {"component": "task_input", "message": "schema rejected"}},
+        )
+
+    monkeypatch.setattr(httpx, "request", request)
+    client = LoopClient(base_url="https://loop.invalid", api_key="secret")
+    with pytest.raises(LoopRemoteRejectedError) as caught:
+        client._request("POST", "/api/v1/tasks", {"input_data": {}})
+    assert caught.value.error_code == "HTTP_422_TASK_INPUT_SCHEMA"
+    assert str(caught.value) == "schema rejected"
+
+
 def test_loop_async_run_retains_ids_and_resumes_without_posts(tmp_path: Path) -> None:
     from operations.loop_integration.client import LoopRunIncompleteError
 
@@ -640,6 +676,39 @@ def test_loop_async_run_retains_ids_and_resumes_without_posts(tmp_path: Path) ->
     assert checkpoints[-1] == ("remote_processing", "task-1", "run-1")
     assert client.get_review_run(task_id="task-1", run_id="run-1") == ("task-1", "run-1")
     assert len([c for c in calls if c[0] == "POST"]) == 2
+
+
+def test_explicit_remote_rejection_is_terminal_in_review_outbox(tmp_path: Path) -> None:
+    from operations.loop_integration.client import LoopRemoteRejectedError
+    from scripts.sync_loop_daily_review import resume_submitted_review
+
+    envelope = _submission_envelope(tmp_path)
+    box = LoopOutbox(tmp_path / "outbox.sqlite3")
+    box.stage(
+        event_id=envelope.event_id,
+        event_type="daily_review",
+        payload=envelope.model_dump(mode="json"),
+        payload_sha256=envelope.payload_sha256,
+    )
+    box.checkpoint(envelope.event_id, "creating_task", None, None)
+    box.checkpoint(envelope.event_id, "task_created", "task-rejected", None)
+
+    class RejectingClient:
+        @staticmethod
+        def start_review_run(**kwargs: object) -> tuple[str, str]:
+            del kwargs
+            raise LoopRemoteRejectedError("HTTP_422_TASK_INPUT_SCHEMA", "schema rejected")
+
+    item = box.get(envelope.event_id)
+    assert item is not None
+    receipt = resume_submitted_review(
+        box, item, RejectingClient(), now=NOW  # type: ignore[arg-type]
+    )
+    assert receipt["status"] == "remote_rejected"
+    persisted = box.get(envelope.event_id)
+    assert persisted is not None
+    assert persisted.status == "remote_rejected"
+    assert persisted.last_error_code == "HTTP_422_TASK_INPUT_SCHEMA"
 
 
 def test_resume_daily_review_without_policy_binding_or_snapshot_files(
