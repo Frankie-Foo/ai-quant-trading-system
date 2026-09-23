@@ -359,6 +359,19 @@ def run_tick(
             stage=stage,
             now_utc=current,
         )
+        if (
+            claim_status is FunnelTickStatus.PREREQUISITE_MISSING
+            and stage is FunnelStage.SECOND_WAVE
+            and time(9, 0) <= eastern.time().replace(tzinfo=None) < time(9, 30)
+        ):
+            # Recover a missed first-wave tick before the later premarket stages.
+            stage = FunnelStage.FIRST_WAVE
+            claim_status = _claim(
+                connection,
+                trade_date=trade_date,
+                stage=stage,
+                now_utc=current,
+            )
         if claim_status is not None:
             return FunnelTickResult(claim_status, stage)
         try:

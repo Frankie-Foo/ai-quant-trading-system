@@ -92,12 +92,31 @@ def test_failed_stage_retries_only_inside_its_window(tmp_path: Path) -> None:
     assert executor.calls.count(FunnelStage.SECOND_WAVE) == 2
 
 
-def test_missing_prerequisite_never_runs_a_later_stage(tmp_path: Path) -> None:
+def test_missing_first_wave_is_recovered_before_second_wave(tmp_path: Path) -> None:
+    executor = FakeExecutor()
+    recovered = run_tick(
+        ledger_path=tmp_path / "funnel.sqlite3",
+        executor=executor,
+        now_utc=_utc(9, 0),
+    )
+    second = run_tick(
+        ledger_path=tmp_path / "funnel.sqlite3",
+        executor=executor,
+        now_utc=_utc(9, 1),
+    )
+    assert recovered.status is FunnelTickStatus.SUCCEEDED
+    assert recovered.stage is FunnelStage.FIRST_WAVE
+    assert second.status is FunnelTickStatus.SUCCEEDED
+    assert second.stage is FunnelStage.SECOND_WAVE
+    assert executor.calls == [FunnelStage.FIRST_WAVE, FunnelStage.SECOND_WAVE]
+
+
+def test_missing_prerequisite_still_blocks_final_rank(tmp_path: Path) -> None:
     executor = FakeExecutor()
     result = run_tick(
         ledger_path=tmp_path / "funnel.sqlite3",
         executor=executor,
-        now_utc=_utc(9, 0),
+        now_utc=_utc(9, 30),
     )
     assert result.status is FunnelTickStatus.PREREQUISITE_MISSING
     assert executor.calls == []

@@ -362,7 +362,17 @@ def _selection_event_fields(
     }
 
 
-def _stage_observed_at(trade_date: date, stage: FunnelStage) -> datetime:
+def _stage_observed_at(
+    trade_date: date, stage: FunnelStage, *, now_utc: datetime | None = None
+) -> datetime:
+    if now_utc is not None:
+        observed = now_utc.astimezone(EASTERN)
+        if (
+            stage is FunnelStage.FIRST_WAVE
+            and observed.date() == trade_date
+            and time(9, 0) <= observed.time().replace(tzinfo=None) < time(9, 30)
+        ):
+            return now_utc.astimezone(UTC)
     stage_time = {
         FunnelStage.FIRST_WAVE: time(8, 30),
         FunnelStage.SECOND_WAVE: time(9),
@@ -591,7 +601,7 @@ def _publish_stage(
     state_root: Path,
     strategy_version: str = STRATEGY_VERSION,
 ) -> tuple[tuple[str, ...], str]:
-    now = _stage_observed_at(trade_date, stage)
+    now = _stage_observed_at(trade_date, stage, now_utc=datetime.now(UTC))
     stage_rows = tuple((row, True) for row in candidates) + tuple((row, False) for row in rejected)
     record_ids: tuple[str, ...] = ()
     feishu_failed = False
@@ -1320,9 +1330,17 @@ def _receipt(path: Path, record_ids: tuple[str, ...], message_id: str) -> dict[s
     }
 
 
-def _require_selection_window(stage: FunnelStage, trade_date: date) -> None:
-    eastern = datetime.now(UTC).astimezone(EASTERN)
-    if eastern.date() != trade_date or _stage_for(eastern.time()) is not stage:
+def _require_selection_window(
+    stage: FunnelStage, trade_date: date, *, now_utc: datetime | None = None
+) -> None:
+    eastern = (now_utc or datetime.now(UTC)).astimezone(EASTERN)
+    late_first_wave_recovery = (
+        stage is FunnelStage.FIRST_WAVE
+        and time(9, 0) <= eastern.time().replace(tzinfo=None) < time(9, 30)
+    )
+    if eastern.date() != trade_date or (
+        _stage_for(eastern.time()) is not stage and not late_first_wave_recovery
+    ):
         raise RuntimeError("funnel selection window is closed")
 
 

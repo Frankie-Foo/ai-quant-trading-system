@@ -35,6 +35,7 @@ from scripts.run_modern_funnel_stage import (
     _execution_summary,
     _first_wave_message,
     _open_plan_lines,
+    _require_selection_window,
     _selection_event_fields,
     _stage_observed_at,
     _strategy_context,
@@ -537,6 +538,22 @@ def test_empty_wave_messages_state_no_candidate() -> None:
     assert _stage_observed_at(date(2026, 8, 24), FunnelStage.OPEN_CONFIRMATION) == datetime(
         2026, 8, 24, 13, 35, tzinfo=UTC
     )
+
+
+def test_late_first_wave_recovery_uses_actual_time_and_stays_premarket() -> None:
+    observed = datetime(2026, 8, 24, 13, 22, tzinfo=UTC)
+    assert _stage_observed_at(
+        date(2026, 8, 24), FunnelStage.FIRST_WAVE, now_utc=observed
+    ) == observed
+    _require_selection_window(
+        FunnelStage.FIRST_WAVE, date(2026, 8, 24), now_utc=observed
+    )
+    with pytest.raises(RuntimeError, match="selection window is closed"):
+        _require_selection_window(
+            FunnelStage.FIRST_WAVE,
+            date(2026, 8, 24),
+            now_utc=datetime(2026, 8, 24, 13, 30, tzinfo=UTC),
+        )
 
 
 def test_paper_plan_uses_the_execution_strategy_version() -> None:
