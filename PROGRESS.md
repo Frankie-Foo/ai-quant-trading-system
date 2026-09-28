@@ -2600,3 +2600,21 @@ Status: offline implementation and verification; no production activation.
   tested hotfix was installed in its existing code directory. The task was
   re-enabled with the original action and next run 2026-09-28 20:30 Beijing.
   Market-hours acceptance remains pending until that scheduled run.
+
+## M92 2026-09-28 missed intraday funnel windows
+
+- The 08:30 ET first wave completed at 09:15 ET; the 09:00 ET second wave
+  completed only at 10:03 ET, beyond its 09:45 ET recovery deadline. No final
+  confirmation or Paper authorization was produced. The 15-minute stage lease was shorter
+  than the long-running 60-minute subprocess timeout; overlapping Task Scheduler
+  triggers were ignored while the process remained active.
+- The previous-session universe contained 2592 eligible symbols. Alpaca news
+  fetched those symbols in serial chunks of 50 for every ranked wave. A red
+  concurrency test reproduced the serialized call path; a bounded eight-worker
+  read-only pool now fetches chunks concurrently and merges results in chunk
+  order. No candidate, risk, or broker gate changed.
+- A second red test showed late stages could write and notify after their
+  selection window closed. Stage publication now checks the window before each
+  record, before push, and before Paper authorization; audit timestamps use the
+  actual publication time. Market-hours throughput remains to be
+  verified on a later live session; do not backdate today's missing stages.

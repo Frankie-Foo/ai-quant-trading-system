@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -127,12 +128,19 @@ def fetch_alpaca_news_direct(
         )
     merged: dict[tuple[object, ...], dict[str, object]] = {}
     try:
-        for offset in range(0, len(normalized), chunk_size):
-            for article in client.fetch_news(
-                normalized[offset : offset + chunk_size],
-                start_utc=start_utc,
-                end_utc=end_utc,
-            ):
+        chunks = tuple(
+            normalized[offset : offset + chunk_size]
+            for offset in range(0, len(normalized), chunk_size)
+        )
+        with ThreadPoolExecutor(max_workers=min(8, len(chunks))) as executor:
+            pages = list(executor.map(
+                lambda chunk: client.fetch_news(
+                    chunk, start_utc=start_utc, end_utc=end_utc,
+                ),
+                chunks,
+            ))
+        for articles in pages:
+            for article in articles:
                 # Do not merge changed text into an earlier observation timestamp.
                 version_key = (
                     article.article_id, article.created_at_utc, article.updated_at_utc,

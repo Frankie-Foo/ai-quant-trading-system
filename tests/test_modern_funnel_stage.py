@@ -650,6 +650,7 @@ def test_publish_stage_keeps_selection_when_feishu_is_down(
             return None
 
     push = Push()
+    monkeypatch.setattr(stage_runner, "_require_selection_window", lambda *_args: None)
     monkeypatch.setattr(
         FeishuBaseEventClient,
         "from_environment",
@@ -677,6 +678,115 @@ def test_publish_stage_keeps_selection_when_feishu_is_down(
     if publish_stage is FunnelStage.FINAL_RANK:
         assert "等待开盘确认" in push.messages[0]
         assert "已进入Paper开盘盯盘" not in push.messages[0]
+
+
+def test_publish_stage_blocks_after_window_before_external_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        FeishuBaseEventClient,
+        "from_environment",
+        lambda _environment: None,
+    )
+    monkeypatch.setattr(
+        stage_runner, "_push_client",
+        lambda: pytest.fail("late selection must not notify"),
+    )
+    with pytest.raises(RuntimeError, match="selection window is closed"):
+        stage_runner._publish_stage(
+            trade_date=date(2026, 8, 24), stage=FunnelStage.SECOND_WAVE,
+            candidates=[], rejected=[], state_root=tmp_path,
+        )
+
+
+def test_publish_stage_uses_actual_completion_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = datetime(2026, 8, 24, 13, 39, tzinfo=UTC)
+    _clock(monkeypatch, observed)
+    fields: list[dict[str, object]] = []
+
+    class Base:
+        def record_event(self, _table: object, _key: str, event: dict[str, object]) -> str:
+            fields.append(event)
+            return "record-1"
+
+    class Push:
+        def push(self, _body: str) -> str:
+            return "message-1"
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(FeishuBaseEventClient, "from_environment", lambda _env: Base())
+    monkeypatch.setattr(stage_runner, "_push_client", Push)
+    stage_runner._publish_stage(
+        trade_date=date(2026, 8, 24), stage=FunnelStage.FINAL_RANK,
+        candidates=[{
+            **_candidate("PASS"), "rvol": 3.0, "premarket_return": 0.01,
+            "catalyst_categories": ["earnings"],
+        }],
+        rejected=[], state_root=tmp_path,
+    )
+    assert fields[0]["选股时间"] == observed
+
+
+def test_publish_stage_stops_when_window_closes_between_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded: list[str] = []
+
+    class Base:
+        def record_event(self, _table: object, key: str, _fields: object) -> str:
+            recorded.append(key)
+            return key
+
+    checks = 0
+
+    def window(_stage: FunnelStage, _date: date) -> None:
+        nonlocal checks
+        checks += 1
+        if checks == 3:
+            raise stage_runner.SelectionWindowClosed("funnel selection window is closed")
+
+    monkeypatch.setattr(stage_runner, "_require_selection_window", window)
+    monkeypatch.setattr(FeishuBaseEventClient, "from_environment", lambda _env: Base())
+    monkeypatch.setattr(stage_runner, "_push_client", lambda: pytest.fail("late push"))
+    with pytest.raises(stage_runner.SelectionWindowClosed):
+        stage_runner._publish_stage(
+            trade_date=date(2026, 8, 24), stage=FunnelStage.SECOND_WAVE,
+            candidates=[_candidate("ONE"), _candidate("TWO")], rejected=[],
+            state_root=tmp_path,
+        )
+    assert recorded == ["funnel:2026-08-24:second_wave:ONE"]
+
+
+def test_publish_stage_stops_when_window_closes_before_push(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checks = 0
+
+    def window(_stage: FunnelStage, _date: date) -> None:
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            raise stage_runner.SelectionWindowClosed("funnel selection window is closed")
+
+    class Push:
+        def push(self, _body: str) -> str:
+            pytest.fail("late push")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(stage_runner, "_require_selection_window", window)
+    monkeypatch.setattr(FeishuBaseEventClient, "from_environment", lambda _env: None)
+    monkeypatch.setattr(stage_runner, "_push_client", Push)
+    with pytest.raises(stage_runner.SelectionWindowClosed):
+        stage_runner._publish_stage(
+            trade_date=date(2026, 8, 24), stage=FunnelStage.SECOND_WAVE,
+            candidates=[], rejected=[], state_root=tmp_path,
+        )
 
 
 def test_second_wave_retry_does_not_refetch_market_data(

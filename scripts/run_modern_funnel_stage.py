@@ -573,6 +573,8 @@ def _push_once(
     key: str,
     body: str,
     payload: dict[str, object],
+    stage: FunnelStage,
+    trade_date: date,
 ) -> str:
     now = datetime.now(UTC)
     claim = ledger.claim(key, claimed_at_utc=now)
@@ -584,6 +586,7 @@ def _push_once(
     if claim != "claimed":
         raise RuntimeError("Livermore notification is already in flight")
     try:
+        _require_selection_window(stage, trade_date)
         message_id = push.push(body)
     except Exception:
         ledger.release_claim(key)
@@ -607,7 +610,8 @@ def _publish_stage(
     state_root: Path,
     strategy_version: str = STRATEGY_VERSION,
 ) -> tuple[tuple[str, ...], str]:
-    now = _stage_observed_at(trade_date, stage, now_utc=datetime.now(UTC))
+    _require_selection_window(stage, trade_date)
+    now = datetime.now(UTC)
     stage_rows = tuple((row, True) for row in candidates) + tuple((row, False) for row in rejected)
     record_ids: tuple[str, ...] = ()
     feishu_failed = False
@@ -633,8 +637,15 @@ def _publish_stage(
             for row, kept in stage_rows
         ]
         if isinstance(base, VpsInvestmentClient):
+            _require_selection_window(stage, trade_date)
             base.queue_events(projections)
-        record_ids = tuple(base.record_event(*projection) for projection in projections)
+        ids: list[str] = []
+        for projection in projections:
+            _require_selection_window(stage, trade_date)
+            ids.append(base.record_event(*projection))
+        record_ids = tuple(ids)
+    except SelectionWindowClosed:
+        raise
     except (FeishuBaseError, RuntimeError, ValueError):
         # Preserve selection and its notification during a Base outage.
         # create_open_confirmation still requires real Base receipts before
@@ -683,6 +694,7 @@ def _publish_stage(
     )
     push = _push_client()
     try:
+        _require_selection_window(stage, trade_date)
         message_id = _push_once(
             ledger,
             push,
@@ -693,6 +705,8 @@ def _publish_stage(
                 "rejected": rejected_text,
                 "feishu_status": "failed" if feishu_failed else "succeeded",
             },
+            stage=stage,
+            trade_date=trade_date,
         )
     finally:
         push.close()
@@ -1301,6 +1315,7 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
         plan_path,
         _plan_payload(args.trade_date, kept),
     )
+    _require_selection_window(FunnelStage.OPEN_CONFIRMATION, args.trade_date)
     authorization = create_open_confirmation(
         confirmation_path=confirmation_path,
         config_path=plan_path,
@@ -1312,6 +1327,7 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
         strategy_version=STRATEGY_VERSION,
         generated_at_utc=datetime.now(UTC),
     )
+    _require_selection_window(FunnelStage.OPEN_CONFIRMATION, args.trade_date)
     paper_pid = _launch_paper_if_confirmed(
         args.trade_date,
         confirmation_path,
@@ -1336,6 +1352,10 @@ def _receipt(path: Path, record_ids: tuple[str, ...], message_id: str) -> dict[s
     }
 
 
+class SelectionWindowClosed(RuntimeError):
+    pass
+
+
 def _require_selection_window(
     stage: FunnelStage, trade_date: date, *, now_utc: datetime | None = None
 ) -> None:
@@ -1354,7 +1374,7 @@ def _require_selection_window(
     if eastern.date() != trade_date or (
         _stage_for(eastern.time()) is not stage and not late_recovery
     ):
-        raise RuntimeError("funnel selection window is closed")
+        raise SelectionWindowClosed("funnel selection window is closed")
 
 
 def main() -> int:
