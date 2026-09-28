@@ -2618,3 +2618,7 @@ Status: offline implementation and verification; no production activation.
   record, before push, and before Paper authorization; audit timestamps use the
   actual publication time. Market-hours throughput remains to be
   verified on a later live session; do not backdate today's missing stages.
+- The scheduler ledger also used the claim time as its success/failure time.
+  Production ticks now stamp stage completion with the actual finish time;
+  injected test clocks remain deterministic. Existing historical rows are
+  untouched.

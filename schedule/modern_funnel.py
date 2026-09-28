@@ -425,7 +425,7 @@ def run_tick(
                 connection,
                 trade_date=trade_date,
                 stage=stage,
-                now_utc=current,
+                now_utc=datetime.now(UTC) if now_utc is None else current,
                 status=status,
                 error=f"{type(exc).__name__}: {exc}",
             )
@@ -441,7 +441,7 @@ def run_tick(
             connection,
             trade_date=trade_date,
             stage=stage,
-            now_utc=current,
+            now_utc=datetime.now(UTC) if now_utc is None else current,
             status=status,
             receipt=receipt,
         )

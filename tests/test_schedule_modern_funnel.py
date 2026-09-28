@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from operations.autonomous_selection_handoff import create_open_confirmation
+from schedule import modern_funnel as funnel
 from schedule.modern_funnel import (
     CompletedStageProcess,
     FunnelStage,
@@ -84,6 +85,32 @@ def test_funnel_runs_each_stage_once_in_dependency_order(tmp_path: Path) -> None
         FunnelStage.FINAL_RANK,
         FunnelStage.OPEN_CONFIRMATION,
     ]
+
+
+def test_scheduler_records_actual_stage_completion_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = _utc(8, 30)
+    finished = _utc(8, 37)
+    reads = 0
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            nonlocal reads
+            reads += 1
+            return (started if reads == 1 else finished).astimezone(tz)
+
+    monkeypatch.setattr(funnel, "datetime", Clock)
+    ledger = tmp_path / "funnel.sqlite3"
+    result = run_tick(ledger_path=ledger, executor=FakeExecutor())
+    assert result.status is FunnelTickStatus.SUCCEEDED
+    with sqlite3.connect(ledger) as connection:
+        updated = connection.execute(
+            "SELECT updated_at_utc FROM funnel_runs WHERE trade_date=? AND stage=?",
+            (TRADE_DATE.isoformat(), FunnelStage.FIRST_WAVE.value),
+        ).fetchone()
+    assert updated == (finished.isoformat(),)
 
 
 def test_failed_stage_retries_only_inside_its_window(tmp_path: Path) -> None:
