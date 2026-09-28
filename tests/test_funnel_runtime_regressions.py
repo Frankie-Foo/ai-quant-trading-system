@@ -214,6 +214,12 @@ def test_repeat_bonus_applies_before_top20_truncation(
 def test_first_wave_records_capacity_rejections_without_failing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:
+            return datetime(2026, 9, 22, 13, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(stage, "datetime", Clock)
     publications: list[object] = []
     monkeypatch.setattr(stage, "_rank_live_pool", lambda *a, **k: (
         [{"symbol": "PASS"}], [{"symbol": "OVERFLOW", "reasons": ["容量落选"]}], "pool",

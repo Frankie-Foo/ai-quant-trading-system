@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from typing import Any, Literal, cast, overload
 
 import httpx
@@ -24,6 +25,19 @@ BarAdjustment = Literal["split", "raw"]
 
 class DirectMarketDataError(RuntimeError):
     """Sanitized direct market-data failure without credentials or bodies."""
+
+
+@dataclass(frozen=True)
+class LatestSipObservation:
+    quote: SipQuote
+    server_upper_bound_utc: datetime
+    received_monotonic: float
+    request_duration_seconds: float
+
+    def observed_at_utc(self) -> datetime:
+        return self.server_upper_bound_utc + timedelta(
+            seconds=max(0.0, time.monotonic() - self.received_monotonic)
+        )
 
 
 @dataclass(frozen=True)
@@ -120,6 +134,53 @@ class DirectAlpacaMarketDataClient:
     def close(self) -> None:
         if self._owns_client:
             self._client.close()
+
+    def fetch_latest_quote(self, symbol: str) -> LatestSipObservation:
+        normalized = _symbols((symbol,))[0]
+        started = time.monotonic()
+        try:
+            response = self._client.get(
+                f"{self.base_url}/v2/stocks/{normalized}/quotes/latest",
+                headers=self._headers,
+                params={"feed": "sip"},
+            )
+        except (httpx.HTTPError, OSError) as exc:
+            raise DirectMarketDataError(
+                f"Alpaca latest SIP quote request failed: {type(exc).__name__}"
+            ) from exc
+        received = time.monotonic()
+        if response.status_code != 200:
+            raise DirectMarketDataError(
+                f"Alpaca latest SIP quote request failed with HTTP {response.status_code}"
+            )
+        try:
+            server_date = parsedate_to_datetime(response.headers["Date"])
+            if server_date.tzinfo is None:
+                raise ValueError("server Date lacks timezone")
+            payload = response.json()
+            raw_quote = payload["quote"]
+            if not isinstance(raw_quote, dict):
+                raise ValueError("latest quote is not an object")
+            ts_utc = _timestamp(raw_quote.get("t"))
+            quote = SipQuote.model_validate({
+                "symbol": normalized,
+                "ts_utc": ts_utc,
+                "bid_price": raw_quote.get("bp"),
+                "bid_size": raw_quote.get("bs"),
+                "ask_price": raw_quote.get("ap"),
+                "ask_size": raw_quote.get("as"),
+                "provenance": f"alpaca.sip.rest.latest@{ts_utc.isoformat()}",
+            })
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DirectMarketDataError(
+                "Alpaca latest SIP quote or server clock is invalid"
+            ) from exc
+        upper_bound = server_date.astimezone(UTC) + timedelta(
+            seconds=1 + received - started
+        )
+        if quote.ts_utc > upper_bound:
+            raise DirectMarketDataError("Alpaca latest SIP quote exceeds server clock")
+        return LatestSipObservation(quote, upper_bound, received, received - started)
 
     @overload
     def fetch_bars(

@@ -15,11 +15,21 @@ from schedule.modern_funnel import (
     FunnelTickResult,
     FunnelTickStatus,
     ProductionFunnelExecutor,
+    _safe_process_error,
     run_tick,
 )
 
 EASTERN = ZoneInfo("America/New_York")
 TRADE_DATE = date(2026, 8, 24)
+
+
+def test_scheduler_keeps_safe_child_module_failure_identity() -> None:
+    assert _safe_process_error(
+        "RuntimeError: scripts.build_catalyst_snapshot failed with exit code 1"
+    ) == "scripts.build_catalyst_snapshot failed with exit code 1"
+    assert _safe_process_error(
+        "RuntimeError: password=super-secret"
+    ) == "stage failure (details redacted)"
 
 
 class FakeExecutor:

@@ -160,7 +160,14 @@ def _safe_process_error(line: str) -> str:
         return str(FeishuCliError(kind, code, None if exit_code == "unknown" else int(exit_code)))
     if line == "RuntimeError: Paper startup failed":
         return line
-    return "stage error details redacted; inspect local logs"
+    child = re.fullmatch(
+        r"RuntimeError: ((?:schedule|scripts|data_plane)\."
+        r"[A-Za-z0-9_.]+ failed with exit code [1-9][0-9]{0,2})",
+        line,
+    )
+    if child:
+        return child.group(1)
+    return "stage failure (details redacted)"
 
 
 def _last_json_object(stdout: str) -> dict[str, object]:

@@ -729,13 +729,20 @@ def test_loop_client_extracts_fastapi_validation_detail_without_echoing_input(
 
 
 def test_outcome_daily_index_uses_alpaca_fallback_only_for_missing_dates(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from data_plane.contracts import DataQualityCheck, QualitySeverity
     from operations.loop_integration.outcome_reporter import _load_daily_index
 
     data_root = tmp_path / "data"
     observed_before = datetime(2026, 9, 24, tzinfo=UTC)
+
+    class SnapshotClock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            return datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
+
+    monkeypatch.setattr("data_plane.storage.datetime", SnapshotClock)
 
     def persist_day(trade_date: date, source: str, close: float) -> None:
         frame = canonicalize_daily_bars(

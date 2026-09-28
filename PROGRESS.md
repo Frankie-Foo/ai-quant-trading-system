@@ -2573,3 +2573,30 @@ Status: offline implementation and verification; no production activation.
   broker calls and zero external writes. A separate regression covers both Paper
   journal roots. Outcome synchronization remains disabled until its approved cost
   model configuration exists; no policy, risk threshold or trading rule changed.
+
+## M91 2026-09-28 packaged Paper stability hotfix
+
+- Alpaca Paper entry now obtains the latest SIP NBBO and checks its age against the
+  API server's Date plus monotonic elapsed time. Account, risk and open-order reads
+  happen before the quote; the final pre-POST guard checks freshness again.
+  Missing server time or market data fails closed; no spread, stop or portfolio
+  cap was relaxed.
+- Packaged Loop reviews use a verified base-commit-plus-all-shipped-Python-code
+  digest identity when `.git` is absent. A mismatch blocks synchronization; no
+  historic trade or signal artifact is rewritten. Fixed two expired test fixtures.
+- The source branch also preserves three earlier production hotfixes and their
+  four regression tests, so its Python source matches the deployed release.
+- Independent review found and fixed manifest bypass under Git, misleading
+  provisional-pool labeling, and unvalidated observation symbols. A slow SIP
+  response gets one fresh quote retry; stale data still blocks entry. The
+  source digest normalizes line endings so Windows checkouts retain identity.
+- Red tests reproduced the absent latest-quote path. The staged release and the
+  deployed original task directory each passed **1381 pytest tests**, Ruff,
+  strict Mypy for four changed modules and Python compilation. Read-only Paper
+  reconciliation found zero positions and open orders. The scheduler canary
+  returned `not_due`; no order or message was emitted.
+- Windows denied changing/registering the scheduled task under a medium-integrity
+  token. After exporting task XML and backing up eight release files, the same
+  tested hotfix was installed in its existing code directory. The task was
+  re-enabled with the original action and next run 2026-09-28 20:30 Beijing.
+  Market-hours acceptance remains pending until that scheduled run.

@@ -15,6 +15,7 @@ from data_plane.providers.alpaca_direct import (
     BarTimeframe,
     DirectAlpacaMarketDataClient,
     DirectMarketDataError,
+    LatestSipObservation,
 )
 from data_plane.quality import canonicalize_bars, nullable_float
 
@@ -98,6 +99,23 @@ def _direct_client(feed: AlpacaStockFeed) -> DirectAlpacaMarketDataClient:
         )
     key_id, secret_key = _direct_credentials()
     return DirectAlpacaMarketDataClient(key_id=key_id, secret_key=secret_key)
+
+
+def latest_sip_quote(symbol: str) -> LatestSipObservation:
+    """Fetch immediate SIP NBBO with a server-derived observation clock."""
+    client = _direct_client("sip")
+    try:
+        observation = client.fetch_latest_quote(symbol)
+        if (
+            observation.request_duration_seconds > 0.5
+            and (observation.observed_at_utc() - observation.quote.ts_utc).total_seconds() > 2
+        ):
+            observation = client.fetch_latest_quote(symbol)
+        return observation
+    except (DirectMarketDataError, ValueError) as exc:
+        raise DownloadError("direct Alpaca latest SIP quote failed") from exc
+    finally:
+        client.close()
 
 
 def _use_direct_provider(client: httpx.Client | None) -> bool:
