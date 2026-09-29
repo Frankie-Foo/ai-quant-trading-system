@@ -127,6 +127,16 @@ def test_windows_observation_tasks_cover_all_daily_phases_without_order_flags() 
     assert "TRADING_KILL_SWITCH" not in installer + premarket + postmarket
 
 
+def test_windows_observation_tasks_start_without_console_window() -> None:
+    installer = (ROOT / "scripts/install_local_observation_tasks.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert '"pythonw.exe"' in installer
+    assert '"run_hidden_task.py"' in installer
+    assert "-Execute $windowlessPython" in installer
+    assert "-WorkingDirectory $repositoryRoot" in installer
+
+
 def test_windows_funnel_runner_uses_explicit_machine_runtime_dependencies() -> None:
     installer = (ROOT / "scripts/install_local_observation_tasks.ps1").read_text(
         encoding="utf-8"

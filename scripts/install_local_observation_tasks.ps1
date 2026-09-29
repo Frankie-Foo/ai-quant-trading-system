@@ -11,6 +11,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 $PythonPath = (Resolve-Path -LiteralPath $PythonPath).Path
+$windowlessPython = Join-Path (Split-Path -Parent $PythonPath) "pythonw.exe"
+if (-not (Test-Path -LiteralPath $windowlessPython)) {
+    throw "Windowless Python launcher is missing: $windowlessPython"
+}
 $EnvironmentFile = (Resolve-Path -LiteralPath $EnvironmentFile).Path
 $DataRoot = (Resolve-Path -LiteralPath $DataRoot).Path
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -121,9 +125,11 @@ function Register-ObservationTask {
         [Parameter(Mandatory = $true)][string]$Description
     )
 
+    $launcher = Join-Path $PSScriptRoot "run_hidden_task.py"
     $action = New-ScheduledTaskAction `
-        -Execute "powershell.exe" `
-        -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Runner`" $RunnerArguments"
+        -Execute $windowlessPython `
+        -Argument "`"$launcher`" `"$Runner`" $RunnerArguments" `
+        -WorkingDirectory $repositoryRoot
     $trigger = if ($WeeklyOn) {
         New-ScheduledTaskTrigger -Weekly -DaysOfWeek $WeeklyOn -At $DailyAt
     } elseif ($DailyAt) {

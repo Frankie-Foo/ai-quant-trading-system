@@ -2712,3 +2712,19 @@ Status: offline implementation and verification; no production activation.
   the old identity correctly caused 32 Loop tests to fail closed before the
   update. The subsequent full pytest suite passed 1,401 tests in 149.91s;
   Ruff passed for the changed source and test. No risk or broker logic changed.
+
+## M96 2026-09-29 windowless Windows task launch
+
+- The four owned Scheduled Tasks were still starting interactive `powershell.exe`;
+  `-WindowStyle Hidden` could not prevent a console appearing before PowerShell
+  parsed its arguments. The installer now uses `pythonw.exe` and a release-owned
+  launcher that starts the same PowerShell runner with `CREATE_NO_WINDOW`.
+- The launcher retains the existing task parameters, writes startup/errors to a
+  per-runner log and returns the child exit code to Task Scheduler. Trading rules,
+  broker authority and task times are unchanged.
+- Regression tests cover the no-console process flag, argument forwarding, exit
+  code and runner allowlist. Full pytest passed 1,404 tests, full Mypy found no
+  issues in 531 files, and Ruff passed. The offline Paper acceptance drill
+  reported zero broker calls and zero external writes. A `pythonw.exe` smoke
+  launched the postmarket runner with deliberately missing paths: it failed
+  before scheduler work and wrote the expected nonzero exit to the launcher log.
