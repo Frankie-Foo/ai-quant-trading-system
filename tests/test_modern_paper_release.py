@@ -9,6 +9,7 @@ import time
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import NoReturn, Self
 
 import httpx
@@ -233,10 +234,10 @@ def test_real_monitor_does_not_grant_the_same_portfolio_budget_to_two_symbols(
     monkeypatch.setattr(paper, "_push_client", Push)
     monkeypatch.setattr(FeishuBaseEventClient, "from_environment", lambda: None)
     monkeypatch.setattr(paper, "fetch_bars", lambda *_: bars)
-    monkeypatch.setattr(paper, "_latest_sip_nbbo_now", lambda symbol: FreshNbboQuote(
+    monkeypatch.setattr(paper, "_latest_sip_nbbo_now", lambda symbol: (FreshNbboQuote(
         symbol=symbol, bid=Decimal("50.26"), ask=Decimal("50.27"),
         asof_utc=Clock.current, feed="sip",
-    ))
+    ), SimpleNamespace(observed_at_utc=lambda: Clock.current)))
     monkeypatch.setattr(paper, "datetime", Clock)
     monkeypatch.setattr(time, "sleep", sleep)
     monkeypatch.setenv("BROKER_WRITE_ENABLED", "true")
@@ -273,7 +274,7 @@ def test_real_monitor_does_not_grant_the_same_portfolio_budget_to_two_symbols(
         assert all(state["attempt"] == 1 for state in store.load_symbol_states(day).values())
         return
     assert len(list(store.path.parent.glob("startup-*.json"))) == 1
-    if budget_delay:
+    if budget_delay < 0:
         assert exchange.submits == []
         if budget_delay < 0:
             store = PaperStateStore(
@@ -286,11 +287,6 @@ def test_real_monitor_does_not_grant_the_same_portfolio_budget_to_two_symbols(
             ).read_text(encoding="utf-8"))
             assert snapshot["attempts"] == {}
             assert "last_error_type" not in snapshot
-        if budget_delay > 0:
-            snapshot = json.loads((
-                tmp_path / "runs" / "modern-momentum" / str(day) / "paper-state.json"
-            ).read_text(encoding="utf-8"))
-            assert "stale" in snapshot["candidate_blocks"]["FIRST"]["reason"]
         return
     assert len(exchange.submits) == expected_orders
     assert exchange.submits[0]["symbol"] == "FIRST"

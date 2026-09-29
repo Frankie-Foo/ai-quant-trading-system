@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import subprocess
 from datetime import date, datetime
 from pathlib import Path
@@ -46,14 +47,52 @@ def _finite(value: object) -> float | None:
 
 
 def _git_commit(project_root: Path) -> str:
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=project_root,
-        check=True,
-        capture_output=True,
-        text=True,
+    identity_path = project_root / "release-code-id.txt"
+    if identity_path.is_file():
+        try:
+            identity = identity_path.read_text(encoding="ascii").strip()
+        except OSError as exc:
+            raise RuntimeError("release code identity is unavailable") from exc
+        if not re.fullmatch(r"[0-9a-f]{40}\+[0-9a-f]{12}", identity):
+            raise RuntimeError("release code identity is invalid")
+        if identity.split("+", 1)[1] != _release_code_digest(project_root):
+            raise RuntimeError("release code identity does not match deployed source")
+        return identity
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        result = None
+    if result is not None and result.returncode == 0 and re.fullmatch(
+        r"[0-9a-f]{40}", result.stdout.strip()
+    ):
+        return result.stdout.strip()
+    raise RuntimeError("release code identity is unavailable")
+
+
+def _release_code_digest(project_root: Path) -> str:
+    """Fingerprint all shipped Python code, excluding tests and mutable run data."""
+    digest = hashlib.sha256()
+    roots = (
+        "agent_gateway", "agents", "client", "config", "data_plane", "db",
+        "execution", "gateway", "kernel", "operations", "plugins", "reports",
+        "research", "schedule", "scripts", "skills",
     )
-    return result.stdout.strip()
+    files = sorted(
+        path for root in roots for path in (project_root / root).rglob("*.py")
+        if path.is_file()
+    )
+    if not files:
+        raise RuntimeError("release code files are unavailable")
+    for path in files:
+        name = path.relative_to(project_root).as_posix()
+        digest.update(name.encode("utf-8") + b"\0")
+        digest.update(path.read_text(encoding="utf-8").encode("utf-8"))
+    return digest.hexdigest()[:12]
 
 
 def load_accepted_snapshot(path: Path) -> tuple[DatasetSnapshot, pl.DataFrame]:

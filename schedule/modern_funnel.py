@@ -160,7 +160,14 @@ def _safe_process_error(line: str) -> str:
         return str(FeishuCliError(kind, code, None if exit_code == "unknown" else int(exit_code)))
     if line == "RuntimeError: Paper startup failed":
         return line
-    return "stage error details redacted; inspect local logs"
+    child = re.fullmatch(
+        r"RuntimeError: ((?:schedule|scripts|data_plane)\."
+        r"[A-Za-z0-9_.]+ failed with exit code [1-9][0-9]{0,2})",
+        line,
+    )
+    if child:
+        return child.group(1)
+    return "stage failure (details redacted)"
 
 
 def _last_json_object(stdout: str) -> dict[str, object]:
@@ -195,6 +202,35 @@ def _prerequisite(stage: FunnelStage) -> FunnelStage | None:
         FunnelStage.FINAL_RANK: FunnelStage.SECOND_WAVE,
         FunnelStage.OPEN_CONFIRMATION: FunnelStage.FINAL_RANK,
     }[stage]
+
+
+def _recovery_window(stage: FunnelStage, local_time: time) -> bool:
+    start, end = {
+        FunnelStage.FIRST_WAVE: (time(9, 0), time(9, 30)),
+        FunnelStage.SECOND_WAVE: (time(9, 30), time(9, 45)),
+        FunnelStage.FINAL_RANK: (time(9, 35), time(9, 45)),
+    }.get(stage, (time.max, time.min))
+    return start <= local_time < end
+
+
+def _first_missing_predecessor(
+    connection: sqlite3.Connection, trade_date: date, stage: FunnelStage
+) -> FunnelStage | None:
+    ordered = (
+        FunnelStage.FIRST_WAVE,
+        FunnelStage.SECOND_WAVE,
+        FunnelStage.FINAL_RANK,
+        FunnelStage.OPEN_CONFIRMATION,
+    )
+    day = trade_date.isoformat()
+    for predecessor in ordered[: ordered.index(stage)]:
+        row = connection.execute(
+            "SELECT status FROM funnel_runs WHERE trade_date=? AND stage=?",
+            (day, predecessor.value),
+        ).fetchone()
+        if row is None or row[0] != FunnelTickStatus.SUCCEEDED.value:
+            return predecessor
+    return None
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -359,6 +395,18 @@ def run_tick(
             stage=stage,
             now_utc=current,
         )
+        if claim_status is FunnelTickStatus.PREREQUISITE_MISSING:
+            local_time = eastern.time().replace(tzinfo=None)
+            missing = _first_missing_predecessor(connection, trade_date, stage)
+            if missing is not None and _recovery_window(missing, local_time):
+                # Recover only the earliest missing stage, preserving funnel order.
+                stage = missing
+                claim_status = _claim(
+                    connection,
+                    trade_date=trade_date,
+                    stage=stage,
+                    now_utc=current,
+                )
         if claim_status is not None:
             return FunnelTickResult(claim_status, stage)
         try:
@@ -377,7 +425,7 @@ def run_tick(
                 connection,
                 trade_date=trade_date,
                 stage=stage,
-                now_utc=current,
+                now_utc=datetime.now(UTC) if now_utc is None else current,
                 status=status,
                 error=f"{type(exc).__name__}: {exc}",
             )
@@ -393,7 +441,7 @@ def run_tick(
             connection,
             trade_date=trade_date,
             stage=stage,
-            now_utc=current,
+            now_utc=datetime.now(UTC) if now_utc is None else current,
             status=status,
             receipt=receipt,
         )

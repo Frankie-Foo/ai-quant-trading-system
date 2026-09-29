@@ -1,9 +1,12 @@
+import sqlite3
+from contextlib import closing
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-from execution.alpaca_paper import BrokerOrder, PaperPosition
+from execution.alpaca_paper import BrokerOrder, FreshNbboQuote, PaperPosition
 from operations import paper_state
 from operations.paper_state import (
     OutboxClaim,
@@ -13,6 +16,204 @@ from operations.paper_state import (
 
 TRADE_DATE = date(2026, 8, 24)
 NOW = datetime(2026, 8, 24, 14, 0, tzinfo=UTC)
+
+
+def _source_facts(path: Path) -> tuple[list[tuple[object, ...]], ...]:
+    tables = (
+        "paper_orders", "paper_symbol_state", "paper_outbox", "paper_run_lease",
+        "paper_monitor_cursor", "paper_store_metadata", "paper_entry_quotes",
+    )
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+        return tuple(db.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall() for table in tables)
+
+
+def test_entry_quote_audit_survives_restart_and_cannot_change_result(tmp_path: Path) -> None:
+    path = tmp_path / "paper.sqlite3"
+    quote = FreshNbboQuote(
+        symbol="AAPL", bid=Decimal("99.50"), ask=Decimal("100.50"),
+        asof_utc=NOW, feed="sip",
+    )
+    first = PaperStateStore(path)
+    first.record_entry_quote(
+        trade_date=TRADE_DATE, client_order_id="entry-1", symbol="AAPL", attempt=1,
+        signal_ts_utc=NOW, quote=quote, observed_at_utc=NOW,
+    )
+    first.record_entry_quote(
+        trade_date=TRADE_DATE, client_order_id="entry-1", symbol="AAPL", attempt=1,
+        signal_ts_utc=NOW, quote=quote, observed_at_utc=NOW,
+    )
+    restarted = PaperStateStore(path)
+    restarted.mark_entry_quote_result(
+        client_order_id="entry-1", observed_at_utc=NOW,
+        outcome="guard_refused", reason="price drift",
+    )
+    with sqlite3.connect(path) as connection:
+        rows = connection.execute(
+            "SELECT symbol,attempt,feed,bid,ask,relative_spread,outcome,reason "
+            "FROM paper_entry_quotes WHERE client_order_id=?", ("entry-1",),
+        ).fetchall()
+    assert rows == [
+        ("AAPL", 1, "sip", "99.50", "100.50", "0.01", "guard_refused", "price drift")
+    ]
+    with pytest.raises(RuntimeError, match="outcome changed"):
+        restarted.mark_entry_quote_result(
+            client_order_id="entry-1", observed_at_utc=NOW,
+            outcome="pre_submit_rejected",
+        )
+
+
+def test_broker_attachment_atomically_marks_entry_quote_submitted(tmp_path: Path) -> None:
+    path = tmp_path / "paper.sqlite3"
+    store = PaperStateStore(path)
+    earlier = NOW - timedelta(seconds=1)
+    store.record_entry_quote(
+        trade_date=TRADE_DATE, client_order_id="entry-1", symbol="AAPL", attempt=1,
+        signal_ts_utc=earlier,
+        quote=FreshNbboQuote(
+            symbol="AAPL", bid=Decimal("98.50"), ask=Decimal("99.50"),
+            asof_utc=earlier, feed="sip",
+        ),
+        observed_at_utc=earlier,
+    )
+    store.mark_entry_quote_result(
+        client_order_id="entry-1", observed_at_utc=earlier,
+        outcome="guard_refused", reason="price drift",
+    )
+    store.record_entry_quote(
+        trade_date=TRADE_DATE, client_order_id="entry-1", symbol="AAPL", attempt=1,
+        signal_ts_utc=NOW,
+        quote=FreshNbboQuote(
+            symbol="AAPL", bid=Decimal("99.50"), ask=Decimal("100.50"),
+            asof_utc=NOW, feed="sip",
+        ),
+        observed_at_utc=NOW,
+    )
+    store.record_order_intent(
+        trade_date=TRADE_DATE, client_order_id="entry-1", symbol="AAPL", attempt=1,
+        role="entry", quantity=1, payload={}, observed_at_utc=NOW,
+        entry_quote_observed_at_utc=NOW,
+    )
+    later = NOW + timedelta(seconds=1)
+    store.record_entry_quote(
+        trade_date=TRADE_DATE, client_order_id="entry-1", symbol="AAPL", attempt=1,
+        signal_ts_utc=NOW,
+        quote=FreshNbboQuote(
+            symbol="AAPL", bid=Decimal("101.50"), ask=Decimal("102.50"),
+            asof_utc=later, feed="sip",
+        ),
+        observed_at_utc=later,
+    )
+    store.mark_entry_quote_result(
+        client_order_id="entry-1", observed_at_utc=later,
+        outcome="guard_refused", reason="later process",
+    )
+    restarted = PaperStateStore(path)
+    restarted.attach_broker_order(
+        client_order_id="entry-1", broker_order_id="broker-1", status="new",
+        observed_at_utc=NOW,
+    )
+    restarted.record_order_intent(
+        trade_date=TRADE_DATE, client_order_id="entry-1", symbol="AAPL", attempt=1,
+        role="entry", quantity=1, payload={}, observed_at_utc=NOW,
+        entry_quote_observed_at_utc=NOW,
+    )
+    with sqlite3.connect(path) as connection:
+        outcomes = connection.execute(
+            "SELECT outcome,order_intent FROM paper_entry_quotes WHERE client_order_id=? "
+            "ORDER BY observed_at_utc", ("entry-1",),
+        ).fetchall()
+    assert outcomes == [
+        ("guard_refused", 0), ("submitted", 1), ("guard_refused", 0)
+    ]
+    order = restarted.get_order("entry-1")
+    assert order is not None and order.broker_order_id == "broker-1"
+
+
+@pytest.mark.parametrize(
+    ("trade_date", "symbol", "attempt"),
+    [
+        (TRADE_DATE + timedelta(days=1), "AAPL", 1),
+        (TRADE_DATE, "MSFT", 1),
+        (TRADE_DATE, "AAPL", 2),
+    ],
+)
+def test_entry_intent_refuses_quote_with_different_identity(
+    tmp_path: Path, trade_date: date, symbol: str, attempt: int,
+) -> None:
+    store = PaperStateStore(tmp_path / "paper.sqlite3")
+    store.record_entry_quote(
+        trade_date=TRADE_DATE, client_order_id="entry-1", symbol="AAPL", attempt=1,
+        signal_ts_utc=NOW,
+        quote=FreshNbboQuote(
+            symbol="AAPL", bid=Decimal("99.50"), ask=Decimal("100.50"),
+            asof_utc=NOW, feed="sip",
+        ),
+        observed_at_utc=NOW,
+    )
+    with pytest.raises(RuntimeError, match="quote identity"):
+        store.record_order_intent(
+            trade_date=trade_date, client_order_id="entry-1", symbol=symbol,
+            attempt=attempt, role="entry", quantity=1, payload={}, observed_at_utc=NOW,
+            entry_quote_observed_at_utc=NOW,
+        )
+    assert store.get_order("entry-1") is None
+
+
+def test_rejected_entry_quote_and_intent_abort_commit_together(tmp_path: Path) -> None:
+    path = tmp_path / "paper.sqlite3"
+    store = PaperStateStore(path)
+    store.record_entry_quote(
+        trade_date=TRADE_DATE, client_order_id="entry-1", symbol="AAPL", attempt=1,
+        signal_ts_utc=NOW,
+        quote=FreshNbboQuote(
+            symbol="AAPL", bid=Decimal("99.50"), ask=Decimal("100.50"),
+            asof_utc=NOW, feed="sip",
+        ),
+        observed_at_utc=NOW,
+    )
+    store.record_order_intent(
+        trade_date=TRADE_DATE, client_order_id="entry-1", symbol="AAPL", attempt=1,
+        role="entry", quantity=1, payload={}, observed_at_utc=NOW,
+        entry_quote_observed_at_utc=NOW,
+    )
+    with pytest.raises(RuntimeError, match="atomic order resolution"):
+        store.mark_entry_quote_result(
+            client_order_id="entry-1", observed_at_utc=NOW,
+            outcome="pre_submit_rejected", reason="quote changed",
+        )
+    pending: dict[str, object] = {"phase": "entry_pending", "entry_client_id": "entry-1"}
+    store.save_symbol_state(
+        trade_date=TRADE_DATE, symbol="AAPL", state=pending, observed_at_utc=NOW,
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TRIGGER fail_quote_abort BEFORE UPDATE OF outcome ON paper_entry_quotes "
+            "BEGIN SELECT RAISE(ABORT, 'injected quote write failure'); END"
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="injected quote write failure"):
+        store.abort_unsubmitted_entry(
+            client_order_id="entry-1", prior_state=None, observed_at_utc=NOW,
+            entry_quote_observed_at_utc=NOW, rejection_reason="quote changed",
+        )
+    order = store.get_order("entry-1")
+    assert order is not None and order.status == "intent"
+    assert store.load_symbol_states(TRADE_DATE)["AAPL"] == pending
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            "SELECT outcome FROM paper_entry_quotes WHERE client_order_id='entry-1'"
+        ).fetchone() == ("observed",)
+        connection.execute("DROP TRIGGER fail_quote_abort")
+    store.abort_unsubmitted_entry(
+        client_order_id="entry-1", prior_state=None, observed_at_utc=NOW,
+        entry_quote_observed_at_utc=NOW, rejection_reason="quote changed",
+    )
+    order = store.get_order("entry-1")
+    assert order is not None and order.status == "aborted"
+    assert store.load_symbol_states(TRADE_DATE) == {}
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            "SELECT outcome,reason FROM paper_entry_quotes WHERE client_order_id='entry-1'"
+        ).fetchone() == ("pre_submit_rejected", "quote changed")
 
 
 @pytest.mark.parametrize("bound", [False, True])
@@ -219,7 +420,7 @@ def test_prior_day_discovery_is_readonly_and_never_creates_a_missing_database(
         state={"phase": "entry_pending", "entry_client_id": "old-entry", "attempt": 1},
         observed_at_utc=NOW,
     )
-    original = prior.path.read_bytes()
+    original = _source_facts(prior.path)
     future = PaperStateStore(tmp_path / "2026-08-26" / "paper-state.sqlite3")
     future.save_symbol_state(
         trade_date=date(2026, 8, 26), symbol="MSFT", state={"phase": "active"},
@@ -228,7 +429,7 @@ def test_prior_day_discovery_is_readonly_and_never_creates_a_missing_database(
     assert paper_state.discover_prior_day_stores(
         tmp_path, trade_date=date(2026, 8, 25),
     ) == (prior.path.resolve(),)
-    assert prior.path.read_bytes() == original
+    assert _source_facts(prior.path) == original
     missing = tmp_path / "missing"
     assert paper_state.discover_prior_day_stores(missing, trade_date=TRADE_DATE) == ()
     assert not missing.exists()
@@ -318,7 +519,7 @@ def test_explicit_exit_recovery_preserves_lineage_orders_outbox_and_progress(
 ) -> None:
     prior = _prior_store(tmp_path)
     original_state = prior.load_symbol_states(TRADE_DATE)["AAPL"]
-    original_bytes = prior.path.read_bytes()
+    original_facts = _source_facts(prior.path)
     target_date = date(2026, 8, 25)
     now = NOW + timedelta(days=1)
     target = PaperStateStore(tmp_path / target_date.isoformat() / "paper-state.sqlite3")
@@ -340,20 +541,20 @@ def test_explicit_exit_recovery_preserves_lineage_orders_outbox_and_progress(
         prior.path, source_trade_date=TRADE_DATE, trade_date=target_date, observed_at_utc=now,
     )
     assert replay["AAPL"] == progressed
-    assert prior.path.read_bytes() == original_bytes
+    assert _source_facts(prior.path) == original_facts
     assert prior.load_symbol_states(TRADE_DATE)["AAPL"] == original_state
 
 
 def test_read_prior_day_states_exposes_original_order_proof_without_writing(tmp_path: Path) -> None:
     prior = _prior_store(tmp_path)
-    original = prior.path.read_bytes()
+    original = _source_facts(prior.path)
     history = paper_state.read_prior_day_states(tmp_path, trade_date=date(2026, 8, 25))
     snapshot = history[TRADE_DATE]
     assert snapshot.trade_date == TRADE_DATE
     assert snapshot.path == prior.path.resolve()
     assert snapshot.states["AAPL"]["entry_client_id"] == "old-entry"
     assert snapshot.orders[0] == prior.get_order("old-entry")
-    assert prior.path.read_bytes() == original
+    assert _source_facts(prior.path) == original
 
 
 @pytest.mark.parametrize("blocker", ["active-lease", "state-conflict", "order-conflict"])
@@ -395,7 +596,7 @@ def test_stopped_state_is_imported_as_evidence_not_assumed_flat(tmp_path: Path) 
     prior.save_symbol_state(
         trade_date=TRADE_DATE, symbol="MSFT", state=stopped, observed_at_utc=NOW,
     )
-    original = prior.path.read_bytes()
+    original = _source_facts(prior.path)
     target = PaperStateStore(tmp_path / "recovery.sqlite3")
     imported = target.import_exit_recovery(
         prior.path, source_trade_date=TRADE_DATE, trade_date=date(2026, 8, 25),
@@ -404,7 +605,7 @@ def test_stopped_state_is_imported_as_evidence_not_assumed_flat(tmp_path: Path) 
     assert set(imported) == {"AAPL", "MSFT"}
     assert all(imported["MSFT"][key] == value for key, value in stopped.items())
     assert imported["MSFT"]["recovery_only"] is True
-    assert prior.path.read_bytes() == original
+    assert _source_facts(prior.path) == original
 
 
 def _parent_proof_store(tmp_path: Path) -> tuple[PaperStateStore, BrokerOrder, BrokerOrder]:

@@ -24,7 +24,7 @@ class ModernMomentumConfig:
     target_r: float = 3.0
     max_all_in_stop_pct: float = 0.02
     relative_spread: float = 0.001
-    maximum_entry_relative_spread: float = 0.0025
+    maximum_entry_relative_spread: float | None = None
     market_impact_pct: float = 0.0002
     stop_slippage_reserve_pct: float = 0.005
     signal_cutoff_minutes: int = 330
@@ -37,7 +37,7 @@ def modern_strategy_manifest(config: ModernMomentumConfig | None = None) -> dict
     encoded = json.dumps(effective, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return {
         "schema_version": "modern_strategy_manifest.v1",
-        "strategy_version": "modern-h15-current-signal.v4",
+        "strategy_version": "modern-h15-current-signal.v5",
         "effective_config": effective,
         "config_sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
         "first_entry_bar_minutes": 1,
@@ -105,14 +105,14 @@ def modern_pullback_shadow_manifest() -> dict[str, Any]:
         "require_rising_vwap": True,
         "require_higher_lows": True,
         "require_positive_strengthening_macd": True,
-        "maximum_entry_relative_spread": 0.0025,
+        "maximum_entry_relative_spread": None,
         "max_all_in_stop_pct": 0.02,
         "target_r": 3.0,
     }
     encoded = json.dumps(effective, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return {
         "schema_version": "modern_pullback_shadow_manifest.v1",
-        "strategy_version": "modern-h15-pullback-acceptance-shadow.v1",
+        "strategy_version": "modern-h15-pullback-acceptance-shadow.v2",
         "status": "shadow",
         "orders_enabled": False,
         "effective_config": effective,
@@ -127,7 +127,7 @@ def modern_entry_allowed(
     config: ModernMomentumConfig,
     relative_spread: float | None = None,
 ) -> bool:
-    """Shared first/reentry time and spread gate; cutoff itself is not actionable."""
+    """Shared first/reentry time gate; optional spread cap supports historical comparisons."""
     if session_open_utc.tzinfo is None or asof_utc.tzinfo is None:
         raise ValueError("session_open_utc and asof_utc must be timezone-aware")
     spread = config.relative_spread if relative_spread is None else relative_spread
@@ -137,7 +137,10 @@ def modern_entry_allowed(
         session_open_utc
         <= asof_utc
         < session_open_utc + timedelta(minutes=config.signal_cutoff_minutes)
-        and spread <= config.maximum_entry_relative_spread
+        and (
+            config.maximum_entry_relative_spread is None
+            or spread <= config.maximum_entry_relative_spread
+        )
     )
 
 

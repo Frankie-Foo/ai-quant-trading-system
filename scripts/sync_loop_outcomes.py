@@ -8,7 +8,7 @@ from pathlib import Path
 from operations.local_env import load_project_env
 from operations.loop_integration.client import LoopClient
 from operations.loop_integration.contracts import LoopOutcomeEnvelope
-from operations.loop_integration.outbox import LoopOutbox
+from operations.loop_integration.outbox import LoopOutbox, default_loop_outbox_path
 from operations.loop_integration.review_builder import envelope_sha256
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,7 +18,7 @@ def main() -> None:
     load_project_env(ROOT)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--file", required=True, type=Path)
-    parser.add_argument("--outbox", type=Path, default=ROOT / "runs/loop-integration.sqlite3")
+    parser.add_argument("--outbox", type=Path, default=default_loop_outbox_path(ROOT))
     parser.add_argument("--stage-only", action="store_true")
     args = parser.parse_args()
     raw = json.loads(args.file.read_text(encoding="utf-8"))

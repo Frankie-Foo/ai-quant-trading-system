@@ -47,8 +47,6 @@ from scripts.monitor_modern_momentum_forward import SOURCE
 
 ROOT = Path(__file__).resolve().parents[1]
 EASTERN = ZoneInfo("America/New_York")
-MAX_SECOND_WAVE_SPREAD = 0.003
-MAX_SECOND_WAVE_HARD_SPREAD = 0.01
 MIN_PREMARKET_DOLLAR_VOLUME = 1_000_000.0
 MIN_OPEN_DOLLAR_VOLUME = 1_000_000.0
 STRATEGY_VERSION = "modern-h15.v1"
@@ -311,7 +309,7 @@ def _open_plan_lines(candidates: list[dict[str, object]]) -> tuple[str, ...]:
             (
                 f"{symbol} 预案：09:56 ET后，完整5分钟K突破H15且位于上升VWAP上方，"
                 "MACD为正并增强、成交量确认后才允许入场；",
-                "参考入场：触发时最新SIP卖价，实际点差和滑点分别不得超过0.25%；",
+                "参考入场：触发时最新SIP卖价，记录实际点差，不设点差上限；追价不得超过0.25%；",
                 "失效/止损：跌回H15、失守VWAP或更高低点；含滑点全包止损不超过2%；",
                 "止盈/退出：3R目标或趋势退出；15:00后禁止新仓，15:50前全部清仓；",
                 "仓位：按账户风险动态反算，单票0.5%、板块0.75%、组合1.5%，首次/二次尝试60%/40%。",
@@ -362,7 +360,23 @@ def _selection_event_fields(
     }
 
 
-def _stage_observed_at(trade_date: date, stage: FunnelStage) -> datetime:
+def _stage_observed_at(
+    trade_date: date, stage: FunnelStage, *, now_utc: datetime | None = None
+) -> datetime:
+    if now_utc is not None:
+        observed = now_utc.astimezone(EASTERN)
+        recovery_windows = {
+            FunnelStage.FIRST_WAVE: (time(9, 0), time(9, 30)),
+            FunnelStage.SECOND_WAVE: (time(9, 30), time(9, 45)),
+            FunnelStage.FINAL_RANK: (time(9, 35), time(9, 45)),
+        }
+        recovery_window = recovery_windows.get(stage)
+        if (
+            recovery_window is not None
+            and observed.date() == trade_date
+            and recovery_window[0] <= observed.time().replace(tzinfo=None) < recovery_window[1]
+        ):
+            return now_utc.astimezone(UTC)
     stage_time = {
         FunnelStage.FIRST_WAVE: time(8, 30),
         FunnelStage.SECOND_WAVE: time(9),
@@ -433,12 +447,6 @@ def evaluate_second_wave(
                     midpoint = (bid + ask) / 2
                     spread = (ask - bid) / midpoint
                     vwap = dollar_volume / volume
-                    if spread > MAX_SECOND_WAVE_HARD_SPREAD:
-                        hard_reasons.append(
-                            f"点差{spread:.2%}超过观察上限{MAX_SECOND_WAVE_HARD_SPREAD:.2%}"
-                        )
-                    elif spread >= MAX_SECOND_WAVE_SPREAD:
-                        watch_reasons.append(f"盘前点差{spread:.2%}偏宽，09:35及入场前复核")
                     if dollar_volume < MIN_PREMARKET_DOLLAR_VOLUME:
                         hard_reasons.append("盘前成交额不足100万美元")
                     if close <= vwap:
@@ -455,7 +463,7 @@ def evaluate_second_wave(
             **candidate,
             "watch_reasons": watch_reasons,
             "watch_warning_count": len(watch_reasons),
-            "reasons": reasons or ["盘前量价、点差和流动性通过"],
+            "reasons": reasons or ["盘前量价和流动性通过"],
         }
         (rejected if hard_reasons else kept).append(result)
     kept.sort(
@@ -557,6 +565,8 @@ def _push_once(
     key: str,
     body: str,
     payload: dict[str, object],
+    stage: FunnelStage,
+    trade_date: date,
 ) -> str:
     now = datetime.now(UTC)
     claim = ledger.claim(key, claimed_at_utc=now)
@@ -568,6 +578,7 @@ def _push_once(
     if claim != "claimed":
         raise RuntimeError("Livermore notification is already in flight")
     try:
+        _require_selection_window(stage, trade_date)
         message_id = push.push(body)
     except Exception:
         ledger.release_claim(key)
@@ -590,8 +601,13 @@ def _publish_stage(
     rejected: list[dict[str, object]],
     state_root: Path,
     strategy_version: str = STRATEGY_VERSION,
+    selection_at_utc: datetime | None = None,
 ) -> tuple[tuple[str, ...], str]:
-    now = _stage_observed_at(trade_date, stage)
+    _require_selection_window(stage, trade_date)
+    now = datetime.now(UTC)
+    selected_at = selection_at_utc or now
+    if selected_at.tzinfo is None or selected_at.utcoffset() is None:
+        raise ValueError("selection timestamp must be timezone-aware")
     stage_rows = tuple((row, True) for row in candidates) + tuple((row, False) for row in rejected)
     record_ids: tuple[str, ...] = ()
     feishu_failed = False
@@ -610,15 +626,22 @@ def _publish_stage(
                     stage=stage,
                     row=row,
                     kept=kept,
-                    observed_at_utc=now,
+                    observed_at_utc=selected_at,
                     strategy_version=strategy_version,
                 ),
             )
             for row, kept in stage_rows
         ]
         if isinstance(base, VpsInvestmentClient):
+            _require_selection_window(stage, trade_date)
             base.queue_events(projections)
-        record_ids = tuple(base.record_event(*projection) for projection in projections)
+        ids: list[str] = []
+        for projection in projections:
+            _require_selection_window(stage, trade_date)
+            ids.append(base.record_event(*projection))
+        record_ids = tuple(ids)
+    except SelectionWindowClosed:
+        raise
     except (FeishuBaseError, RuntimeError, ValueError):
         # Preserve selection and its notification during a Base outage.
         # create_open_confirmation still requires real Base receipts before
@@ -667,6 +690,7 @@ def _publish_stage(
     )
     push = _push_client()
     try:
+        _require_selection_window(stage, trade_date)
         message_id = _push_once(
             ledger,
             push,
@@ -677,6 +701,8 @@ def _publish_stage(
                 "rejected": rejected_text,
                 "feishu_status": "failed" if feishu_failed else "succeeded",
             },
+            stage=stage,
+            trade_date=trade_date,
         )
     finally:
         push.close()
@@ -687,6 +713,7 @@ def _first_wave(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
     path = day_root / "first_wave_pool.json"
     if path.exists():
         existing, _ = read_wave_artifact(path, trade_date=args.trade_date, as_of=datetime.now(UTC))
+        artifact = existing
         raw_rows = existing.get("candidates")
         if not isinstance(raw_rows, list):
             raise ValueError("first-wave retry artifact is invalid")
@@ -719,6 +746,7 @@ def _first_wave(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
             "strategy_context": strategy_context,
         }
         _write_json(path, payload)
+        artifact = payload
     strategy_version = str(strategy_context.get("active_version", STRATEGY_VERSION))
     record_ids, message_id = _publish_stage(
         trade_date=args.trade_date,
@@ -727,6 +755,7 @@ def _first_wave(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
         rejected=rejected,
         state_root=args.state_root,
         strategy_version=strategy_version,
+        selection_at_utc=datetime.fromisoformat(str(artifact["generated_at_utc"])),
     )
     return _receipt(path, record_ids, message_id)
 
@@ -819,12 +848,20 @@ def _rank_live_pool(
     )
     ranked = [{**row, "wave_rank": index} for index, row in enumerate(ranked, start=1)]
     selected = ranked[:limit]
+    prior_symbols = {
+        str(row["symbol"])
+        for wave in prior_waves
+        for row in _prior_candidates(wave)
+    }
+    # The frozen source snapshot retains the full eligible universe. Only near
+    # misses and previously observed symbols need per-symbol Base projections.
     rejected = [
         {
             **row,
             "reasons": [f"本轮Top{limit}容量落选（排序第{row['wave_rank']}）"],
         }
         for row in ranked[limit:]
+        if int(row["wave_rank"]) <= 2 * limit or str(row["symbol"]) in prior_symbols
     ]
     return selected, rejected, snapshot.dataset_id
 
@@ -841,6 +878,7 @@ def _second_wave(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
     path = day_root / "second_wave_pool.json"
     if path.exists():
         existing, _ = read_wave_artifact(path, trade_date=args.trade_date, as_of=datetime.now(UTC))
+        artifact = existing
         kept = existing.get("candidates")
         rejected = existing.get("rejected")
         if not isinstance(kept, list) or not isinstance(rejected, list):
@@ -863,6 +901,7 @@ def _second_wave(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
             "strategy_context": strategy_context,
         }
         _write_json(path, payload)
+        artifact = payload
     record_ids, message_id = _publish_stage(
         trade_date=args.trade_date,
         stage=FunnelStage.SECOND_WAVE,
@@ -870,6 +909,7 @@ def _second_wave(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
         rejected=rejected,
         state_root=args.state_root,
         strategy_version=strategy_version,
+        selection_at_utc=datetime.fromisoformat(str(artifact["generated_at_utc"])),
     )
     return _receipt(path, record_ids, message_id)
 
@@ -889,6 +929,7 @@ def _final_rank(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
     path = day_root / "final_wave_pool.json"
     if path.exists():
         existing, _ = read_wave_artifact(path, trade_date=args.trade_date, as_of=datetime.now(UTC))
+        artifact = existing
         kept = existing.get("candidates")
         rejected = existing.get("rejected")
         if not isinstance(kept, list) or not isinstance(rejected, list):
@@ -913,6 +954,7 @@ def _final_rank(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
             "strategy_context": strategy_context,
         }
         _write_json(path, payload)
+        artifact = payload
     record_ids, message_id = _publish_stage(
         trade_date=args.trade_date,
         stage=FunnelStage.FINAL_RANK,
@@ -920,6 +962,7 @@ def _final_rank(args: argparse.Namespace, day_root: Path) -> dict[str, object]:
         rejected=rejected,
         state_root=args.state_root,
         strategy_version=strategy_version,
+        selection_at_utc=datetime.fromisoformat(str(artifact["generated_at_utc"])),
     )
     return _receipt(path, record_ids, message_id)
 
@@ -977,7 +1020,7 @@ def _plan_payload(
         "maximum_all_in_stop_pct": 0.02,
         "symbol_risk_fraction": PaperRuntimePolicy().symbol_risk_fraction,
         "attempt_weights": [0.6, 0.4],
-        "maximum_entry_relative_spread": 0.0025,
+        "maximum_entry_relative_spread": None,
         "target_r": 3,
         "candidates": rows,
     }
@@ -1215,6 +1258,7 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
             rejected=prior_rejected,
             state_root=args.state_root,
             strategy_version=strategy_version,
+            selection_at_utc=datetime.fromisoformat(str(frozen_source["generated_at_utc"])),
         )
         path = day_root / "open_no_trade.json"
         _write_json(
@@ -1254,6 +1298,9 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
                 "strategy_context": strategy_context,
             },
         )
+        decision, _ = read_wave_artifact(
+            decision_path, trade_date=args.trade_date, as_of=datetime.now(UTC),
+        )
     record_ids, message_id = _publish_stage(
         trade_date=args.trade_date,
         stage=FunnelStage.OPEN_CONFIRMATION,
@@ -1261,6 +1308,7 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
         rejected=rejected,
         state_root=args.state_root,
         strategy_version=strategy_version,
+        selection_at_utc=datetime.fromisoformat(str(decision["generated_at_utc"])),
     )
     if not kept:
         path = day_root / "open_no_trade.json"
@@ -1285,6 +1333,7 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
         plan_path,
         _plan_payload(args.trade_date, kept),
     )
+    _require_selection_window(FunnelStage.OPEN_CONFIRMATION, args.trade_date)
     authorization = create_open_confirmation(
         confirmation_path=confirmation_path,
         config_path=plan_path,
@@ -1296,6 +1345,7 @@ def _open_confirmation(args: argparse.Namespace, day_root: Path) -> dict[str, ob
         strategy_version=STRATEGY_VERSION,
         generated_at_utc=datetime.now(UTC),
     )
+    _require_selection_window(FunnelStage.OPEN_CONFIRMATION, args.trade_date)
     paper_pid = _launch_paper_if_confirmed(
         args.trade_date,
         confirmation_path,
@@ -1320,10 +1370,29 @@ def _receipt(path: Path, record_ids: tuple[str, ...], message_id: str) -> dict[s
     }
 
 
-def _require_selection_window(stage: FunnelStage, trade_date: date) -> None:
-    eastern = datetime.now(UTC).astimezone(EASTERN)
-    if eastern.date() != trade_date or _stage_for(eastern.time()) is not stage:
-        raise RuntimeError("funnel selection window is closed")
+class SelectionWindowClosed(RuntimeError):
+    pass
+
+
+def _require_selection_window(
+    stage: FunnelStage, trade_date: date, *, now_utc: datetime | None = None
+) -> None:
+    eastern = (now_utc or datetime.now(UTC)).astimezone(EASTERN)
+    local_time = eastern.time().replace(tzinfo=None)
+    recovery_windows = {
+        FunnelStage.FIRST_WAVE: (time(9, 0), time(9, 30)),
+        FunnelStage.SECOND_WAVE: (time(9, 30), time(9, 45)),
+        FunnelStage.FINAL_RANK: (time(9, 35), time(9, 45)),
+    }
+    recovery_window = recovery_windows.get(stage)
+    late_recovery = (
+        recovery_window is not None
+        and recovery_window[0] <= local_time < recovery_window[1]
+    )
+    if eastern.date() != trade_date or (
+        _stage_for(eastern.time()) is not stage and not late_recovery
+    ):
+        raise SelectionWindowClosed("funnel selection window is closed")
 
 
 def main() -> int:

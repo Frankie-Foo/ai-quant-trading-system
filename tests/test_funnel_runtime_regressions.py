@@ -211,9 +211,45 @@ def test_repeat_bonus_applies_before_top20_truncation(
     assert [row["symbol"] for row in rejected] == ["S20"]
 
 
+def test_rank_live_pool_bounds_external_rejections_but_keeps_prior_symbols(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    day = date(2026, 9, 22)
+    rows = [{"symbol": f"S{i:03}", "forward_rank": i} for i in range(1, 101)]
+    gate_path = tmp_path / "gates.parquet"
+    pl.DataFrame({"pass_gate": [True] * 100, "rvol": [2.0] * 100}).write_parquet(gate_path)
+    monkeypatch.setattr(stage, "_refresh_selection_inputs", lambda *a, **k: (
+        pl.read_parquet(gate_path), SimpleNamespace(dataset_id="gates"),
+    ))
+
+    def prepare(*_args: object, **_kwargs: object) -> dict[str, str]:
+        snapshot, _ = persist_snapshot(
+            pl.DataFrame(rows), root=tmp_path, source=SOURCE,
+            schema_version="test.v1", checks=(), parent_snapshot_ids=("gates",),
+        )
+        return {"dataset_id": snapshot.dataset_id}
+
+    monkeypatch.setattr(stage, "_run_module", prepare)
+    selected, rejected, _ = stage._rank_live_pool(
+        argparse.Namespace(trade_date=day, data_root=tmp_path),
+        prior_waves=({"candidates": [{"symbol": "S100"}]},),
+        limit=20, include_lock=False,
+    )
+    assert len(selected) == 20
+    assert len(rejected) == 21
+    assert rejected[-1]["symbol"] == "S100"
+
+
 def test_first_wave_records_capacity_rejections_without_failing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            fixed = datetime(2026, 9, 22, 13, 0, tzinfo=UTC)
+            return cls.fromtimestamp(fixed.timestamp(), tz or UTC)
+
+    monkeypatch.setattr(stage, "datetime", Clock)
     publications: list[object] = []
     monkeypatch.setattr(stage, "_rank_live_pool", lambda *a, **k: (
         [{"symbol": "PASS"}], [{"symbol": "OVERFLOW", "reasons": ["容量落选"]}], "pool",

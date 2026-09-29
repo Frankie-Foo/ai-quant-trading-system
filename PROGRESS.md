@@ -2573,3 +2573,98 @@ Status: offline implementation and verification; no production activation.
   broker calls and zero external writes. A separate regression covers both Paper
   journal roots. Outcome synchronization remains disabled until its approved cost
   model configuration exists; no policy, risk threshold or trading rule changed.
+
+## M91 2026-09-28 packaged Paper stability hotfix
+
+- Alpaca Paper entry now obtains the latest SIP NBBO and checks its age against the
+  API server's Date plus monotonic elapsed time. Account, risk and open-order reads
+  happen before the quote; the final pre-POST guard checks freshness again.
+  Missing server time or market data fails closed; no spread, stop or portfolio
+  cap was relaxed.
+- Packaged Loop reviews use a verified base-commit-plus-all-shipped-Python-code
+  digest identity when `.git` is absent. A mismatch blocks synchronization; no
+  historic trade or signal artifact is rewritten. Fixed two expired test fixtures.
+- The source branch also preserves three earlier production hotfixes and their
+  four regression tests, so its Python source matches the deployed release.
+- Independent review found and fixed manifest bypass under Git, misleading
+  provisional-pool labeling, and unvalidated observation symbols. A slow SIP
+  response gets one fresh quote retry; stale data still blocks entry. The
+  source digest normalizes line endings so Windows checkouts retain identity.
+- Red tests reproduced the absent latest-quote path. The staged release and the
+  deployed original task directory each passed **1381 pytest tests**, Ruff,
+  strict Mypy for four changed modules and Python compilation. Read-only Paper
+  reconciliation found zero positions and open orders. The scheduler canary
+  returned `not_due`; no order or message was emitted.
+- Windows denied changing/registering the scheduled task under a medium-integrity
+  token. After exporting task XML and backing up eight release files, the same
+  tested hotfix was installed in its existing code directory. The task was
+  re-enabled with the original action and next run 2026-09-28 20:30 Beijing.
+  Market-hours acceptance remains pending until that scheduled run.
+
+## M92 2026-09-28 missed intraday funnel windows
+
+- The 08:30 ET first wave completed at 09:15 ET; the 09:00 ET second wave
+  completed only at 10:03 ET, beyond its 09:45 ET recovery deadline. No final
+  confirmation or Paper authorization was produced. The 15-minute stage lease was shorter
+  than the long-running 60-minute subprocess timeout; overlapping Task Scheduler
+  triggers were ignored while the process remained active.
+- The previous-session universe contained 2592 eligible symbols. Alpaca news
+  fetched those symbols in serial chunks of 50 for every ranked wave. A red
+  concurrency test reproduced the serialized call path; a bounded eight-worker
+  read-only pool now fetches chunks concurrently and merges results in chunk
+  order. No candidate, risk, or broker gate changed.
+- A second red test showed late stages could write and notify after their
+  selection window closed. Stage publication now checks the window before each
+  record, before push, and before Paper authorization; audit timestamps use the
+  actual publication time. Market-hours throughput remains to be
+  verified on a later live session; do not backdate today's missing stages.
+- The scheduler ledger also used the claim time as its success/failure time.
+  Production ticks now stamp stage completion with the actual finish time;
+  injected test clocks remain deterministic. Existing historical rows are
+  untouched.
+
+## M93 2026-09-29 Paper spread observation trial
+
+- The owner explicitly removed the hard bid/ask spread threshold for the Alpaca
+  Paper trial. The production second-wave rank already had no spread filter;
+  its older standalone evaluator no longer excludes by spread either. Current
+  H15 signal/reentry config defaults to no spread cap (strategy version v5), and
+  the Paper bracket builder no longer rejects an otherwise valid fresh SIP quote
+  solely for its spread. Each attempted Paper entry now persists its SIP bid,
+  ask, SIP feed, observed spread, signal/quote timestamps, order client ID, and
+  guard or submission outcome in the Paper SQLite journal. The order intent
+  atomically binds the exact quote, and broker-order binding marks only that
+  quote as submitted, including on recovery. The production
+  second-wave artifact does not contain an NBBO spread field. This is not a
+  second virtual account.
+- The ask-vs-signal 0.25% chase limit, valid/fresh SIP quote, 2% all-in stop,
+  portfolio risk, protected bracket, Paper-only broker and same-day flattening
+  remain unchanged. The native plan and Loop risk evidence carry `null` for the
+  removed spread cap; historical audits can still opt into a finite threshold.
+- Relevant suite: 172 passed. Full suite: 1390 passed in 102.11s with the
+  previous release-code identity temporarily moved aside and restored; that
+  identity correctly rejects modified source. Ruff passed; Mypy passed for
+  six changed source files. Offline Paper acceptance drills passed with zero
+  broker calls and zero external writes (receipt:
+  `runs/acceptance/paper-spread-trial-20260929-final.json`). The receipt still names
+  the pre-change HEAD because these edits are uncommitted, so it is not a
+  deployment attestation. No broker order, remote message, or scheduler write
+  was made. Source is not yet a reviewed immutable deployment.
+
+### Release-gate follow-up
+
+- Review found two quote-audit gaps: a mismatched quote could bind to an order
+  intent, and pre-submit rejection plus intent abort were separate transactions.
+  The binding now checks trade date, symbol and attempt; a proven no-POST
+  rejection atomically updates the quote, order and symbol state. Injected
+  SQLite failure tests verify that all three roll back together.
+- Selection retries now reuse the frozen wave artifact's generation timestamp
+  for the immutable VPS projection. Only near-miss and prior-wave losers are
+  projected per symbol; the source snapshot still retains the full eligible
+  universe. This bounds serial external records during the selection window.
+- The complete local CI Mypy command passes for 504 files without relaxing
+  strictness. The latest full pytest run passed 1395 tests; Ruff, Python 3.12
+  compilation and offline Paper drills passed. The offline drill made zero
+  broker calls and zero external writes. These are local checks, not proof of
+  a merged release or of a live SIP entry. The old scheduled release is still
+  active; no task switch or Paper order has been made for this change.

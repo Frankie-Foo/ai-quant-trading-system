@@ -21,7 +21,7 @@ from data_plane.calendar import build_xnys_schedule
 from data_plane.contracts import DatasetSnapshot
 from data_plane.storage import sha256_file
 
-from .client import LoopClient
+from .client import LoopClient, LoopRemoteRejectedError
 from .contracts import (
     EVENT_OUTCOME_EXCESS_FORMULA,
     OUTCOME_EXCESS_FORMULA,
@@ -72,9 +72,10 @@ class OutcomeSyncSummary:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "status": "completed" if self.due == self.delivered and all(
-                item.reason == "horizon_not_mature" for item in self.pending
-            ) else "pending",
+            "status": "completed"
+            if self.due == self.delivered
+            and all(item.reason == "horizon_not_mature" for item in self.pending)
+            else "pending",
             "assignments": self.assignments,
             "event_assignments": self.event_assignments,
             "strategy_assignments": self.strategy_assignments,
@@ -99,30 +100,46 @@ def _load_daily_index(
     observed_before: datetime,
 ) -> dict[date, _DailySnapshot]:
     result: dict[date, _DailySnapshot] = {}
-    for path in (data_root / "accepted").glob(f"{config.price_source}-*/data.parquet"):
-        snapshot = DatasetSnapshot.model_validate_json(
-            (path.parent / "manifest.json").read_text(encoding="utf-8")
-        ).assert_usable()
-        if snapshot.source != config.price_source or snapshot.asof_utc > observed_before:
-            continue
-        if snapshot.dataset_id != path.parent.name:
-            raise ValueError("accepted daily snapshot directory does not match dataset id")
-        if sha256_file(path) != snapshot.content_sha256:
-            raise ValueError(f"accepted daily snapshot hash mismatch: {snapshot.dataset_id}")
-        frame = pl.read_parquet(path)
-        required = {"symbol", "trade_date", "close", "low", "adjustment"}
-        if missing := required - set(frame.columns):
-            raise ValueError(f"daily snapshot {snapshot.dataset_id} misses {sorted(missing)}")
-        dates = frame.get_column("trade_date").cast(pl.Date).unique().to_list()
-        if len(dates) != 1 or not isinstance(dates[0], date):
-            raise ValueError(f"daily snapshot {snapshot.dataset_id} must contain one trading date")
-        adjustments = {str(value) for value in frame.get_column("adjustment").unique().to_list()}
-        if adjustments != {config.adjustment}:
-            raise ValueError(f"daily snapshot {snapshot.dataset_id} adjustment mismatch")
-        candidate = _DailySnapshot(snapshot=snapshot, path=path, frame=frame)
-        previous = result.get(dates[0])
-        if previous is None or previous.snapshot.asof_utc < snapshot.asof_utc:
-            result[dates[0]] = candidate
+    priority_by_date: dict[date, int] = {}
+    sources = (config.price_source, *config.fallback_price_sources)
+    for priority, source in enumerate(sources):
+        for path in (data_root / "accepted").glob(f"{source}-*/data.parquet"):
+            snapshot = DatasetSnapshot.model_validate_json(
+                (path.parent / "manifest.json").read_text(encoding="utf-8")
+            ).assert_usable()
+            if snapshot.source != source or snapshot.asof_utc > observed_before:
+                continue
+            if snapshot.dataset_id != path.parent.name:
+                raise ValueError("accepted daily snapshot directory does not match dataset id")
+            if sha256_file(path) != snapshot.content_sha256:
+                raise ValueError(f"accepted daily snapshot hash mismatch: {snapshot.dataset_id}")
+            frame = pl.read_parquet(path)
+            required = {"symbol", "trade_date", "close", "low", "adjustment"}
+            if missing := required - set(frame.columns):
+                raise ValueError(f"daily snapshot {snapshot.dataset_id} misses {sorted(missing)}")
+            dates = frame.get_column("trade_date").cast(pl.Date).unique().to_list()
+            if len(dates) != 1 or not isinstance(dates[0], date):
+                raise ValueError(
+                    f"daily snapshot {snapshot.dataset_id} must contain one trading date"
+                )
+            adjustments = {
+                str(value) for value in frame.get_column("adjustment").unique().to_list()
+            }
+            if adjustments != {config.adjustment}:
+                raise ValueError(f"daily snapshot {snapshot.dataset_id} adjustment mismatch")
+            trade_date = dates[0]
+            candidate = _DailySnapshot(snapshot=snapshot, path=path, frame=frame)
+            previous = result.get(trade_date)
+            previous_priority = priority_by_date.get(trade_date)
+            if (
+                previous is None
+                or priority < int(previous_priority or 0)
+                or (
+                    priority == previous_priority and previous.snapshot.asof_utc < snapshot.asof_utc
+                )
+            ):
+                result[trade_date] = candidate
+                priority_by_date[trade_date] = priority
     return result
 
 
@@ -400,9 +417,7 @@ def build_due_outcome(
     strategy_return = instrument_return if enters_position else 0.0
     counterfactual_selected_return = strategy_return
     counterfactual_cost_multiplier = 1.0
-    transaction_cost = (
-        config.transaction_cost_bps_round_trip / 10_000 if enters_position else 0.0
-    )
+    transaction_cost = config.transaction_cost_bps_round_trip / 10_000 if enters_position else 0.0
     slippage = config.slippage_bps_round_trip / 10_000 if enters_position else 0.0
     excess_return = strategy_return - benchmark_return - transaction_cost - slippage
     counterfactual_net_alpha = (
@@ -538,23 +553,32 @@ def build_due_outcome(
 
 
 def attach_factual_execution(
-    outcome: LoopOutcomeEnvelope, *, plan_path: Path, plan_sha256: str,
-    fills_path: Path, fills_sha256: str,
-    review_context_path: Path | None = None, review_context_sha256: str | None = None,
+    outcome: LoopOutcomeEnvelope,
+    *,
+    plan_path: Path,
+    plan_sha256: str,
+    fills_path: Path,
+    fills_sha256: str,
+    review_context_path: Path | None = None,
+    review_context_sha256: str | None = None,
 ) -> LoopOutcomeEnvelope:
     """Return a new artifact; never mutate a delivered Outcome or its research fields."""
     trade_date = date.fromisoformat(str(outcome.evidence.get("decision_trading_date", "")))
     summary = build_factual_execution_summary(
-        plan_path=plan_path, plan_sha256=plan_sha256, fills_path=fills_path,
-        fills_sha256=fills_sha256, trade_date=trade_date, as_of=outcome.observed_at,
-        review_context_path=review_context_path, review_context_sha256=review_context_sha256,
+        plan_path=plan_path,
+        plan_sha256=plan_sha256,
+        fills_path=fills_path,
+        fills_sha256=fills_sha256,
+        trade_date=trade_date,
+        as_of=outcome.observed_at,
+        review_context_path=review_context_path,
+        review_context_sha256=review_context_sha256,
     )
     if outcome.evidence.get("strategy_sha256") != summary["strategy_sha256"]:
         raise ValueError("Outcome and execution strategy hash mismatch or unavailable")
     performance = summary.get("instruments", {}).get(outcome.instrument)
     fills = [
-        item for item in summary["broker_evidence"]["fills"]
-        if item["symbol"] == outcome.instrument
+        item for item in summary["broker_evidence"]["fills"] if item["symbol"] == outcome.instrument
     ]
     factual = {
         **(performance or unavailable_execution()),
@@ -583,12 +607,14 @@ def attach_factual_execution(
         semantics["realized_policy_return_basis"] = "confirmed_no_trade"
         evidence["return_semantics"] = semantics
     digest = envelope_sha256({"source_outcome_id": outcome.id, "evidence": evidence})
-    return LoopOutcomeEnvelope.model_validate({
-        **outcome.model_dump(mode="json"),
-        "id": f"quant_outcome_linked_{digest[:40]}",
-        "realized_policy_return": realized_policy_return,
-        "evidence": evidence,
-    })
+    return LoopOutcomeEnvelope.model_validate(
+        {
+            **outcome.model_dump(mode="json"),
+            "id": f"quant_outcome_linked_{digest[:40]}",
+            "realized_policy_return": realized_policy_return,
+            "evidence": evidence,
+        }
+    )
 
 
 def _stage_and_deliver(
@@ -644,12 +670,34 @@ def _stage_and_deliver(
                 **status_args, state="OBSERVED", reason="idempotent replay"
             )
             continue
+        previous_error = item.last_error_code or ""
+        if item.status == "remote_rejected" or previous_error.startswith(
+            "HTTP_422_TASK_INPUT_SCHEMA"
+        ):
+            if item.status != "remote_rejected":
+                outbox.mark_remote_rejected(
+                    outcome.id,
+                    error_code=previous_error[:128] or "HTTP_422_TASK_INPUT_SCHEMA",
+                )
+            statuses[key] = LoopOutcomeSyncStatus(
+                **status_args,
+                state="SYNC_FAILED",
+                reason=previous_error[:128] or "HTTP_422_TASK_INPUT_SCHEMA",
+            )
+            continue
         try:
             client.submit_outcome(outcome)
         except Exception as exc:
-            outbox.mark_failed(outcome.id, error_code=type(exc).__name__)
+            error_code = str(getattr(exc, "error_code", type(exc).__name__))
+            diagnostic_code = getattr(exc, "diagnostic_code", None)
+            if diagnostic_code:
+                error_code = f"{error_code}:{diagnostic_code}"
+            if isinstance(exc, LoopRemoteRejectedError):
+                outbox.mark_remote_rejected(outcome.id, error_code=error_code)
+            else:
+                outbox.mark_failed(outcome.id, error_code=error_code)
             statuses[key] = LoopOutcomeSyncStatus(
-                **status_args, state="SYNC_FAILED", reason=type(exc).__name__
+                **status_args, state="SYNC_FAILED", reason=error_code
             )
             _report_sync_statuses(client, tuple(statuses.values()))
             raise
@@ -793,15 +841,21 @@ def sync_due_outcomes(
                 )
                 continue
             if execution_index_path is not None:
-                matches = [entry for entry in execution_inputs
-                           if entry.trade_date == strategy_assignment.decision_trading_date
-                           and entry.strategy_sha256 == strategy_assignment.strategy_sha256]
+                matches = [
+                    entry
+                    for entry in execution_inputs
+                    if entry.trade_date == strategy_assignment.decision_trading_date
+                    and entry.strategy_sha256 == strategy_assignment.strategy_sha256
+                ]
                 if not matches:
-                    pending.append(PendingOutcome(
-                        decision_event_id=strategy_assignment.decision_event_id,
-                        strategy_revision_id=strategy_assignment.strategy_revision_id,
-                        horizon=horizon, reason="execution_date_strategy_evidence_unavailable",
-                    ))
+                    pending.append(
+                        PendingOutcome(
+                            decision_event_id=strategy_assignment.decision_event_id,
+                            strategy_revision_id=strategy_assignment.strategy_revision_id,
+                            horizon=horizon,
+                            reason="execution_date_strategy_evidence_unavailable",
+                        )
+                    )
                     status_args: dict[str, Any] = {
                         "decision_event_id": strategy_assignment.decision_event_id,
                         "strategy_revision_id": strategy_assignment.strategy_revision_id,

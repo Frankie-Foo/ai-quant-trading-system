@@ -20,7 +20,11 @@ from operations.loop_integration.client import (
 )
 from operations.loop_integration.contracts import LoopBinding, QuantReviewEnvelope
 from operations.loop_integration.execution_summary import load_execution_index
-from operations.loop_integration.outbox import LoopOutbox, OutboxItem
+from operations.loop_integration.outbox import (
+    LoopOutbox,
+    OutboxItem,
+    default_loop_outbox_path,
+)
 from operations.loop_integration.review_builder import build_review_envelope, load_accepted_snapshot
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -108,7 +112,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--binding", required=True, type=Path)
     parser.add_argument("--data-root", type=Path, default=project_data_root(ROOT))
     parser.add_argument("--active-policy", type=Path, default=ROOT / "runs/strategy/active.json")
-    parser.add_argument("--outbox", type=Path, default=ROOT / "runs/loop-integration.sqlite3")
+    parser.add_argument("--outbox", type=Path, default=default_loop_outbox_path(ROOT))
     parser.add_argument("--state-root", type=Path, default=ROOT / "runs" / "autonomous")
     parser.add_argument("--artifact-id", action="append", default=[])
     parser.add_argument("--stage-only", action="store_true")

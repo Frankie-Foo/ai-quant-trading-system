@@ -2,24 +2,36 @@ import json
 import sqlite3
 import subprocess
 import traceback
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, tzinfo
 from pathlib import Path
+from typing import Self
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from operations.autonomous_selection_handoff import create_open_confirmation
+from schedule import modern_funnel as funnel
 from schedule.modern_funnel import (
     CompletedStageProcess,
     FunnelStage,
     FunnelTickResult,
     FunnelTickStatus,
     ProductionFunnelExecutor,
+    _safe_process_error,
     run_tick,
 )
 
 EASTERN = ZoneInfo("America/New_York")
 TRADE_DATE = date(2026, 8, 24)
+
+
+def test_scheduler_keeps_safe_child_module_failure_identity() -> None:
+    assert _safe_process_error(
+        "RuntimeError: scripts.build_catalyst_snapshot failed with exit code 1"
+    ) == "scripts.build_catalyst_snapshot failed with exit code 1"
+    assert _safe_process_error(
+        "RuntimeError: password=super-secret"
+    ) == "stage failure (details redacted)"
 
 
 class FakeExecutor:
@@ -76,6 +88,34 @@ def test_funnel_runs_each_stage_once_in_dependency_order(tmp_path: Path) -> None
     ]
 
 
+def test_scheduler_records_actual_stage_completion_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = _utc(8, 30)
+    finished = _utc(8, 37)
+    reads = 0
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            nonlocal reads
+            reads += 1
+            return cls.fromtimestamp(
+                (started if reads == 1 else finished).timestamp(), tz or UTC,
+            )
+
+    monkeypatch.setattr(funnel, "datetime", Clock)
+    ledger = tmp_path / "funnel.sqlite3"
+    result = run_tick(ledger_path=ledger, executor=FakeExecutor())
+    assert result.status is FunnelTickStatus.SUCCEEDED
+    with sqlite3.connect(ledger) as connection:
+        updated = connection.execute(
+            "SELECT updated_at_utc FROM funnel_runs WHERE trade_date=? AND stage=?",
+            (TRADE_DATE.isoformat(), FunnelStage.FIRST_WAVE.value),
+        ).fetchone()
+    assert updated == (finished.isoformat(),)
+
+
 def test_failed_stage_retries_only_inside_its_window(tmp_path: Path) -> None:
     ledger = tmp_path / "funnel.sqlite3"
     executor = FakeExecutor(fail_once=FunnelStage.SECOND_WAVE)
@@ -92,15 +132,65 @@ def test_failed_stage_retries_only_inside_its_window(tmp_path: Path) -> None:
     assert executor.calls.count(FunnelStage.SECOND_WAVE) == 2
 
 
-def test_missing_prerequisite_never_runs_a_later_stage(tmp_path: Path) -> None:
+def test_missing_first_wave_is_recovered_before_second_wave(tmp_path: Path) -> None:
     executor = FakeExecutor()
-    result = run_tick(
+    recovered = run_tick(
         ledger_path=tmp_path / "funnel.sqlite3",
         executor=executor,
         now_utc=_utc(9, 0),
     )
+    second = run_tick(
+        ledger_path=tmp_path / "funnel.sqlite3",
+        executor=executor,
+        now_utc=_utc(9, 1),
+    )
+    assert recovered.status is FunnelTickStatus.SUCCEEDED
+    assert recovered.stage is FunnelStage.FIRST_WAVE
+    assert second.status is FunnelTickStatus.SUCCEEDED
+    assert second.stage is FunnelStage.SECOND_WAVE
+    assert executor.calls == [FunnelStage.FIRST_WAVE, FunnelStage.SECOND_WAVE]
+
+
+def test_missing_prerequisite_still_blocks_final_rank(tmp_path: Path) -> None:
+    executor = FakeExecutor()
+    result = run_tick(
+        ledger_path=tmp_path / "funnel.sqlite3",
+        executor=executor,
+        now_utc=_utc(9, 30),
+    )
     assert result.status is FunnelTickStatus.PREREQUISITE_MISSING
     assert executor.calls == []
+
+
+def test_missing_second_wave_is_recovered_during_final_rank_window(tmp_path: Path) -> None:
+    executor = FakeExecutor()
+    ledger = tmp_path / "funnel.sqlite3"
+    run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(8, 30))
+
+    recovered = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 30))
+    final_rank = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 31))
+
+    assert recovered.status is FunnelTickStatus.SUCCEEDED
+    assert recovered.stage is FunnelStage.SECOND_WAVE
+    assert final_rank.status is FunnelTickStatus.SUCCEEDED
+    assert final_rank.stage is FunnelStage.FINAL_RANK
+
+
+def test_missing_final_rank_is_recovered_during_open_confirmation_window(
+    tmp_path: Path,
+) -> None:
+    executor = FakeExecutor()
+    ledger = tmp_path / "funnel.sqlite3"
+    run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(8, 30))
+    run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 0))
+
+    recovered = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 35))
+    confirmation = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 36))
+
+    assert recovered.status is FunnelTickStatus.SUCCEEDED
+    assert recovered.stage is FunnelStage.FINAL_RANK
+    assert confirmation.status is FunnelTickStatus.SUCCEEDED
+    assert confirmation.stage is FunnelStage.OPEN_CONFIRMATION
 
 
 def test_funnel_does_nothing_outside_windows_or_on_xnys_holiday(tmp_path: Path) -> None:

@@ -266,6 +266,37 @@ def _sync_loop_outcomes(
             reason="approved_outcome_config_missing",
         )
         return False
+    backfill_command = [
+        sys.executable,
+        "-m",
+        "scripts.backfill_loop_outcome_daily",
+        "--trade-date",
+        trade_date.isoformat(),
+        "--loop-assignments",
+        "--config",
+        config_file,
+        "--data-root",
+        str(data_root),
+    ]
+    backfill = run_child(backfill_command, cwd=ROOT, timeout_seconds=300)
+    backfill_receipt = _business_receipt(backfill.stdout)
+    missing_symbols = backfill_receipt.get("symbols_missing")
+    backfill_completed = (
+        backfill.return_code == 0
+        and backfill_receipt.get("status") in {"accepted", "skipped"}
+        and not (isinstance(missing_symbols, list) and missing_symbols)
+    )
+    logger.emit(
+        "loop_outcome_daily_backfill_completed"
+        if backfill_completed
+        else "loop_outcome_daily_backfill_pending",
+        level="info" if backfill_completed else "warning",
+        trade_date=trade_date.isoformat(),
+        return_code=backfill.return_code,
+        rows=backfill_receipt.get("rows", 0),
+        symbols_missing_count=len(missing_symbols) if isinstance(missing_symbols, list) else 0,
+        orders_submitted=0,
+    )
     command = [
         sys.executable,
         "-m",

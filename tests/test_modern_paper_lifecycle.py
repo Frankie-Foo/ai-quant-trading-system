@@ -1,5 +1,6 @@
 from datetime import UTC, date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Self
 
 import httpx
@@ -447,13 +448,13 @@ def test_real_monitor_skips_expensive_symbol_but_submits_next_valid_bracket(
     monkeypatch.setattr(
         paper,
         "_latest_sip_nbbo_now",
-        lambda symbol: FreshNbboQuote(
+        lambda symbol: (FreshNbboQuote(
             symbol=symbol,
             bid=Decimal("100.52" if symbol == "EXPENSIVE" else "50.26"),
             ask=Decimal("100.54" if symbol == "EXPENSIVE" else "50.27"),
             asof_utc=Clock.current,
             feed="sip",
-        ),
+        ), SimpleNamespace(observed_at_utc=lambda: Clock.current)),
     )
     monkeypatch.setattr(paper, "datetime", Clock)
     monkeypatch.setattr(time, "sleep", sleep)

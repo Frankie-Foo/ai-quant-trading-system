@@ -29,6 +29,64 @@ JsonRequest = Callable[[str, str, dict[str, Any] | None], Any]
 SubmissionCheckpoint = Callable[[str, str | None, str | None], None]
 
 
+def _http_422_message(body: Any) -> str | None:
+    """Return bounded, non-echoing validation details from common API shapes."""
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, dict):
+        message = detail.get("message") or detail.get("msg")
+        if isinstance(message, str) and message.strip():
+            return message.strip()[:500]
+    if isinstance(detail, str) and detail.strip():
+        return detail.strip()[:500]
+    if isinstance(detail, list):
+        summaries: list[str] = []
+        for item in detail[:5]:
+            if not isinstance(item, dict):
+                continue
+            location = item.get("loc")
+            field = ".".join(str(part) for part in location) if isinstance(location, list) else ""
+            error_type = item.get("type")
+            message = item.get("msg")
+            parts = [
+                part
+                for part in (
+                    field,
+                    str(error_type) if error_type else None,
+                    str(message) if message else None,
+                )
+                if part
+            ]
+            if parts:
+                summaries.append(
+                    ": ".join((".".join(parts[:-1]), parts[-1])) if len(parts) > 1 else parts[0]
+                )
+        if summaries:
+            return "; ".join(summaries)[:500]
+    return None
+
+
+def _http_422_diagnostic_code(body: Any) -> str | None:
+    """Extract only field paths and validator types; never persist rejected values."""
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if not isinstance(detail, list):
+        return None
+    summaries: list[str] = []
+    for item in detail[:3]:
+        if not isinstance(item, dict):
+            continue
+        location = item.get("loc")
+        error_type = item.get("type")
+        tokens = [*(location if isinstance(location, list) else ()), error_type]
+        safe_tokens = [
+            "".join(char if char.isalnum() or char in "_.-" else "_" for char in str(token))[:48]
+            for token in tokens
+            if token is not None
+        ]
+        if safe_tokens:
+            summaries.append(".".join(safe_tokens))
+    return ",".join(summaries)[:112] or None
+
+
 class LoopPreconditionError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -42,9 +100,16 @@ class AuditOnlyBackfillRequired(LoopPreconditionError):
 class LoopRemoteRejectedError(RuntimeError):
     """A definitive remote contract rejection that must not be retried unchanged."""
 
-    def __init__(self, error_code: str, message: str) -> None:
+    def __init__(
+        self,
+        error_code: str,
+        message: str,
+        *,
+        diagnostic_code: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.error_code = error_code
+        self.diagnostic_code = diagnostic_code
 
 
 class LoopRunFailedError(RuntimeError):
@@ -148,17 +213,19 @@ class LoopClient:
                 body = response.json()
             except ValueError:
                 body = None
-            detail = body.get("detail") if isinstance(body, dict) else None
-            message = detail.get("message") if isinstance(detail, dict) else None
             raise LoopRemoteRejectedError(
                 "HTTP_422_TASK_INPUT_SCHEMA",
-                str(message or "Loop rejected the submitted contract"),
+                _http_422_message(body) or "Loop rejected the submitted contract",
+                diagnostic_code=_http_422_diagnostic_code(body),
             ) from exc
         return response.json()
 
     def submit_review(
-        self, envelope: QuantReviewEnvelope, binding: LoopBinding,
-        *, checkpoint: SubmissionCheckpoint | None = None,
+        self,
+        envelope: QuantReviewEnvelope,
+        binding: LoopBinding,
+        *,
+        checkpoint: SubmissionCheckpoint | None = None,
     ) -> tuple[str, str]:
         # A daily review never authorizes broker orders.  It may therefore be
         # submitted as factual research even when there was no executable plan
@@ -201,7 +268,10 @@ class LoopClient:
         return self.start_review_run(task_id=task_id, checkpoint=checkpoint)
 
     def start_review_run(
-        self, *, task_id: str, checkpoint: SubmissionCheckpoint | None = None,
+        self,
+        *,
+        task_id: str,
+        checkpoint: SubmissionCheckpoint | None = None,
     ) -> tuple[str, str]:
         if checkpoint:
             checkpoint("starting_run", task_id, None)
@@ -242,7 +312,9 @@ class LoopClient:
                 error_code=error_code,
             )
         raise LoopRunIncompleteError(
-            task_id=task_id, run_id=run_id, status=status,
+            task_id=task_id,
+            run_id=run_id,
+            status=status,
         )
 
     def initialize_control_plane(self, manifest: LoopControlPlaneManifest) -> LoopBinding:
@@ -488,9 +560,7 @@ def validate_loop_task_cohort(task_payload: dict[str, Any]) -> None:
 
     def instruments(items: list[Any], field_name: str) -> tuple[str, ...]:
         result = tuple(
-            str(item.get("instrument") or "").strip()
-            if isinstance(item, dict)
-            else ""
+            str(item.get("instrument") or "").strip() if isinstance(item, dict) else ""
             for item in items
         )
         if any(not instrument for instrument in result):
@@ -539,13 +609,14 @@ def build_loop_task(envelope: QuantReviewEnvelope, binding: LoopBinding) -> dict
     frozen_pool = envelope.market_context.get("frozen_candidate_pool", {})
     morning_candidates = frozen_pool.get("candidates") or []
     execution_has_broker_evidence = "fill_evidence_sha256" in envelope.execution_summary
-    if envelope.risk_policy.get("status") == "available" and (
-        frozen_pool.get("candidate_pool_complete") is True
-        or execution_has_broker_evidence
-    ) and (
-        frozen_pool.get("status") != "available"
-        or not isinstance(morning_candidates, list)
-        or len(morning_candidates) < 10
+    if (
+        envelope.risk_policy.get("status") == "available"
+        and (frozen_pool.get("candidate_pool_complete") is True or execution_has_broker_evidence)
+        and (
+            frozen_pool.get("status") != "available"
+            or not isinstance(morning_candidates, list)
+            or len(morning_candidates) < 10
+        )
     ):
         # A retrospective, no-execution review may use the explicit research
         # cohort. Once broker evidence exists, a missing morning cohort cannot
@@ -771,9 +842,7 @@ def validate_loop_task_signal_contract(
             validation.get("as_of") or input_data.get("as_of"),
             field_name="signal_validation.as_of",
         )
-        event_time = _aware_task_datetime(
-            signal.get("event_time"), field_name="signal.event_time"
-        )
+        event_time = _aware_task_datetime(signal.get("event_time"), field_name="signal.event_time")
         available_at = _aware_task_datetime(
             signal.get("available_at"), field_name="signal.available_at"
         )

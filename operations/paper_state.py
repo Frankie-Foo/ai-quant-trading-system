@@ -13,7 +13,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import cast
 
-from execution.alpaca_paper import BrokerOrder, PaperPosition
+from execution.alpaca_paper import BrokerOrder, FreshNbboQuote, PaperPosition
 
 RUN_LEASE = timedelta(seconds=30)
 TERMINAL_ORDER_STATUSES = frozenset({"filled", "canceled", "expired", "rejected"})
@@ -161,6 +161,25 @@ class PaperStateStore:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS paper_entry_quotes (
+                    client_order_id TEXT NOT NULL,
+                    observed_at_utc TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    attempt INTEGER NOT NULL,
+                    signal_ts_utc TEXT NOT NULL,
+                    quote_asof_utc TEXT NOT NULL,
+                    feed TEXT NOT NULL,
+                    bid TEXT NOT NULL,
+                    ask TEXT NOT NULL,
+                    relative_spread TEXT NOT NULL,
+                    order_intent INTEGER NOT NULL DEFAULT 0,
+                    outcome TEXT NOT NULL DEFAULT 'observed',
+                    reason TEXT,
+                    PRIMARY KEY (client_order_id, observed_at_utc)
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS one_entry_quote_per_order
+                    ON paper_entry_quotes(client_order_id) WHERE order_intent=1;
                 """
             )
             source_id = _paper_store_source(path)
@@ -264,14 +283,36 @@ class PaperStateStore:
         quantity: int,
         payload: dict[str, object],
         observed_at_utc: datetime,
+        entry_quote_observed_at_utc: datetime | None = None,
     ) -> None:
         _require_utc(observed_at_utc)
+        if entry_quote_observed_at_utc is not None:
+            _require_utc(entry_quote_observed_at_utc)
+            if role != "entry":
+                raise ValueError("only entry intent can bind an entry quote")
         if not client_order_id.strip() or not symbol.strip() or not role.strip():
             raise ValueError("order intent identity is required")
         if attempt not in {1, 2} or quantity < 1:
             raise ValueError("order intent attempt and quantity are invalid")
         encoded = _encode(payload)
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            quote_rows = connection.execute(
+                "SELECT observed_at_utc,outcome,order_intent,trade_date,symbol,attempt "
+                "FROM paper_entry_quotes "
+                "WHERE client_order_id=?", (client_order_id,),
+            ).fetchall()
+            bound_quote = (
+                entry_quote_observed_at_utc.isoformat()
+                if entry_quote_observed_at_utc is not None else None
+            )
+            if quote_rows and bound_quote is None:
+                raise RuntimeError("entry quote must be bound to order intent")
+            bound_row = next((row for row in quote_rows if row[0] == bound_quote), None)
+            if bound_row is not None and tuple(bound_row[3:]) != (
+                trade_date.isoformat(), symbol.strip().upper(), attempt,
+            ):
+                raise RuntimeError("entry quote identity disagrees with order intent")
             existing = connection.execute(
                 "SELECT trade_date, symbol, attempt, role, quantity, payload_json "
                 "FROM paper_orders WHERE client_order_id=?",
@@ -288,7 +329,11 @@ class PaperStateStore:
             if existing is not None:
                 if tuple(existing) != identity:
                     raise RuntimeError("order intent identity changed after persistence")
+                if bound_quote is not None and (bound_row is None or bound_row[2] != 1):
+                    raise RuntimeError("order intent entry quote changed")
                 return
+            if bound_quote is not None and (bound_row is None or bound_row[1] != "observed"):
+                raise RuntimeError("bound entry quote is unavailable")
             connection.execute(
                 """
                 INSERT INTO paper_orders (
@@ -303,13 +348,25 @@ class PaperStateStore:
                     observed_at_utc.isoformat(),
                 ),
             )
+            if bound_quote is not None:
+                connection.execute(
+                    "UPDATE paper_entry_quotes SET order_intent=1 "
+                    "WHERE client_order_id=? AND observed_at_utc=?",
+                    (client_order_id, bound_quote),
+                )
 
     def abort_unsubmitted_entry(
         self, *, client_order_id: str, prior_state: dict[str, object] | None,
         observed_at_utc: datetime,
+        entry_quote_observed_at_utc: datetime | None = None,
+        rejection_reason: str | None = None,
     ) -> None:
         """Restore the symbol only after the caller proves POST was never attempted."""
         _require_utc(observed_at_utc)
+        if (entry_quote_observed_at_utc is None) != (rejection_reason is None):
+            raise ValueError("entry quote rejection requires timestamp and reason")
+        if entry_quote_observed_at_utc is not None:
+            _require_utc(entry_quote_observed_at_utc)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -328,6 +385,18 @@ class PaperStateStore:
                 or state.get("entry_client_id") != client_order_id
             ):
                 raise RuntimeError("pending entry state no longer matches aborted intent")
+            quote = connection.execute(
+                "SELECT observed_at_utc,outcome FROM paper_entry_quotes "
+                "WHERE client_order_id=? AND order_intent=1", (client_order_id,),
+            ).fetchone()
+            expected_quote_at = (
+                entry_quote_observed_at_utc.isoformat()
+                if entry_quote_observed_at_utc is not None else None
+            )
+            if quote is not None and tuple(quote) != (expected_quote_at, "observed"):
+                raise RuntimeError("bound entry quote cannot be rejected")
+            if quote is None and expected_quote_at is not None:
+                raise RuntimeError("bound entry quote is missing")
             connection.execute(
                 "UPDATE paper_orders SET status='aborted', updated_at_utc=? "
                 "WHERE client_order_id=?",
@@ -343,6 +412,12 @@ class PaperStateStore:
                     "WHERE trade_date=? AND symbol=?",
                     (_encode(prior_state), observed_at_utc.isoformat(), *row[:2]),
                 )
+            if quote is not None:
+                connection.execute(
+                    "UPDATE paper_entry_quotes SET outcome='pre_submit_rejected',reason=? "
+                    "WHERE client_order_id=? AND observed_at_utc=?",
+                    (rejection_reason, client_order_id, expected_quote_at),
+                )
 
     def attach_broker_order(
         self,
@@ -356,6 +431,7 @@ class PaperStateStore:
         if not broker_order_id.strip() or not status.strip():
             raise ValueError("broker order identity is required")
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT broker_order_id FROM paper_orders WHERE client_order_id=?",
                 (client_order_id,),
@@ -377,6 +453,24 @@ class PaperStateStore:
                     client_order_id,
                 ),
             )
+            bound_quote = connection.execute(
+                "SELECT observed_at_utc,outcome FROM paper_entry_quotes "
+                "WHERE client_order_id=? AND order_intent=1",
+                (client_order_id,),
+            ).fetchone()
+            if bound_quote is not None:
+                if bound_quote[1] not in {"observed", "submitted"}:
+                    raise RuntimeError("broker order conflicts with bound entry quote audit")
+                connection.execute(
+                    "UPDATE paper_entry_quotes SET outcome='submitted',reason='' "
+                    "WHERE client_order_id=? AND observed_at_utc=?",
+                    (client_order_id, bound_quote[0]),
+                )
+            elif connection.execute(
+                "SELECT 1 FROM paper_entry_quotes WHERE client_order_id=? LIMIT 1",
+                (client_order_id,),
+            ).fetchone() is not None:
+                raise RuntimeError("broker order has no bound entry quote audit")
 
     def get_order(self, client_order_id: str) -> StoredPaperOrder | None:
         with self._connect() as connection:
@@ -422,6 +516,64 @@ class PaperStateStore:
                     _encode(state),
                     observed_at_utc.isoformat(),
                 ),
+            )
+
+    def record_entry_quote(
+        self, *, trade_date: date, client_order_id: str, symbol: str, attempt: int,
+        signal_ts_utc: datetime, quote: FreshNbboQuote, observed_at_utc: datetime,
+    ) -> None:
+        _require_utc(signal_ts_utc)
+        _require_utc(observed_at_utc)
+        if not client_order_id or symbol != quote.symbol or attempt < 1:
+            raise ValueError("entry quote identity is invalid")
+        midpoint = (quote.bid + quote.ask) / 2
+        facts = (
+            trade_date.isoformat(), symbol, attempt, signal_ts_utc.isoformat(),
+            quote.asof_utc.isoformat(), quote.feed, str(quote.bid), str(quote.ask),
+            str((quote.ask - quote.bid) / midpoint),
+        )
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT trade_date,symbol,attempt,signal_ts_utc,quote_asof_utc,feed,bid,ask,"
+                "relative_spread FROM paper_entry_quotes WHERE client_order_id=? "
+                "AND observed_at_utc=?", (client_order_id, observed_at_utc.isoformat()),
+            ).fetchone()
+            if existing is not None:
+                if tuple(existing) != facts:
+                    raise RuntimeError("entry quote identity changed")
+                return
+            connection.execute(
+                "INSERT INTO paper_entry_quotes "
+                "(client_order_id,observed_at_utc,trade_date,symbol,attempt,signal_ts_utc,"
+                "quote_asof_utc,feed,bid,ask,relative_spread) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (client_order_id, observed_at_utc.isoformat(), *facts),
+            )
+
+    def mark_entry_quote_result(
+        self, *, client_order_id: str, observed_at_utc: datetime,
+        outcome: str, reason: str = "",
+    ) -> None:
+        _require_utc(observed_at_utc)
+        if outcome not in {"guard_refused", "pre_submit_rejected"}:
+            raise ValueError("entry quote outcome is invalid")
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT outcome,reason,order_intent FROM paper_entry_quotes "
+                "WHERE client_order_id=? "
+                "AND observed_at_utc=?", (client_order_id, observed_at_utc.isoformat()),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("entry quote audit is missing")
+            if row[2] == 1:
+                raise RuntimeError("bound entry quote requires atomic order resolution")
+            if row[0] != "observed" and tuple(row[:2]) != (outcome, reason):
+                raise RuntimeError("entry quote outcome changed")
+            connection.execute(
+                "UPDATE paper_entry_quotes SET outcome=?,reason=? WHERE client_order_id=? "
+                "AND observed_at_utc=?",
+                (outcome, reason, client_order_id, observed_at_utc.isoformat()),
             )
 
     def _monitor_transition(

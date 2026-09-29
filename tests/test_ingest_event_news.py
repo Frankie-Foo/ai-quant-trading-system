@@ -5,6 +5,7 @@ import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, tzinfo
 from pathlib import Path
+from threading import Barrier
 from typing import Any, Self
 
 import httpx
@@ -69,10 +70,34 @@ def test_injected_news_client_stays_open_and_merges_chunk_symbols() -> None:
         client=client,
     )
 
-    assert client.calls == [("AAPL",), ("MSFT",)]
+    assert sorted(client.calls) == [("AAPL",), ("MSFT",)]
     assert client.closed is False
     assert frame.height == 1
     assert frame.row(0, named=True)["symbols"] == ["AAPL", "MSFT"]
+
+
+def test_news_chunks_run_concurrently_without_losing_results() -> None:
+    start = datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
+    barrier = Barrier(4, timeout=3)
+
+    class ConcurrentNewsClient(FakeNewsClient):
+        def fetch_news(
+            self, symbols: tuple[str, ...], *, start_utc: datetime, end_utc: datetime,
+        ) -> tuple[AlpacaNewsArticle, ...]:
+            barrier.wait()
+            return super().fetch_news(symbols, start_utc=start_utc, end_utc=end_utc)
+
+    client = ConcurrentNewsClient()
+    frame = fetch_alpaca_news_direct(
+        start,
+        datetime(2026, 9, 14, 13, 0, tzinfo=UTC),
+        symbols=("AAPL", "MSFT", "NVDA", "TSLA"),
+        chunk_size=1,
+        client=client,
+    )
+    assert sorted(client.calls) == [("AAPL",), ("MSFT",), ("NVDA",), ("TSLA",)]
+    assert frame.height == 1
+    assert frame.row(0, named=True)["symbols"] == ["AAPL", "MSFT", "NVDA", "TSLA"]
 
 
 def test_cli_rejects_disallowed_time_before_reading_credentials(

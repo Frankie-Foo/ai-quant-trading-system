@@ -347,7 +347,9 @@ def prepare_catalysts(events: pl.DataFrame, *, asof_utc: datetime) -> pl.DataFra
             }
         )
         output.append(enriched)
-    return pl.DataFrame(output).sort("published_utc", "source", "source_event_id")
+    return pl.DataFrame(output, infer_schema_length=None).sort(
+        "published_utc", "source", "source_event_id"
+    )
 
 
 def select_overnight_catalysts(

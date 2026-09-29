@@ -20,7 +20,9 @@ import polars as pl
 from pydantic import SecretStr
 
 from data_plane.calendar import build_xnys_schedule
-from data_plane.providers.alpaca import fetch_bars, fetch_quotes
+from data_plane.http import DownloadError
+from data_plane.providers.alpaca import fetch_bars, latest_sip_quote
+from data_plane.providers.alpaca_direct import LatestSipObservation
 from execution.alpaca_paper import (
     BrokerOrder,
     DirectAlpacaPaperBroker,
@@ -584,33 +586,6 @@ def reconcile_symbol_position(
         close(str(position.get("exit_reason", "reconcile_exit")))
 
 
-def _latest_sip_nbbo(symbol: str, observed_at_utc: datetime) -> FreshNbboQuote:
-    frame = fetch_quotes(
-        (symbol,),
-        observed_at_utc - timedelta(seconds=10),
-        observed_at_utc + timedelta(microseconds=1),
-        feed="sip",
-    ).sort("ts_utc")
-    if frame.is_empty():
-        raise CandidateRejected("symbol_sip_nbbo_unavailable")
-    row = frame.tail(1).row(0, named=True)
-    bid = row.get("bid_price")
-    ask = row.get("ask_price")
-    asof = row.get("ts_utc")
-    feed = row.get("feed")
-    if not isinstance(bid, (int, float)) or not isinstance(ask, (int, float)):
-        raise CandidateRejected("symbol_sip_nbbo_prices_unavailable")
-    if not isinstance(asof, datetime) or not isinstance(feed, str):
-        raise CandidateRejected("symbol_sip_nbbo_identity_unavailable")
-    return FreshNbboQuote(
-        symbol=symbol,
-        bid=Decimal(str(bid)),
-        ask=Decimal(str(ask)),
-        asof_utc=asof,
-        feed=feed,
-    )
-
-
 def _optional_positive_env(name: str) -> float | None:
     raw = os.getenv(name, "").strip()
     if not raw:
@@ -621,8 +596,19 @@ def _optional_positive_env(name: str) -> float | None:
     return value
 
 
-def _latest_sip_nbbo_now(symbol: str) -> FreshNbboQuote:
-    return _latest_sip_nbbo(symbol, datetime.now(UTC))
+def _latest_sip_nbbo_now(symbol: str) -> tuple[FreshNbboQuote, LatestSipObservation]:
+    observation = latest_sip_quote(symbol)
+    quote = observation.quote
+    return (
+        FreshNbboQuote(
+            symbol=quote.symbol,
+            bid=Decimal(str(quote.bid_price)),
+            ask=Decimal(str(quote.ask_price)),
+            asof_utc=quote.ts_utc,
+            feed=quote.feed,
+        ),
+        observation,
+    )
 
 
 def _bracket_child(order: BrokerOrder, order_type: str) -> BrokerOrder:
@@ -1546,22 +1532,6 @@ def main() -> None:
                             entry_price = reentry.entry_reference
                             stop_level = max(reentry.structural_stop, entry_price * 0.985)
                             signal_ts_utc = reentry.signal_ts_utc
-                        try:
-                            quote = bounded_retry(partial(_latest_sip_nbbo_now, symbol))
-                        except CandidateRejected as exc:
-                            candidate_blocks[symbol] = {"code": str(exc)}
-                            alerts.report_failure(
-                                f"market-data:{symbol}",
-                                component=f"Paper {symbol} SIP",
-                                error_type=str(exc),
-                                observed_at_utc=datetime.now(UTC),
-                            )
-                            continue
-                        quote_observed_at = datetime.now(UTC)
-                        actual_all_in_stop_pct = (
-                            float((quote.ask - Decimal(str(stop_level))) / quote.ask)
-                            + config.stop_slippage_reserve_pct
-                        )
                         current_account = broker.get_account()
                         remaining_slots = max(1, MAX_DAILY_ENTRIES - len(positions))
                         base_fraction = risk_fraction(hard_catalyst=hard_catalysts[symbol])
@@ -1588,6 +1558,7 @@ def main() -> None:
                             > Decimal(current_broker_positions[open_symbol].avg_entry_price or "0")
                             for open_symbol in positions
                         )
+                        quote_audit_at: datetime | None = None
                         try:
                             runtime_policy.validate_entry_risk(
                                 proposed_risk_fraction=allocation_fraction,
@@ -1631,6 +1602,20 @@ def main() -> None:
                                     )
                                 ),
                             )
+                            quote, observation = bounded_retry(
+                                partial(_latest_sip_nbbo_now, symbol)
+                            )
+                            quote_observed_at = observation.observed_at_utc()
+                            store.record_entry_quote(
+                                trade_date=args.trade_date,
+                                client_order_id=entry_client_id,
+                                symbol=symbol,
+                                attempt=attempt,
+                                signal_ts_utc=signal_ts_utc,
+                                quote=quote,
+                                observed_at_utc=quote_observed_at,
+                            )
+                            quote_audit_at = quote_observed_at
                             entry_builder = partial(
                                 build_protected_entry,
                                 client_order_id=entry_client_id,
@@ -1643,7 +1628,7 @@ def main() -> None:
                                 ),
                             )
                             protected_entry = entry_builder(
-                                qty=1, observed_at_utc=datetime.now(UTC),
+                                qty=1, observed_at_utc=quote_observed_at,
                             )
                             limit_price = Decimal(protected_entry.limit_price)
                             actual_all_in_stop_pct = float(
@@ -1665,16 +1650,33 @@ def main() -> None:
                             if quantity < 1:
                                 raise CandidateRejected("portfolio_cap_cannot_fund_one_share")
                             protected_entry = protected_entry.model_copy(update={"qty": quantity})
+                        except DownloadError:
+                            raise
                         except (ValueError, RuntimeError) as exc:
+                            if quote_audit_at is not None:
+                                store.mark_entry_quote_result(
+                                    client_order_id=entry_client_id,
+                                    observed_at_utc=quote_audit_at,
+                                    outcome="guard_refused",
+                                    reason=str(exc),
+                                )
                             candidate_blocks[symbol] = {
                                 "code": "entry_guard_refused",
                                 "reason": str(exc),
                                 "observed_at_utc": datetime.now(UTC),
                             }
                             continue
+                        if quote_audit_at is None:
+                            raise RuntimeError("entry quote audit was not recorded")
                         if datetime.now(UTC) >= entry_cutoff or alerts.is_frozen(
                             "modern-paper-loop"
                         ):
+                            store.mark_entry_quote_result(
+                                client_order_id=entry_client_id,
+                                observed_at_utc=quote_audit_at,
+                                outcome="pre_submit_rejected",
+                                reason="entry_time_or_freeze_changed",
+                            )
                             candidate_blocks[symbol] = {"code": "entry_time_or_freeze_changed"}
                             continue
                         store.record_order_intent(
@@ -1686,6 +1688,7 @@ def main() -> None:
                             quantity=quantity,
                             payload=protected_entry.broker_payload(),
                             observed_at_utc=quote_observed_at,
+                            entry_quote_observed_at_utc=quote_audit_at,
                         )
                         pending_position: dict[str, object] = {
                             "phase": "entry_pending",
@@ -1727,12 +1730,13 @@ def main() -> None:
                         def validate_before_entry_post(
                             builder: Callable[..., ProtectedPaperEntryRequest] = entry_builder,
                             expected: ProtectedPaperEntryRequest = protected_entry,
+                            quote_clock: LatestSipObservation = observation,
                         ) -> None:
                             frozen = alerts.is_frozen("modern-paper-loop")
                             killed = (
                                 os.getenv("TRADING_KILL_SWITCH", "true").strip().lower() != "false"
                             )
-                            checked_at = datetime.now(UTC)
+                            checked_at = quote_clock.observed_at_utc()
                             if (
                                 checked_at >= entry_cutoff or frozen or killed
                                 or os.getenv("BROKER_WRITE_ENABLED", "").strip().lower() != "true"
@@ -1755,6 +1759,8 @@ def main() -> None:
                             store.abort_unsubmitted_entry(
                                 client_order_id=entry_client_id, prior_state=prior_attempt_state,
                                 observed_at_utc=datetime.now(UTC),
+                                entry_quote_observed_at_utc=quote_audit_at,
+                                rejection_reason=str(exc),
                             )
                             positions.pop(symbol)
                             if previous_attempt:

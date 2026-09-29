@@ -45,7 +45,7 @@ def latest(frame: pl.DataFrame, minute: int, **kwargs: Any) -> modern.ModernMome
         prior_close=96.0,
         market_cap=2e9,
         premarket_rvol=2.0,
-        config=modern.ModernMomentumConfig(),
+        config=kwargs.pop("config", modern.ModernMomentumConfig()),
         asof_utc=OPENED + timedelta(minutes=minute),
         **kwargs,
     )
@@ -161,9 +161,9 @@ def test_manifest_hashes_effective_modern_config_not_legacy_policy() -> None:
     manifest = modern.modern_strategy_manifest()
     encoded = json.dumps(manifest["effective_config"], sort_keys=True, separators=(",", ":"))
     assert manifest["schema_version"] == "modern_strategy_manifest.v1"
-    assert manifest["strategy_version"] == "modern-h15-current-signal.v4"
+    assert manifest["strategy_version"] == "modern-h15-current-signal.v5"
     assert manifest["effective_config"]["minimum_premarket_rvol"] == 1.5
-    assert manifest["effective_config"]["maximum_entry_relative_spread"] == 0.0025
+    assert manifest["effective_config"]["maximum_entry_relative_spread"] is None
     assert manifest["effective_config"]["signal_cutoff_minutes"] == 330
     assert manifest["effective_config"]["liquidation_minutes"] == 380
     assert manifest["first_entry_bar_minutes"] == 1
@@ -253,11 +253,17 @@ def test_latest_signal_does_not_return_the_days_already_exited_first_trade() -> 
     assert signal.signal_ts_utc == OPENED + timedelta(minutes=80)
 
 
-@pytest.mark.parametrize("spread,allowed", [(0.0025, True), (0.0026, False)])
-def test_current_signal_and_replay_share_the_spread_limit(spread: float, allowed: bool) -> None:
+@pytest.mark.parametrize(
+    "spread,maximum,allowed",
+    [(0.0025, None, True), (0.0026, None, True), (0.0026, 0.0025, False)],
+)
+def test_current_signal_and_replay_share_optional_spread_limit(
+    spread: float, maximum: float | None, allowed: bool,
+) -> None:
     frame = bars(29)
-    assert (latest(frame, 28, relative_spread=spread) is not None) is allowed
-    assert (replay(frame, relative_spread=spread) is not None) is allowed
+    config = replace(modern.ModernMomentumConfig(), maximum_entry_relative_spread=maximum)
+    assert (latest(frame, 28, config=config, relative_spread=spread) is not None) is allowed
+    assert (replay(frame, config=config, relative_spread=spread) is not None) is allowed
 
 
 @pytest.mark.parametrize("spread", [-0.001, float("nan"), float("inf")])
@@ -306,12 +312,12 @@ def test_current_signal_preserves_h15_volume_and_ignores_future_invalid_data() -
     "end_minute,spread,allowed",
     [
         (325, 0.0025, True),
-        (325, 0.0026, False),
+        (325, 0.0026, True),
         (330, 0.001, False),
         (335, 0.001, False),
     ],
 )
-def test_current_reentry_shares_default_cutoff_spread_and_stale_guards(
+def test_current_reentry_shares_default_cutoff_and_stale_guards(
     end_minute: int,
     spread: float,
     allowed: bool,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -352,3 +353,12 @@ class LoopOutbox:
             retry_after_utc=row["retry_after_utc"],
             retry_count=int(row["retry_count"] or 0),
         )
+
+
+def default_loop_outbox_path(project_root: Path) -> Path:
+    """Use one durable outbox across immutable local releases."""
+    configured = os.environ.get("AI_QUANT_LOOP_OUTBOX_FILE", "").strip()
+    if not configured:
+        return project_root / "runs" / "loop-integration.sqlite3"
+    path = Path(configured).expanduser()
+    return path if path.is_absolute() else project_root / path
