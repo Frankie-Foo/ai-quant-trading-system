@@ -171,6 +171,25 @@ def test_windows_children_are_hidden_and_decode_chinese_utf8(
     assert calls[0].get("encoding") == "utf-8"
 
 
+def test_child_failure_keeps_only_classified_sip_access_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del args, kwargs
+        return subprocess.CompletedProcess(
+            [],
+            1,
+            "",
+            "secret=do-not-copy\n"
+            "DirectMarketDataError: Alpaca SIP bars request failed with HTTP 403\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="alpaca_sip_recent_data_access_denied") as caught:
+        stage._run_module("scripts.build_premarket_rvol", date(2026, 9, 22), tmp_path)
+    assert "do-not-copy" not in str(caught.value)
+
+
 def test_real_child_preserves_chinese_output(tmp_path: Path) -> None:
     result = child_process.run_child(
         [sys.executable, "-c", "print(chr(0x4e2d) + chr(0x6587))"],

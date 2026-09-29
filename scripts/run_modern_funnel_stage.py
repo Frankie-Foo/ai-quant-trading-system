@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -141,7 +142,11 @@ def _run_module(
         check=False,
     )
     if completed.returncode != 0:
-        raise RuntimeError(f"{module} failed with exit code {completed.returncode}")
+        detail = _safe_child_failure_detail(completed.stderr)
+        suffix = f": {detail}" if detail else ""
+        raise RuntimeError(
+            f"{module} failed with exit code {completed.returncode}{suffix}"
+        )
     # Children may emit JSON progress lines before a pretty-printed final receipt.
     lines = completed.stdout.splitlines()
     for index in reversed(range(len(lines))):
@@ -154,6 +159,24 @@ def _run_module(
         if isinstance(receipt, dict):
             return receipt
     raise ValueError(f"{module} did not return a JSON receipt")
+
+
+def _safe_child_failure_detail(stderr: str) -> str:
+    """Keep only machine-classified dependency failures out of a child traceback."""
+
+    for raw_line in reversed(stderr.splitlines()):
+        line = " ".join(raw_line.split())
+        if not line:
+            continue
+        status = re.search(r"Alpaca SIP .* HTTP (401|403|429|5[0-9]{2})$", line)
+        if status is None:
+            continue
+        return {
+            "401": "alpaca_sip_authentication_failed",
+            "403": "alpaca_sip_recent_data_access_denied",
+            "429": "alpaca_sip_rate_limited",
+        }.get(status.group(1), "alpaca_sip_upstream_unavailable")
+    return ""
 
 
 def _snapshot_id(receipt: dict[str, Any], key: str = "dataset_id") -> str:

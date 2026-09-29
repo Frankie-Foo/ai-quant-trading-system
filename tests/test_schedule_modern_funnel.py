@@ -151,15 +151,37 @@ def test_missing_first_wave_is_recovered_before_second_wave(tmp_path: Path) -> N
     assert executor.calls == [FunnelStage.FIRST_WAVE, FunnelStage.SECOND_WAVE]
 
 
-def test_missing_prerequisite_still_blocks_final_rank(tmp_path: Path) -> None:
+def test_missing_first_wave_is_recovered_during_final_rank_window(tmp_path: Path) -> None:
     executor = FakeExecutor()
     result = run_tick(
         ledger_path=tmp_path / "funnel.sqlite3",
         executor=executor,
         now_utc=_utc(9, 30),
     )
-    assert result.status is FunnelTickStatus.PREREQUISITE_MISSING
-    assert executor.calls == []
+    assert result.status is FunnelTickStatus.SUCCEEDED
+    assert result.stage is FunnelStage.FIRST_WAVE
+    assert executor.calls == [FunnelStage.FIRST_WAVE]
+
+
+def test_missing_first_wave_is_recovered_during_open_confirmation_window(
+    tmp_path: Path,
+) -> None:
+    executor = FakeExecutor()
+    ledger = tmp_path / "funnel.sqlite3"
+    first = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 35))
+    second = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 36))
+    final_rank = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 37))
+    confirmation = run_tick(ledger_path=ledger, executor=executor, now_utc=_utc(9, 38))
+
+    assert [first.stage, second.stage, final_rank.stage, confirmation.stage] == [
+        FunnelStage.FIRST_WAVE,
+        FunnelStage.SECOND_WAVE,
+        FunnelStage.FINAL_RANK,
+        FunnelStage.OPEN_CONFIRMATION,
+    ]
+    assert all(result.status is FunnelTickStatus.SUCCEEDED for result in [
+        first, second, final_rank, confirmation,
+    ])
 
 
 def test_missing_second_wave_is_recovered_during_final_rank_window(tmp_path: Path) -> None:
