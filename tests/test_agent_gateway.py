@@ -8,6 +8,7 @@ import sqlite3
 import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import polars as pl
@@ -516,6 +517,35 @@ def test_selection_memory_keeps_supported_and_missed_cases_but_not_uncertain_cas
         for lesson in lessons
         for digit in "0123456789"
     )
+
+
+def test_selection_memory_accepts_generic_narrative_when_pool_is_a_ticker(
+    gateway: AgentGatewayService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        gateway.snapshots,
+        "selection_for_date",
+        lambda _: SimpleNamespace(frame=pl.DataFrame({"symbol": ["POOL"]})),
+    )
+    metric = _fact("close_return")
+    lesson = materialize_selection_memory(
+        [
+            {
+                "case_id": "case-selected",
+                "root_cause": "selected",
+                "selection_status": "selected",
+                "pattern_key": "selected",
+                "facts": [metric.model_dump(mode="json")],
+            }
+        ],
+        trade_date=FUTURE_SESSION,
+        metric_index={"opportunity:case-selected:close_return": metric},
+        source_record_ids=("synthetic-postmortem",),
+    )[0]
+
+    result = gateway.lessons_write(agent_name="pdca", lesson=lesson)
+
+    assert _object_dict(result["data"])["status"] == "accepted_fact"
 
 
 def test_monthly_evolution_requires_evidence_cluster_and_stays_draft(
