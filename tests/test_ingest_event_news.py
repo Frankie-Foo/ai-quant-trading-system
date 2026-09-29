@@ -81,7 +81,9 @@ def test_news_chunks_run_concurrently_without_losing_results() -> None:
     barrier = Barrier(4, timeout=3)
 
     class ConcurrentNewsClient(FakeNewsClient):
-        def fetch_news(self, symbols, *, start_utc, end_utc):
+        def fetch_news(
+            self, symbols: tuple[str, ...], *, start_utc: datetime, end_utc: datetime,
+        ) -> tuple[AlpacaNewsArticle, ...]:
             barrier.wait()
             return super().fetch_news(symbols, start_utc=start_utc, end_utc=end_utc)
 

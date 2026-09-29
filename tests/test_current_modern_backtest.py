@@ -110,6 +110,8 @@ def test_backtest_refuses_to_overwrite_historical_evidence(
 
 def test_historical_audit_is_read_only_and_distinguishes_10_from_25_basis_points(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     path = tmp_path / "old.trades.parquet"
     # DST-aware: July 19:00 UTC is 15:00 ET; January 19:00 UTC is only 14:00 ET.
@@ -134,7 +136,9 @@ def test_historical_audit_is_read_only_and_distinguishes_10_from_25_basis_points
         }
     ).write_parquet(path)
     before = path.read_bytes()
-    audit = backtest.audit_historical_modern_eligibility(path)
+    audit = backtest.audit_historical_modern_eligibility(
+        path, replace(ModernMomentumConfig(), maximum_entry_relative_spread=0.0025)
+    )
     assert audit["attempts"] == 4 and audit["reentries"] == 3
     assert audit["entry_violation_count"] == 2
     assert audit["reentry_violation_count"] == 2
@@ -143,6 +147,12 @@ def test_historical_audit_is_read_only_and_distinguishes_10_from_25_basis_points
     assert audit["time_exit_labels_requiring_replay"] == 1
     assert audit["historical_performance_status"] == "invalidated_for_current_strategy"
     assert audit["new_performance"] is None and audit["new_blind_evaluation"] is False
+    no_spread_cap = backtest.audit_historical_modern_eligibility(path)
+    assert no_spread_cap["entry_violations_by_reason"]["spread_exceeds_maximum"] == 0
+    monkeypatch.setattr(sys, "argv", ["backtest", "--audit-trades", str(path)])
+    backtest.main()
+    cli_audit = json.loads(capsys.readouterr().out)
+    assert cli_audit["entry_violations_by_reason"]["spread_exceeds_maximum"] == 0
     ten = backtest.audit_historical_modern_eligibility(
         path, replace(ModernMomentumConfig(), maximum_entry_relative_spread=0.001)
     )

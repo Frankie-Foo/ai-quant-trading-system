@@ -158,7 +158,8 @@ def audit_historical_modern_eligibility(
         failures = {
             "at_or_after_cutoff": max(row["signal_ts_utc"], row["entry_ts_utc"]) >= cutoff,
             "spread_exceeds_maximum": (
-                row["entry_relative_spread"] > config.maximum_entry_relative_spread
+                config.maximum_entry_relative_spread is not None
+                and row["entry_relative_spread"] > config.maximum_entry_relative_spread
             ),
             "all_in_stop_exceeds_maximum": (
                 row["all_in_stop_pct"] > config.max_all_in_stop_pct + 1e-12
@@ -286,7 +287,7 @@ def main() -> None:
     parser.add_argument(
         "--audit-trades", type=Path, help="Read-only label audit; JSON to stdout only"
     )
-    parser.add_argument("--audit-max-entry-spread", type=float, default=0.0025)
+    parser.add_argument("--audit-max-entry-spread", type=float)
     parser.add_argument(
         "--experiment-metadata",
         type=Path,
@@ -296,7 +297,9 @@ def main() -> None:
     if args.audit_trades:
         if any((args.signals, args.data_root, args.output, args.experiment_metadata)):
             parser.error("--audit-trades cannot be combined with backtest inputs or outputs")
-        if not isfinite(args.audit_max_entry_spread) or args.audit_max_entry_spread < 0:
+        if args.audit_max_entry_spread is not None and (
+            not isfinite(args.audit_max_entry_spread) or args.audit_max_entry_spread < 0
+        ):
             parser.error("audit spread must be finite and nonnegative")
         audit_config = replace(
             ModernMomentumConfig(), maximum_entry_relative_spread=args.audit_max_entry_spread

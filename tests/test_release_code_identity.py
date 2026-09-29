@@ -12,7 +12,7 @@ def test_release_identity_matches_packaged_source_and_detects_tamper(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        review_builder.subprocess, "run",
+        "operations.loop_integration.review_builder.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(returncode=128, stdout=""),
     )
     files = ("data_plane/providers/alpaca.py", "kernel/catalysts.py")
@@ -26,7 +26,7 @@ def test_release_identity_matches_packaged_source_and_detects_tamper(
     (tmp_path / files[0]).write_bytes(b"a\r\nb\r\n")
     assert review_builder._git_commit(tmp_path) == identity
     monkeypatch.setattr(
-        review_builder.subprocess, "run",
+        "operations.loop_integration.review_builder.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="b" * 40),
     )
     assert review_builder._git_commit(tmp_path) == identity
@@ -39,7 +39,7 @@ def test_git_identity_without_release_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        review_builder.subprocess, "run",
+        "operations.loop_integration.review_builder.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="b" * 40),
     )
     assert review_builder._git_commit(tmp_path) == "b" * 40

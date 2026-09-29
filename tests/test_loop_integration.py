@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from pathlib import Path
-from typing import Any
+from typing import Any, Self, cast
 
 import httpx
 import polars as pl
@@ -739,8 +739,9 @@ def test_outcome_daily_index_uses_alpaca_fallback_only_for_missing_dates(
 
     class SnapshotClock(datetime):
         @classmethod
-        def now(cls, tz: object = None) -> datetime:
-            return datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            fixed = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
+            return cls.fromtimestamp(fixed.timestamp(), tz or UTC)
 
     monkeypatch.setattr("data_plane.storage.datetime", SnapshotClock)
 
@@ -873,8 +874,8 @@ def test_explicit_remote_rejection_is_terminal_in_review_outbox(tmp_path: Path) 
     receipt = resume_submitted_review(
         box,
         item,
-        RejectingClient(),
-        now=NOW,  # type: ignore[arg-type]
+        cast(LoopClient, RejectingClient()),
+        now=NOW,
     )
     assert receipt["status"] == "remote_rejected"
     persisted = box.get(envelope.event_id)

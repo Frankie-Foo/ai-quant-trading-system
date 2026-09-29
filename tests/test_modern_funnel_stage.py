@@ -19,6 +19,7 @@ from execution.alpaca_paper import BrokerOrder, PaperPosition
 from kernel.strategy_policy import build_strategy_policy, write_strategy_policy
 from operations.autonomous_selection_handoff import create_open_confirmation
 from operations.feishu_base import FeishuBaseEventClient
+from operations.loop_integration.execution_summary import _native_manifest
 from operations.paper_runtime_policy import PaperRuntimePolicy
 from operations.paper_state import PaperStateStore
 from schedule.modern_funnel import (
@@ -211,7 +212,7 @@ def test_first_wave_message_is_short_chinese_and_human_readable() -> None:
     )
 
 
-def test_second_wave_keeps_only_liquid_tight_names_above_vwap() -> None:
+def test_second_wave_keeps_wide_spread_names_when_other_facts_pass() -> None:
     bars = pl.DataFrame(
         {
             "symbol": ["GOOD", "GOOD", "WIDE"],
@@ -231,9 +232,10 @@ def test_second_wave_keeps_only_liquid_tight_names_above_vwap() -> None:
 
     kept, rejected = evaluate_second_wave([_candidate("GOOD"), _candidate("WIDE")], bars, quotes)
 
-    assert [row["symbol"] for row in kept] == ["GOOD"]
-    assert [row["symbol"] for row in rejected] == ["WIDE"]
-    assert "点差" in str(rejected[0]["reasons"])
+    assert [row["symbol"] for row in kept] == ["GOOD", "WIDE"]
+    assert rejected == []
+    spread = kept[1]["observed_spread"]
+    assert isinstance(spread, float) and spread > 0.01
 
 
 def test_second_wave_allows_a_point_two_percent_observation_spread() -> None:
@@ -260,7 +262,7 @@ def test_second_wave_allows_a_point_two_percent_observation_spread() -> None:
     assert rejected == []
 
 
-def test_second_wave_keeps_soft_vwap_and_spread_warnings_for_open_review() -> None:
+def test_second_wave_records_spread_without_a_spread_warning() -> None:
     bars = pl.DataFrame(
         {
             "symbol": ["WATCH", "WATCH"],
@@ -282,10 +284,9 @@ def test_second_wave_keeps_soft_vwap_and_spread_warnings_for_open_review() -> No
 
     assert [row["symbol"] for row in kept] == ["WATCH"]
     assert rejected == []
-    assert kept[0]["watch_reasons"] == [
-        "盘前点差0.80%偏宽，09:35及入场前复核",
-        "暂未站上盘前VWAP，等待开盘确认",
-    ]
+    assert kept[0]["watch_reasons"] == ["暂未站上盘前VWAP，等待开盘确认"]
+    spread = kept[0]["observed_spread"]
+    assert isinstance(spread, float) and spread > 0.007
 
 
 def test_second_wave_rejects_non_finite_market_facts() -> None:
@@ -413,6 +414,8 @@ def test_strategy_context_builds_a_non_executable_challenger_subset(
         strategy_version=str(context["active_version"]),
     )
     assert plan["modern_strategy_manifest"] == manifest
+    assert plan["maximum_entry_relative_spread"] is None
+    assert _native_manifest(plan) == manifest
     assert approved_strategy_matches(plan)
     plan_path = tmp_path / "modern-plan.json"
     plan_path.write_text(json.dumps(plan), encoding="utf-8")
@@ -804,12 +807,23 @@ def test_second_wave_retry_does_not_refetch_market_data(
     def unexpected(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("retry must not refetch market data")
 
+    selections: list[datetime] = []
+
+    def publish(**kwargs: object) -> tuple[tuple[str, ...], str]:
+        selected_at = kwargs["selection_at_utc"]
+        assert isinstance(selected_at, datetime)
+        selections.append(selected_at)
+        return (("rec-1",), "msg-1")
+
     monkeypatch.setattr(stage_runner, "fetch_bars", unexpected)
-    monkeypatch.setattr(stage_runner, "_publish_stage", lambda **_kwargs: (("rec-1",), "msg-1"))
+    monkeypatch.setattr(stage_runner, "_publish_stage", publish)
 
     receipt = stage_runner._second_wave(args, day_root)
+    replay = stage_runner._second_wave(args, day_root)
 
     assert receipt["livermore_message_id"] == "msg-1"
+    assert replay == receipt
+    assert selections == [datetime(2026, 8, 24, 13, 0, tzinfo=UTC)] * 2
 
 
 def test_second_wave_refreshes_when_first_wave_is_empty(

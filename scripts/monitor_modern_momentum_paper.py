@@ -1558,6 +1558,7 @@ def main() -> None:
                             > Decimal(current_broker_positions[open_symbol].avg_entry_price or "0")
                             for open_symbol in positions
                         )
+                        quote_audit_at: datetime | None = None
                         try:
                             runtime_policy.validate_entry_risk(
                                 proposed_risk_fraction=allocation_fraction,
@@ -1605,6 +1606,16 @@ def main() -> None:
                                 partial(_latest_sip_nbbo_now, symbol)
                             )
                             quote_observed_at = observation.observed_at_utc()
+                            store.record_entry_quote(
+                                trade_date=args.trade_date,
+                                client_order_id=entry_client_id,
+                                symbol=symbol,
+                                attempt=attempt,
+                                signal_ts_utc=signal_ts_utc,
+                                quote=quote,
+                                observed_at_utc=quote_observed_at,
+                            )
+                            quote_audit_at = quote_observed_at
                             entry_builder = partial(
                                 build_protected_entry,
                                 client_order_id=entry_client_id,
@@ -1642,15 +1653,30 @@ def main() -> None:
                         except DownloadError:
                             raise
                         except (ValueError, RuntimeError) as exc:
+                            if quote_audit_at is not None:
+                                store.mark_entry_quote_result(
+                                    client_order_id=entry_client_id,
+                                    observed_at_utc=quote_audit_at,
+                                    outcome="guard_refused",
+                                    reason=str(exc),
+                                )
                             candidate_blocks[symbol] = {
                                 "code": "entry_guard_refused",
                                 "reason": str(exc),
                                 "observed_at_utc": datetime.now(UTC),
                             }
                             continue
+                        if quote_audit_at is None:
+                            raise RuntimeError("entry quote audit was not recorded")
                         if datetime.now(UTC) >= entry_cutoff or alerts.is_frozen(
                             "modern-paper-loop"
                         ):
+                            store.mark_entry_quote_result(
+                                client_order_id=entry_client_id,
+                                observed_at_utc=quote_audit_at,
+                                outcome="pre_submit_rejected",
+                                reason="entry_time_or_freeze_changed",
+                            )
                             candidate_blocks[symbol] = {"code": "entry_time_or_freeze_changed"}
                             continue
                         store.record_order_intent(
@@ -1662,6 +1688,7 @@ def main() -> None:
                             quantity=quantity,
                             payload=protected_entry.broker_payload(),
                             observed_at_utc=quote_observed_at,
+                            entry_quote_observed_at_utc=quote_audit_at,
                         )
                         pending_position: dict[str, object] = {
                             "phase": "entry_pending",
@@ -1732,6 +1759,8 @@ def main() -> None:
                             store.abort_unsubmitted_entry(
                                 client_order_id=entry_client_id, prior_state=prior_attempt_state,
                                 observed_at_utc=datetime.now(UTC),
+                                entry_quote_observed_at_utc=quote_audit_at,
+                                rejection_reason=str(exc),
                             )
                             positions.pop(symbol)
                             if previous_attempt:

@@ -8,8 +8,10 @@ import json
 import os
 import re
 import sqlite3
+from collections.abc import Iterable
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from typing import Protocol
 
 import polars as pl
 
@@ -21,7 +23,11 @@ from data_plane.quality import canonicalize_bars
 from data_plane.storage import persist_snapshot
 from operations.local_env import load_project_env, project_data_root
 from operations.loop_integration.client import LoopClient
-from operations.loop_integration.contracts import OutcomeReporterConfig
+from operations.loop_integration.contracts import (
+    LoopEventOutcomeAssignment,
+    LoopOutcomeAssignment,
+    OutcomeReporterConfig,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = "alpaca.sip.daily_event_session"
@@ -122,8 +128,13 @@ def _symbols_from_outbox(path: Path) -> tuple[str, ...]:
     return _parse_symbols([*symbols])
 
 
+class _InstrumentAssignment(Protocol):
+    @property
+    def instrument(self) -> str: ...
+
+
 def _symbols_from_assignments(
-    assignments: tuple[object, ...], benchmark_symbol: str
+    assignments: Iterable[_InstrumentAssignment], benchmark_symbol: str
 ) -> tuple[str, ...]:
     symbols = {str(item.instrument).upper() for item in assignments}
     return _parse_symbols([*symbols, benchmark_symbol])
@@ -156,7 +167,7 @@ def main() -> None:
             base_url=os.environ.get("LOOP_BASE_URL", ""),
             api_key=os.environ.get("LOOP_RUNTIME_API_KEY", ""),
         )
-        assignments = (
+        assignments: tuple[LoopEventOutcomeAssignment | LoopOutcomeAssignment, ...] = (
             *client.list_event_outcome_assignments(market_scope=config.market_scope),
             *client.list_outcome_assignments(market_scope=config.market_scope),
         )

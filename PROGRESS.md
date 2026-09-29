@@ -2622,3 +2622,49 @@ Status: offline implementation and verification; no production activation.
   Production ticks now stamp stage completion with the actual finish time;
   injected test clocks remain deterministic. Existing historical rows are
   untouched.
+
+## M93 2026-09-29 Paper spread observation trial
+
+- The owner explicitly removed the hard bid/ask spread threshold for the Alpaca
+  Paper trial. The production second-wave rank already had no spread filter;
+  its older standalone evaluator no longer excludes by spread either. Current
+  H15 signal/reentry config defaults to no spread cap (strategy version v5), and
+  the Paper bracket builder no longer rejects an otherwise valid fresh SIP quote
+  solely for its spread. Each attempted Paper entry now persists its SIP bid,
+  ask, SIP feed, observed spread, signal/quote timestamps, order client ID, and
+  guard or submission outcome in the Paper SQLite journal. The order intent
+  atomically binds the exact quote, and broker-order binding marks only that
+  quote as submitted, including on recovery. The production
+  second-wave artifact does not contain an NBBO spread field. This is not a
+  second virtual account.
+- The ask-vs-signal 0.25% chase limit, valid/fresh SIP quote, 2% all-in stop,
+  portfolio risk, protected bracket, Paper-only broker and same-day flattening
+  remain unchanged. The native plan and Loop risk evidence carry `null` for the
+  removed spread cap; historical audits can still opt into a finite threshold.
+- Relevant suite: 172 passed. Full suite: 1390 passed in 102.11s with the
+  previous release-code identity temporarily moved aside and restored; that
+  identity correctly rejects modified source. Ruff passed; Mypy passed for
+  six changed source files. Offline Paper acceptance drills passed with zero
+  broker calls and zero external writes (receipt:
+  `runs/acceptance/paper-spread-trial-20260929-final.json`). The receipt still names
+  the pre-change HEAD because these edits are uncommitted, so it is not a
+  deployment attestation. No broker order, remote message, or scheduler write
+  was made. Source is not yet a reviewed immutable deployment.
+
+### Release-gate follow-up
+
+- Review found two quote-audit gaps: a mismatched quote could bind to an order
+  intent, and pre-submit rejection plus intent abort were separate transactions.
+  The binding now checks trade date, symbol and attempt; a proven no-POST
+  rejection atomically updates the quote, order and symbol state. Injected
+  SQLite failure tests verify that all three roll back together.
+- Selection retries now reuse the frozen wave artifact's generation timestamp
+  for the immutable VPS projection. Only near-miss and prior-wave losers are
+  projected per symbol; the source snapshot still retains the full eligible
+  universe. This bounds serial external records during the selection window.
+- The complete local CI Mypy command passes for 504 files without relaxing
+  strictness. The latest full pytest run passed 1395 tests; Ruff, Python 3.12
+  compilation and offline Paper drills passed. The offline drill made zero
+  broker calls and zero external writes. These are local checks, not proof of
+  a merged release or of a live SIP entry. The old scheduled release is still
+  active; no task switch or Paper order has been made for this change.

@@ -8,7 +8,7 @@ from operations.loop_integration.outbox import LoopOutbox, default_loop_outbox_p
 
 
 def test_default_outbox_path_uses_shared_environment_override(
-    tmp_path, monkeypatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("AI_QUANT_LOOP_OUTBOX_FILE", "runs/shared.sqlite3")
     assert default_loop_outbox_path(tmp_path) == tmp_path / "runs/shared.sqlite3"

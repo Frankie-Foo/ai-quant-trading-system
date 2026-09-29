@@ -1,6 +1,7 @@
 import json
 import sqlite3
 from datetime import UTC, date, datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from scripts.report_modern_paper_summary import (
@@ -94,7 +95,7 @@ def test_summary_keeps_first_wave_provisional_when_observation_pool_exists() -> 
 
 
 def test_observation_pool_is_displayed_only_when_explicitly_non_production(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     day_root = tmp_path / "2026-09-24"
     day_root.mkdir()
@@ -121,7 +122,9 @@ def test_observation_pool_is_displayed_only_when_explicitly_non_production(
     assert _observation_pool_snapshot(tmp_path, date(2026, 9, 24)) == ()
 
 
-def test_failure_summary_includes_retry_count_time_and_safe_child_error(tmp_path) -> None:
+def test_failure_summary_includes_retry_count_time_and_safe_child_error(
+    tmp_path: Path,
+) -> None:
     db = tmp_path / "funnel.sqlite3"
     with sqlite3.connect(db) as connection:
         connection.execute(

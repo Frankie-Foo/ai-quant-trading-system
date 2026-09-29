@@ -2,8 +2,9 @@ import json
 import sqlite3
 import subprocess
 import traceback
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, tzinfo
 from pathlib import Path
+from typing import Self
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -96,10 +97,12 @@ def test_scheduler_records_actual_stage_completion_time(
 
     class Clock(datetime):
         @classmethod
-        def now(cls, tz=None):
+        def now(cls, tz: tzinfo | None = None) -> Self:
             nonlocal reads
             reads += 1
-            return (started if reads == 1 else finished).astimezone(tz)
+            return cls.fromtimestamp(
+                (started if reads == 1 else finished).timestamp(), tz or UTC,
+            )
 
     monkeypatch.setattr(funnel, "datetime", Clock)
     ledger = tmp_path / "funnel.sqlite3"

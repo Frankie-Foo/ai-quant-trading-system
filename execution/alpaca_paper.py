@@ -12,7 +12,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 PLATFORM_API_VERSION = "v1"
-MAXIMUM_PAPER_ENTRY_SPREAD_OR_SLIPPAGE = Decimal("0.0025")
+MAXIMUM_PAPER_ENTRY_PRICE_DRIFT = Decimal("0.0025")
 
 
 class BrokerError(RuntimeError):
@@ -183,7 +183,7 @@ def build_protected_entry(
     structural_stop: Decimal,
     quote: FreshNbboQuote,
     observed_at_utc: datetime,
-    maximum_spread_or_slippage: Decimal = MAXIMUM_PAPER_ENTRY_SPREAD_OR_SLIPPAGE,
+    maximum_price_drift: Decimal = MAXIMUM_PAPER_ENTRY_PRICE_DRIFT,
     maximum_quote_age_seconds: Decimal = Decimal("2"),
     maximum_all_in_stop: Decimal = Decimal("0.02"),
     stop_slippage_reserve: Decimal = Decimal("0"),
@@ -202,25 +202,21 @@ def build_protected_entry(
     age_seconds = Decimal(str((observed_at_utc - quote.asof_utc).total_seconds()))
     if age_seconds < 0 or age_seconds > maximum_quote_age_seconds:
         raise ValueError("immediate NBBO is stale")
-    midpoint = (quote.bid + quote.ask) / Decimal(2)
-    spread = (quote.ask - quote.bid) / midpoint
-    spread_limit = f"{maximum_spread_or_slippage:.2%}"
-    if spread > maximum_spread_or_slippage:
-        raise ValueError(f"immediate NBBO spread exceeds {spread_limit}")
+    drift_limit = f"{maximum_price_drift:.2%}"
     if signal_reference <= 0 or quote.ask > signal_reference * (
-        Decimal(1) + maximum_spread_or_slippage
+        Decimal(1) + maximum_price_drift
     ):
-        raise ValueError(f"immediate NBBO slippage exceeds {spread_limit}")
-    if structural_stop <= 0 or structural_stop >= quote.ask:
-        raise ValueError("protective stop must be below the entry ask")
+        raise ValueError(f"immediate NBBO slippage exceeds {drift_limit}")
+    if structural_stop <= 0 or structural_stop >= quote.bid:
+        raise ValueError("protective stop must be below the current bid")
     all_in_stop = (quote.ask - structural_stop) / quote.ask + stop_slippage_reserve
     if all_in_stop > maximum_all_in_stop:
         raise ValueError("all-in stop exceeds 2%")
     limit_price = _price_text(quote.ask, rounding=ROUND_CEILING)
     stop_price = _price_text(structural_stop, rounding=ROUND_FLOOR)
     rounded_entry, rounded_stop = Decimal(limit_price), Decimal(stop_price)
-    if rounded_entry > signal_reference * (Decimal(1) + maximum_spread_or_slippage):
-        raise ValueError(f"rounded limit slippage exceeds {spread_limit}")
+    if rounded_entry > signal_reference * (Decimal(1) + maximum_price_drift):
+        raise ValueError(f"rounded limit slippage exceeds {drift_limit}")
     rounded_risk = (rounded_entry - rounded_stop) / rounded_entry + stop_slippage_reserve
     if rounded_stop <= 0 or rounded_risk > maximum_all_in_stop:
         raise ValueError("rounded all-in stop exceeds 2%")

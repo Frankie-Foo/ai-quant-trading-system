@@ -1,8 +1,10 @@
 """Regression checks for Paper entry quotes on a drifting Windows clock."""
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -17,7 +19,9 @@ from execution.alpaca_paper import FreshNbboQuote, build_protected_entry
 from scripts import monitor_modern_momentum_paper as paper
 
 
-def _client(handler):
+def _client(
+    handler: Callable[[httpx.Request], httpx.Response],
+) -> DirectAlpacaMarketDataClient:
     return DirectAlpacaMarketDataClient(
         key_id=SecretStr("test-key"),
         secret_key=SecretStr("test-secret"),
@@ -25,8 +29,10 @@ def _client(handler):
     )
 
 
-def test_latest_sip_quote_uses_server_clock_not_local_clock(monkeypatch):
-    def handler(request):
+def test_latest_sip_quote_uses_server_clock_not_local_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v2/stocks/LITE/quotes/latest"
         assert request.url.params["feed"] == "sip"
         return httpx.Response(
@@ -41,8 +47,8 @@ def test_latest_sip_quote_uses_server_clock_not_local_clock(monkeypatch):
     assert observation.observed_at_utc() >= datetime(2026, 9, 28, 13, 30, 1, tzinfo=UTC)
 
 
-def test_latest_sip_quote_rejects_missing_server_clock():
-    def handler(request):
+def test_latest_sip_quote_rejects_missing_server_clock() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             json={"quote": {"t": "2026-09-28T13:30:01Z", "bp": 100.0,
@@ -53,7 +59,7 @@ def test_latest_sip_quote_rejects_missing_server_clock():
         _client(handler).fetch_latest_quote("LITE")
 
 
-def test_paper_quote_path_calls_latest_endpoint(monkeypatch):
+def test_paper_quote_path_calls_latest_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     quote = SimpleNamespace(
         symbol="LITE", bid_price=100.0, ask_price=100.02,
         ts_utc=datetime(2026, 9, 28, 13, 30, 1, tzinfo=UTC), feed="sip",
@@ -65,7 +71,9 @@ def test_paper_quote_path_calls_latest_endpoint(monkeypatch):
     assert clock.observed_at_utc() == quote.ts_utc
 
 
-def test_slow_response_retries_one_latest_quote_before_blocking(monkeypatch):
+def test_slow_response_retries_one_latest_quote_before_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     timestamp = datetime(2026, 9, 28, 13, 30, 1, tzinfo=UTC)
     quote = SimpleNamespace(ts_utc=timestamp)
     first = SimpleNamespace(
@@ -78,26 +86,28 @@ def test_slow_response_retries_one_latest_quote_before_blocking(monkeypatch):
     )
 
     class FakeClient:
-        def __init__(self):
+        def __init__(self) -> None:
             self.calls = 0
             self.closed = False
 
-        def fetch_latest_quote(self, symbol):
+        def fetch_latest_quote(self, symbol: str) -> Any:
             assert symbol == "LITE"
             self.calls += 1
             return first if self.calls == 1 else second
 
-        def close(self):
+        def close(self) -> None:
             self.closed = True
 
     client = FakeClient()
     monkeypatch.setattr(alpaca, "_direct_client", lambda feed: client)
-    assert alpaca.latest_sip_quote("LITE") is second
+    assert alpaca.latest_sip_quote("LITE") is cast(Any, second)
     assert client.calls == 2 and client.closed
 
 
-def test_monotonic_elapsed_time_still_blocks_stale_entry(monkeypatch):
-    def handler(request):
+def test_monotonic_elapsed_time_still_blocks_stale_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             headers={"Date": "Mon, 28 Sep 2026 13:30:01 GMT"},

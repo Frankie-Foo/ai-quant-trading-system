@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -52,7 +53,7 @@ def test_alpaca_daily_backfill_rejects_bars_outside_requested_session() -> None:
         )
 
 
-def test_backfill_symbols_are_derived_read_only_from_pending_outcomes(tmp_path) -> None:
+def test_backfill_symbols_are_derived_read_only_from_pending_outcomes(tmp_path: Path) -> None:
     import json
     import sqlite3
 
