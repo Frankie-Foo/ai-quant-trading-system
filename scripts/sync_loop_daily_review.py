@@ -7,6 +7,8 @@ import os
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from kernel.config import load_config
 from kernel.strategy_policy import load_strategy_policy
 from operations.local_env import load_project_env, project_data_root
@@ -131,11 +133,20 @@ def resume_submitted_review(
     outbox: LoopOutbox, item: OutboxItem, client: LoopClient, *, now: datetime,
 ) -> dict[str, object]:
     """Resume frozen remote work without requiring today's policy or source files."""
-    envelope = QuantReviewEnvelope.model_validate(item.payload)
-    if envelope.payload_sha256 != item.payload_sha256:
-        raise ValueError("persisted Loop review content hash mismatch")
     receipt: dict[str, object] = {"event_id": item.event_id, "task_id": item.remote_task_id,
                                  "run_id": item.remote_run_id}
+    try:
+        envelope = QuantReviewEnvelope.model_validate(item.payload)
+        if envelope.payload_sha256 != item.payload_sha256:
+            raise ValueError("persisted Loop review content hash mismatch")
+    except (ValidationError, ValueError):
+        # Old local schemas must not make the trading scheduler look failed or
+        # be represented as a remote Loop rejection.  Preserve the original
+        # frozen bytes and remote IDs, then stop retrying this incompatible item.
+        outbox.mark_local_rejected(
+            item.event_id, error_code="LOCAL_REVIEW_PAYLOAD_INCOMPATIBLE"
+        )
+        return {**receipt, "status": "local_payload_incompatible"}
     if item.status in {"delivered", "remote_completed"}:
         return {**receipt, "status": "delivered"}
     if item.status == "remote_rejected":

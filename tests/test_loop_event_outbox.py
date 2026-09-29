@@ -67,15 +67,17 @@ def test_changed_evidence_cannot_race_second_daily_submission(tmp_path: Path) ->
         box.checkpoint("policy-B", "creating_task", None, None)
 
 
-@pytest.mark.parametrize("terminal", ["delivered", "remote_rejected"])
+@pytest.mark.parametrize("terminal", ["delivered", "remote_rejected", "local_rejected"])
 def test_late_poll_cannot_regress_terminal_state(tmp_path: Path, terminal: str) -> None:
     box = LoopOutbox(tmp_path / "loop.sqlite3")
     box.stage(event_id="test", event_type="daily_review", payload={}, payload_sha256="test")
     box.mark_remote_processing("test", remote_task_id="task", remote_run_id="run")
     if terminal == "delivered":
         box.mark_delivered("test", remote_task_id="task", remote_run_id="run")
-    else:
+    elif terminal == "remote_rejected":
         box.mark_remote_rejected("test", error_code="REMOTE_FAILED")
+    else:
+        box.mark_local_rejected("test", error_code="LOCAL_SCHEMA")
     box.mark_remote_processing("test", remote_task_id="task", remote_run_id="run")
     box.defer_retry("test", "LATE_RESPONSE", now=datetime.now(UTC))
     current = box.get("test")

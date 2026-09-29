@@ -884,6 +884,39 @@ def test_explicit_remote_rejection_is_terminal_in_review_outbox(tmp_path: Path) 
     assert persisted.last_error_code == "HTTP_422_TASK_INPUT_SCHEMA"
 
 
+def test_incompatible_frozen_payload_is_locally_rejected_without_remote_call(
+    tmp_path: Path,
+) -> None:
+    from scripts.sync_loop_daily_review import resume_submitted_review
+
+    box = LoopOutbox(tmp_path / "outbox.sqlite3")
+    box.stage(
+        event_id="legacy-review",
+        event_type="daily_review",
+        payload={"trading_date": "2026-09-22"},
+        payload_sha256="not-a-current-envelope",
+    )
+    box.mark_remote_processing(
+        "legacy-review", remote_task_id="task-legacy", remote_run_id="run-legacy"
+    )
+    item = box.get("legacy-review")
+    assert item is not None
+
+    class UnexpectedClient:
+        def __getattr__(self, name: str) -> object:
+            pytest.fail(f"remote client must not be called: {name}")
+
+    receipt = resume_submitted_review(
+        box, item, cast(LoopClient, UnexpectedClient()), now=NOW,
+    )
+    assert receipt["status"] == "local_payload_incompatible"
+    persisted = box.get("legacy-review")
+    assert persisted is not None
+    assert persisted.status == "local_rejected"
+    assert persisted.last_error_code == "LOCAL_REVIEW_PAYLOAD_INCOMPATIBLE"
+    assert not box.recoverable_reviews(now=NOW)
+
+
 def test_resume_daily_review_without_policy_binding_or_snapshot_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

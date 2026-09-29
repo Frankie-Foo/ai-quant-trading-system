@@ -137,7 +137,9 @@ class LoopOutbox:
             ).fetchone()
             if row is None:
                 raise KeyError(event_id)
-            if row[1] in {"delivered", "remote_completed", "remote_rejected"}:
+            if row[1] in {
+                "delivered", "remote_completed", "remote_rejected", "local_rejected",
+            }:
                 return
             count = int(row[0])
             due = now + timedelta(minutes=(1, 5, 15, 60)[min(count, 3)])
@@ -160,6 +162,12 @@ class LoopOutbox:
 
     def mark_remote_rejected(self, event_id: str, *, error_code: str) -> None:
         self._finish(event_id, status="remote_rejected", error_code=error_code,
+                     remote_task_id=None, remote_run_id=None)
+
+    def mark_local_rejected(self, event_id: str, *, error_code: str) -> None:
+        """Terminally isolate an unreadable frozen payload without mislabeling Loop."""
+
+        self._finish(event_id, status="local_rejected", error_code=error_code,
                      remote_task_id=None, remote_run_id=None)
 
     def checkpoint(
@@ -308,7 +316,9 @@ class LoopOutbox:
                 SET status=?, attempts=attempts+1, remote_task_id=COALESCE(?, remote_task_id),
                     remote_run_id=COALESCE(?, remote_run_id), failed_node=?, last_error_code=?,
                     updated_at_utc=? WHERE event_id=?
-                    AND status NOT IN ('delivered','remote_completed','remote_rejected')
+                    AND status NOT IN (
+                        'delivered','remote_completed','remote_rejected','local_rejected'
+                    )
                     AND (? IS NULL OR remote_task_id IS NULL OR remote_task_id=?)
                     AND (? IS NULL OR remote_run_id IS NULL OR remote_run_id=?)
                 """,
@@ -329,7 +339,9 @@ class LoopOutbox:
                 ).fetchone()
                 if row is None:
                     raise KeyError(event_id)
-                if row[0] not in {"delivered", "remote_completed", "remote_rejected"}:
+                if row[0] not in {
+                    "delivered", "remote_completed", "remote_rejected", "local_rejected",
+                }:
                     raise RuntimeError("Loop remote receipt identity changed")
 
     @staticmethod
