@@ -162,7 +162,10 @@ def _safe_process_error(line: str) -> str:
         return line
     child = re.fullmatch(
         r"RuntimeError: ((?:schedule|scripts|data_plane)\."
-        r"[A-Za-z0-9_.]+ failed with exit code [1-9][0-9]{0,2})",
+        r"[A-Za-z0-9_.]+ failed with exit code [1-9][0-9]{0,2}"
+        r"(?:: (?:alpaca_sip_authentication_failed|"
+        r"alpaca_sip_recent_data_access_denied|alpaca_sip_rate_limited|"
+        r"alpaca_sip_upstream_unavailable))?)",
         line,
     )
     if child:
@@ -206,7 +209,10 @@ def _prerequisite(stage: FunnelStage) -> FunnelStage | None:
 
 def _recovery_window(stage: FunnelStage, local_time: time) -> bool:
     start, end = {
-        FunnelStage.FIRST_WAVE: (time(9, 0), time(9, 30)),
+        # At 09:30 a missed premarket stage is still reproducible from the
+        # causal 09:30 cutoff.  Leave enough room to recover each predecessor
+        # before the 09:45 execution handoff closes.
+        FunnelStage.FIRST_WAVE: (time(9, 0), time(9, 45)),
         FunnelStage.SECOND_WAVE: (time(9, 30), time(9, 45)),
         FunnelStage.FINAL_RANK: (time(9, 35), time(9, 45)),
     }.get(stage, (time.max, time.min))
