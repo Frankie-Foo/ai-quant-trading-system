@@ -83,19 +83,24 @@ def test_explicit_snapshot_keeps_empty_pool_and_rejects_tampering(tmp_path: Path
 
 
 @pytest.mark.parametrize("no_events", [False, True])
+@pytest.mark.parametrize("cik_count", [1, 128, 129])
 def test_wave_news_cli_discovers_new_symbol_without_overwriting_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str], no_events: bool,
+    capsys: pytest.CaptureFixture[str], no_events: bool, cik_count: int,
 ) -> None:
     day = date(2026, 9, 22)
     cutoff = datetime(2026, 9, 22, 12, 30, tzinfo=UTC)
+    symbols = ["NEW", "LATE", *(f"EXTRA{index}" for index in range(cik_count - 1))]
     universe = pl.DataFrame({
-        "symbol": ["NEW", "LATE"], "asof_date": [date(2026, 9, 21)] * 2,
-        "precheck_pass": [True, True],
+        "symbol": symbols, "asof_date": [date(2026, 9, 21)] * len(symbols),
+        "precheck_pass": [True] * len(symbols),
     })
+    reference = universe.with_columns(
+        pl.Series("cik", ["1", "1", *(str(index + 2) for index in range(cik_count - 1))])
+    )
     for source, frame in (
         ("kernel.universe.daily_precheck", universe),
-        ("massive.reference_tickers.cs", universe.with_columns(pl.lit("1").alias("cik"))),
+        ("massive.reference_tickers.cs", reference),
         ("kernel.catalysts.overnight_candidates", pl.DataFrame({
             "symbol": ["OLD"], "session_date": [day],
         })),
@@ -124,20 +129,47 @@ def test_wave_news_cli_discovers_new_symbol_without_overwriting_lock(
     monkeypatch.setenv("DESKTOP_MARKET_DATA_PROVIDER", "alpaca_direct")
     monkeypatch.setattr(catalyst_cli, "fetch_alpaca_news_direct", lambda *a, **k: news)
     monkeypatch.setattr(catalyst_cli, "fetch_massive_news", lambda *a, **k: empty_catalyst_frame())
-    monkeypatch.setattr(catalyst_cli, "fetch_live_candidate_filings",
-                        lambda *a, **k: empty_catalyst_frame())
+    def forbidden_live_sec(*args: object, **kwargs: object) -> pl.DataFrame:
+        raise AssertionError("the selection wave must not start per-CIK SEC requests")
+
+    monkeypatch.setattr(
+        catalyst_cli, "fetch_live_candidate_filings", forbidden_live_sec, raising=False,
+    )
     monkeypatch.setattr(sys, "argv", [
         "news", "--trade-date", day.isoformat(), "--asof", cutoff.isoformat(),
         "--data-root", str(tmp_path), "--wave",
     ])
     catalyst_cli.main()
     receipt = json.loads(capsys.readouterr().out)
+    assert receipt["sec_status"] == "not_scanned_live"
+    assert receipt["sec_cik_count"] == cik_count
     frame, snapshot = snapshot_queries.load_snapshot_by_id(
         tmp_path, receipt["candidate_dataset_id"], source="kernel.catalysts.wave_candidates",
     )
     assert frame["symbol"].to_list() == ([] if no_events else ["NEW"])
     assert lock_path.read_bytes() == lock_before
     assert any(c.name == "wave_context" and c.observed == day.isoformat() for c in snapshot.checks)
+    assert any(
+        c.name == "sec_coverage" and c.observed == "not_scanned_live" and not c.passed
+        for c in snapshot.checks
+    )
+    sec_path = next(
+        (tmp_path / "accepted").glob("sec.submissions.candidate_filings-*/data.parquet")
+    )
+    _, sec_snapshot = snapshot_queries.load_snapshot_by_id(
+        tmp_path, sec_path.parent.name, source="sec.submissions.candidate_filings",
+    )
+    assert any(
+        c.name == "sec_coverage" and c.observed == "not_scanned_live" and not c.passed
+        for c in sec_snapshot.checks
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "news", "--trade-date", day.isoformat(), "--asof", cutoff.isoformat(),
+        "--data-root", str(tmp_path), "--wave", "--reuse-provider-snapshots",
+    ])
+    catalyst_cli.main()
+    reused = json.loads(capsys.readouterr().out)
+    assert reused["sec_status"] == "not_scanned_live"
     loaded = load_premarket_pool(
         tmp_path, day, pool="catalyst", snapshot_id=snapshot.dataset_id,
         decision_cutoff=cutoff,

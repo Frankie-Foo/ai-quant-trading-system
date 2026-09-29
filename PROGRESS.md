@@ -2668,3 +2668,30 @@ Status: offline implementation and verification; no production activation.
   broker calls and zero external writes. These are local checks, not proof of
   a merged release or of a live SIP entry. The old scheduled release is still
   active; no task switch or Paper order has been made for this change.
+
+## M94 2026-09-29 bounded SEC scan before automatic funnel
+
+- Today's accepted prior-session universe and precheck were prepared without
+  placing orders. A direct first-wave catalyst smoke took approximately 15
+  minutes: it attempted live SEC filings for 2,569 CIKs, far longer than the
+  final ranking window. The other provider rows were Alpaca 69 and Massive 58.
+- A red regression test reproduced the unbounded SEC call. Code review found
+  that even 1-128 CIKs could overrun the window, so all live ranked waves now
+  skip that optional per-CIK source and record `sec_status=not_scanned_live`
+  in both immutable provider and candidate checks. Alpaca and
+  Massive news still participate. The same read-only smoke then finished in
+  7.9 seconds with no failed checks in the initial >128 CIK version; it returned
+  31 candidates, Alpaca 72, Massive 60, SEC 0. The revised all-live-wave version
+  finished the same read-only command in 10.1 seconds at 08:44 UTC: 34 candidate
+  symbols, Alpaca 77, Massive 60, SEC 0, `failed_checks=[]`, candidate dataset
+  `kernel.catalysts.wave_candidates-20260929T084456Z-c85c3244c350` in
+  `D:\cdoeX-work\runtime\ai-quant\data\accepted`. Command:
+  `python -m scripts.build_catalyst_snapshot --trade-date 2026-09-29
+  --asof 2026-09-29T08:44:00+00:00 --wave --data-root
+  D:\cdoeX-work\runtime\ai-quant\data` with machine-owned env loaded. SEC-only
+  candidates may be missed, so this is a bounded
+  availability tradeoff, not full catalyst coverage. No Paper order or remote
+  message was sent during these tests.
+- The user explicitly removed the previous pre-21:00 Beijing SIP restriction;
+  runtime data use may start with the 20:30 Beijing first wave. This does not
+  waive freshness, Paper-only, risk, or publication gates.
