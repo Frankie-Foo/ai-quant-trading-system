@@ -2695,3 +2695,19 @@ Status: offline implementation and verification; no production activation.
 - The user explicitly removed the previous pre-21:00 Beijing SIP restriction;
   runtime data use may start with the 20:30 Beijing first wave. This does not
   waive freshness, Paper-only, risk, or publication gates.
+
+## M95 2026-09-29 PDCA ticker-collision repair
+
+- The 2026-09-28 postmarket review reached structured PDCA but failed because
+  its generic phrase `opportunity pool` matched the real symbol `POOL` in the
+  day's selection universe. The ticker-anonymity guard was kept unchanged;
+  only that phrase became `candidate set`.
+- A new regression test failed with the old phrase and passed after the change.
+  The agent gateway, postmarket and Loop integration suites passed 99 tests.
+  An isolated copy of the agent-facts database plus the accepted 2026-09-28
+  snapshot completed the full deterministic PDCA step with two selection
+  lessons, no orders and no production writes. This does not claim the live
+  postmarket scheduler has been rerun.
+- Source release identity was updated for the changed Python fingerprint;
+  the old identity correctly caused 32 Loop tests to fail closed before the
+  update. No risk or broker logic changed.
