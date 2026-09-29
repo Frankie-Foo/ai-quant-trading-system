@@ -48,6 +48,10 @@ The installer never bootstraps a replacement active policy. Before running it:
 Add `-ArmPaper -PaperSmokeMaxNotional 200000` only after owner unfreeze. The
 installer creates the one-minute `Trading System V2 - AI Quant Funnel` task and
 postmarket review, and disables the old premarket and Paper tasks.
+The four owned tasks launch through the approved environment's `pythonw.exe` and
+`scripts/run_hidden_task.py`. That launcher creates PowerShell with
+`CREATE_NO_WINDOW`, forwards its exit code to Task Scheduler, and appends output
+to `runs/<runner>.launcher.log`; `pythonw.exe` must exist next to `python.exe`.
 `schedule.modern_funnel` computes ET/DST and XNYS sessions; Windows local time does not
 define trading windows. Secrets remain in the machine-owned environment file and are
 not copied into a worktree or Task Scheduler arguments.
