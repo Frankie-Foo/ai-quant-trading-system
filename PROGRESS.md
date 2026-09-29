@@ -2710,4 +2710,5 @@ Status: offline implementation and verification; no production activation.
   postmarket scheduler has been rerun.
 - Source release identity was updated for the changed Python fingerprint;
   the old identity correctly caused 32 Loop tests to fail closed before the
-  update. No risk or broker logic changed.
+  update. The subsequent full pytest suite passed 1,401 tests in 149.91s;
+  Ruff passed for the changed source and test. No risk or broker logic changed.
