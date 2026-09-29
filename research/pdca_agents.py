@@ -49,7 +49,7 @@ def _selection_memory_narratives(root_cause: str) -> tuple[str, str, str]:
         "selected": (
             "The captured factor profile should remain eligible when point in time evidence "
             "aligns with the selection gate.",
-            "The case entered the pre session opportunity pool and the completed session "
+            "The case entered the pre session candidate set and the completed session "
             "confirmed the opportunity label.",
             "The selection logic was supported for this factor profile; retain the observation "
             "until repeated across independent sessions.",
