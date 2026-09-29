@@ -26,7 +26,6 @@ from data_plane.providers.catalyst_news import (
 )
 from data_plane.providers.sec_filings import (
     fetch_candidate_filings,
-    fetch_live_candidate_filings,
 )
 from data_plane.storage import persist_snapshot
 from kernel.catalysts import (
@@ -39,15 +38,27 @@ from operations.local_env import load_project_env
 ROOT = Path(__file__).resolve().parents[1]
 BEIJING = ZoneInfo("Asia/Shanghai")
 NEW_YORK = ZoneInfo("America/New_York")
-
-
 def _optional_sec_filings(
-    fetcher: Callable[..., pl.DataFrame], *args: object, **kwargs: object
+    fetcher: Callable[..., pl.DataFrame], *args: object, **kwargs: object,
 ) -> tuple[pl.DataFrame, bool]:
     try:
         return fetcher(*args, **kwargs), True
     except DownloadError:
         return empty_catalyst_frame(), False
+
+
+def _sec_coverage_checks(status: str, cik_count: int) -> tuple[DataQualityCheck, ...]:
+    provenance = "scripts.build_catalyst_snapshot.sec_coverage.v1"
+    return (
+        _check(
+            "sec_coverage", QualitySeverity.WARNING, status == "available",
+            status, "available", provenance,
+        ),
+        _check(
+            "sec_cik_count", QualitySeverity.INFO, True,
+            cik_count, "eligible CIK scope size", provenance,
+        ),
+    )
 
 
 def _parse_date(value: str) -> date:
@@ -162,6 +173,7 @@ def _store_provider(
     end_utc: datetime,
     require_non_empty: bool,
     parent_snapshot_ids: tuple[str, ...] = (),
+    extra_checks: tuple[DataQualityCheck, ...] = (),
 ) -> DatasetSnapshot:
     checks = audit_catalysts(
         frame,
@@ -169,7 +181,7 @@ def _store_provider(
         start_utc=start_utc,
         end_utc=end_utc,
         require_non_empty=require_non_empty,
-    )
+    ) + extra_checks
     snapshot, _ = persist_snapshot(
         frame,
         root=data_root,
@@ -409,7 +421,7 @@ def main() -> None:
         args.data_root, previous_session=previous_session, universe=candidate_universe
     )
 
-    sec_available = True
+    sec_status = "unknown"
     if args.reuse_provider_snapshots:
         alpaca, alpaca_snapshot = _load_provider_snapshot(
             args.data_root,
@@ -428,6 +440,10 @@ def main() -> None:
             source="sec.submissions.candidate_filings",
             start_utc=start_utc,
             end_utc=end_utc,
+        )
+        sec_status = next(
+            (check.observed for check in sec_snapshot.checks if check.name == "sec_coverage"),
+            "unknown",
         )
     else:
         market_provider = os.getenv("DESKTOP_MARKET_DATA_PROVIDER", "").strip().lower()
@@ -455,12 +471,10 @@ def main() -> None:
             start_utc, end_utc, pace_seconds=args.massive_pace_seconds
         )
         if verification_mode or args.wave:
-            sec, sec_available = _optional_sec_filings(
-                fetch_live_candidate_filings,
-                cik_to_symbols=cik_map,
-                start_utc=start_utc,
-                end_utc=end_utc,
-            )
+            # Per-CIK SEC requests have no wave-level deadline and can overrun
+            # the selection window. Keep this source out of live ranked waves.
+            sec = empty_catalyst_frame()
+            sec_status = "not_scanned_live"
         else:
             sec, sec_available = _optional_sec_filings(
                 fetch_candidate_filings,
@@ -469,6 +483,7 @@ def main() -> None:
                 start_utc=start_utc,
                 end_utc=end_utc,
             )
+            sec_status = "available" if sec_available else "unavailable"
 
         alpaca_snapshot = _store_provider(
             alpaca,
@@ -497,6 +512,7 @@ def main() -> None:
             end_utc=end_utc,
             require_non_empty=False,
             parent_snapshot_ids=tuple(sec_parents),
+            extra_checks=_sec_coverage_checks(sec_status, len(cik_map)),
         )
 
     raw = pl.concat((alpaca, massive, sec))
@@ -534,6 +550,7 @@ def main() -> None:
     candidate_checks = _candidate_checks(
         candidates, target_date=args.trade_date, universe=candidate_universe
     )
+    candidate_checks += _sec_coverage_checks(sec_status, len(cik_map))
     candidate_source = (
         "kernel.catalysts.locked_verification_candidates"
         if verification_mode
@@ -575,7 +592,8 @@ def main() -> None:
             "massive": massive.height,
             "sec": sec.height,
         },
-        "sec_status": "available" if sec_available else "unavailable",
+        "sec_status": sec_status,
+        "sec_cik_count": len(cik_map),
         "prepared_rows": prepared.height,
         "eligible_overnight_events": overnight.height,
         "exclusions": _counts(

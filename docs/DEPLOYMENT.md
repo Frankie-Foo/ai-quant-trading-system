@@ -55,10 +55,17 @@ not copied into a worktree or Task Scheduler arguments.
 The funnel uses the exchange clock: first wave 08:30 ET, second wave 09:00 ET,
 final rank 09:30 ET, and opening confirmation 09:35 ET. There is no Beijing-time
 gate in the funnel scheduler, so daylight-saving changes cannot shift a wave into
-the next stage. Gary SIP credentials remain subject to their own explicit
-authorization window; an unavailable credential or pre-authorized data snapshot
-must fail closed instead of shifting the funnel clock. XNYS holidays do not run
+the next stage. The owner removed the pre-21:00 Beijing Gary SIP restriction
+on 2026-09-29; an unavailable credential or stale data snapshot must still
+fail closed instead of shifting the funnel clock. XNYS holidays do not run
 selection or place orders.
+
+Live ranked waves do not call SEC's per-CIK submissions endpoint because that
+unbounded optional scan can outlast a selection window. Alpaca and Massive
+news remain eligible; SEC-only catalysts can be missed. The immutable SEC
+provider and candidate manifests record `sec_coverage=not_scanned_live` and
+the eligible CIK count. A wave may succeed with incomplete SEC coverage;
+neither the absence nor an empty SEC frame means the source was checked.
 
 The installation does not authorize Paper writes. Arming still requires all of:
 
